@@ -61,6 +61,30 @@ func TestCreateRefusesWithoutSupport(t *testing.T) {
 	}
 }
 
+// TestNonLinuxReportsUnsupported pins the behaviour on the platform this project
+// is developed on, so a Windows developer sees a clear reason rather than a
+// nil-pointer.
+//
+// It lives here rather than in netns_linux_test.go, where it used to be. A test
+// about non-Linux platforms, behind a //go:build linux tag, can only ever run
+// on Linux — where it immediately skips. It was a test that had never run and
+// never would, which is worse than no test: it read as coverage of the
+// non-Linux path and was nothing of the kind.
+func TestNonLinuxReportsUnsupported(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("this test is about non-Linux platforms")
+	}
+
+	if err := netns.Available(); err == nil {
+		t.Error("Available must report that namespaces are unsupported off Linux")
+	}
+
+	// Create must refuse rather than attempt something.
+	if _, err := netns.Create("thn-should-not-exist"); err == nil {
+		t.Error("Create must fail off Linux")
+	}
+}
+
 // TestPackageImportsNoHostState is a structural check, and the reason the
 // package is small.
 //

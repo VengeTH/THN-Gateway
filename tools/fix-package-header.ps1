@@ -1,12 +1,19 @@
 #!/usr/bin/env pwsh
 # Removes a duplicated leading `package <name>` line from Go source files.
 #
-# The file writer occasionally emits the package clause twice when a file
-# begins with a long doc comment, producing:
+# The file writer occasionally emits the package clause before the doc comment
+# that belongs to it, producing:
+#
 #     package foo
 #     // Package foo does ...
 #     package foo
+#
 # which fails to parse with "imports must appear before other declarations".
+#
+# Only the stray leading clause is removed. An earlier version dropped
+# everything before the last clause, which also removed the package
+# documentation - a silent loss that is particularly costly in this codebase,
+# where the doc comment is where the design rationale lives.
 #
 # Usage:  ./tools/fix-package-header.ps1 [-WhatIf]
 param([switch]$WhatIf)
@@ -27,17 +34,23 @@ Get-ChildItem -Recurse -Filter *.go | ForEach-Object {
         if ($lines[$i] -match $pkgLine) { $idx += $i }
     }
 
-    # The bug is specifically: package clause at line 0, then more content,
-    # then a second package clause. Drop everything before the last one.
+    # The bug is a package clause at line 0 followed by more content and then
+    # a second package clause. Removing line 0 alone is sufficient, and keeps
+    # the doc comment that follows it.
     if ($idx.Count -ge 2 -and $idx[0] -eq 0) {
-        $keep = $idx[-1]
-        $new = $lines[$keep..($lines.Length - 1)]
+        $drop = 1
+        # Also drop the blank lines the stray clause left behind, so the file
+        # still starts with its documentation.
+        while ($drop -lt $lines.Length -and $lines[$drop].Trim() -eq '') { $drop++ }
+
+        $new = $lines[$drop..($lines.Length - 1)]
+
         if ($WhatIf) {
-            Write-Host "WOULD FIX: $path (dropping $($keep) leading line(s))"
+            Write-Host "WOULD FIX: $path (dropping $drop leading line(s))"
         } else {
             [System.IO.File]::WriteAllLines($path, $new)
             $fixed += $path
-            Write-Host "FIXED: $path (dropped $keep leading line(s))"
+            Write-Host "FIXED: $path (dropped $drop leading line(s))"
         }
     }
 }

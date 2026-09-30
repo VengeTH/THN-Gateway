@@ -124,6 +124,25 @@ func (e *Env) printJSON(v any) error {
 	return enc.Encode(v)
 }
 
+// listed returns a slice that marshals as `[]` rather than `null`.
+//
+// A nil slice in Go becomes JSON null, which is the one value that is not a
+// list and cannot be treated as one. A consumer iterating the field, or asking
+// it for its length — which is most consumers, in most languages — has to
+// handle null separately from the empty case, and the two mean the same thing
+// here: there was nothing to report.
+//
+// It is worth fixing here rather than at each call site, because the field in
+// question is empty exactly when the answer is good news. `firing` is null when
+// no rule is firing. A response whose reassuring field is the one that breaks
+// the reader is a response that will be misread as a fault.
+func listed[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 // printf writes formatted output to stdout.
 func (e *Env) printf(format string, args ...any) {
 	fmt.Fprintf(e.Stdout, format, args...)

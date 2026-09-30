@@ -95,6 +95,15 @@ const (
 const (
 	LabelInterface = "interface"
 	LabelReason    = "reason"
+
+	// LabelSource names the subsystem a signal came from. Correlation groups
+	// on it, so it is set on every derived signal rather than only on the ones
+	// a caller happens to remember.
+	//
+	// It duplicates Signal.Source deliberately: Source is a field and this is
+	// a label, and correlation groups on labels because that is what survives
+	// being carried through an instance and back out again.
+	LabelSource = "source"
 )
 
 // Derive projects an observed host into signals.
@@ -138,8 +147,14 @@ func Derive(obs diff.Observed, at time.Time) *Set {
 		return Number(float64(n))
 	}
 
-	add(NetInspectSupported, SourceNetwork, boolOf(supported),
-		inspectDetail(supported))
+	// network.inspect.supported is the one signal that is always known, even
+	// on a host that could not be inspected.
+	//
+	// It records the failure itself. Routing it through boolOf would make the
+	// record of the failure unknown whenever there was one, which is precisely
+	// backwards: it is the signal that tells a rule, and an operator, that
+	// everything else is unreadable.
+	add(NetInspectSupported, SourceNetwork, Bool(supported), inspectDetail(supported))
 
 	add(NetWANPresent, SourceNetwork, boolOf(obs.WANPresent),
 		fmt.Sprintf("the configured WAN interface %q was %s", orNone(obs.WANName), presentLabel(obs.WANPresent)))
@@ -205,6 +220,7 @@ func TakeSnapshot(snap *network.Snapshot, at time.Time) *Set {
 	add := func(name, source string, v Value, detail string) {
 		sigs = append(sigs, Signal{
 			Name: name, Source: source, Value: v, At: at, Detail: detail,
+			Labels: map[string]string{LabelSource: source},
 		})
 	}
 
@@ -274,12 +290,21 @@ func TakeSnapshot(snap *network.Snapshot, at time.Time) *Set {
 			"host inspection is not supported on this platform")
 	}
 
-	if fw, ok := snap.IPForwardingEnabled(); ok && snap.Supported {
+	// The forwarding sysctl is read directly rather than through
+	// Snapshot.IPForwardingEnabled, which returns a bare bool and therefore
+	// cannot distinguish "the kernel says 0" from "the key was not readable".
+	// That distinction is the whole point of this package, so it is not taken
+	// through a helper that has already thrown it away.
+	if raw, ok := snap.SysctlValue("net.ipv4.ip_forward"); ok && snap.Supported {
+		fw := raw == "1"
 		add(NetIPv4Forwarding, SourceNetwork, Bool(fw),
-			fmt.Sprintf("the kernel reports net.ipv4.ip_forward = %t", fw))
+			fmt.Sprintf("the kernel reports net.ipv4.ip_forward = %s", orNone(raw)))
 	} else {
-		add(NetIPv4Forwarding, SourceNetwork, Unknown(KindBool),
-			"the forwarding sysctl could not be read")
+		detail := "the forwarding sysctl could not be read"
+		if !snap.Supported {
+			detail = "host inspection is not supported on this platform"
+		}
+		add(NetIPv4Forwarding, SourceNetwork, Unknown(KindBool), detail)
 	}
 
 	// The diagnostics network.Snapshot collected are projected as signals in
@@ -323,9 +348,14 @@ func DeriveDHCP(sum dhcp.Summary, collectedAt, now time.Time) []Signal {
 
 	age := now.Sub(collectedAt)
 	// A negative age means the collection is stamped in the future, which is
-	// a clock problem rather than a fresh collection. Reporting a negative
-	// age would let a rule compute a negative rate.
+	// a clock problem rather than a fresh collection. It is clamped to zero:
+	// the detail explains the clock, but a rule that reads this value would
+	// otherwise compute a negative rate from it, and a rule that fires on
+	// "rate is negative" would fire on every badly-clocked host.
 	stale := age < 0
+	if stale {
+		age = 0
+	}
 
 	return []Signal{
 		{
@@ -518,9 +548,22 @@ func DeriveDrift(r diff.Result, at time.Time) []Signal {
 	}
 
 	convergedDetail := "the host matches the intended configuration"
-	if !r.Converged {
+	switch {
+	case !r.Converged:
 		convergedDetail = fmt.Sprintf("%d pending, %d drifted, %d blocked changes",
 			r.PendingCount, r.DriftCount, r.BlockedCount)
+	case r.PendingCount > 0:
+		// Converged with work still pending means "nothing to do", not
+		// "verified correct". diff reports it that way because an
+		// unobservable host produces exactly this state, and there is
+		// genuinely nothing for THN to do about it.
+		//
+		// The detail has to say so. The value alone reads as "everything is
+		// fine", and an operator who read only the value would conclude a
+		// gateway that THN has never successfully inspected was verified.
+		convergedDetail = fmt.Sprintf(
+			"%d changes are pending because the host could not be observed; "+
+				"nothing is known to be wrong, and nothing has been verified either", r.PendingCount)
 	}
 
 	return []Signal{
@@ -533,7 +576,7 @@ func DeriveDrift(r diff.Result, at time.Time) []Signal {
 			Detail: convergedDetail,
 		},
 		{
-			Name: DriftHighestRisk, Source: SourceDrift, Value: string(r.HighestRisk), At: at,
+			Name: DriftHighestRisk, Source: SourceDrift, Value: String(string(r.HighestRisk)), At: at,
 			Detail: fmt.Sprintf("the highest risk among the differences is %s", r.HighestRisk),
 		},
 	}

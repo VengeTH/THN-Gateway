@@ -80,10 +80,10 @@ func (a Algorithm) String() string { return string(a) }
 // Bandwidth is a configured shaping rate.
 type Bandwidth struct {
 	// DownloadKbps is the downstream rate in kilobits per second.
-	DownloadKbps int `json:"download_kbps"`
+	DownloadKbps int `json:"download_kbps" yaml:"download_kbps"`
 
 	// UploadKbps is the upstream rate in kilobits per second.
-	UploadKbps int `json:"upload_kbps"`
+	UploadKbps int `json:"upload_kbps" yaml:"upload_kbps"`
 
 	// OverheadPercent compensates for protocol and Ethernet framing
 	// overhead, which is typically 8 to 12 percent on a wired link.
@@ -92,7 +92,7 @@ type Bandwidth struct {
 	// rate without accounting for overhead means the payload rate is
 	// slightly under the real capacity, so shaping never fills the link and
 	// under-utilises it.
-	OverheadPercent int `json:"overhead_percent,omitempty"`
+	OverheadPercent int `json:"overhead_percent,omitempty" yaml:"overhead_percent,omitempty"`
 }
 
 // Effective returns the rate after overhead compensation.
@@ -141,13 +141,13 @@ const DefaultOverheadPercent = 10
 // Limits are CAKE's default queue depths, exposed so they can be tuned.
 type Limits struct {
 	// TargetMS is the target standing queue delay in milliseconds.
-	TargetMS int `json:"target_ms"`
+	TargetMS int `json:"target_ms" yaml:"target_ms"`
 
 	// IntervalMS is the moving window over which the delay is measured.
-	IntervalMS int `json:"interval_ms"`
+	IntervalMS int `json:"interval_ms" yaml:"interval_ms"`
 
 	// Quantum is the byte quantum used when the delay estimate is unknown.
-	Quantum int `json:"quantum"`
+	Quantum int `json:"quantum" yaml:"quantum"`
 }
 
 // DefaultLimits returns CAKE's default queue depths.

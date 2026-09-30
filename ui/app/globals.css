@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    @apply bg-ink-950 text-ink-100 antialiased;
+  }
+
+  body {
+    @apply text-sm;
+  }
+
+  /*
+   * A console is read, not scrolled past, and the things worth reading are
+   * signal names, command lines and policy explanations. A monospace default
+   * for code-like content is worth the loss of rhythm elsewhere.
+   */
+  code,
+  kbd,
+  pre {
+    @apply font-mono;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-ink-800 bg-ink-900;
+  }
+
+  .panel-header {
+    @apply flex items-baseline justify-between gap-4 border-b border-ink-800 px-4 py-3;
+  }
+
+  .panel-title {
+    @apply text-sm font-semibold text-ink-100;
+  }
+
+  .panel-body {
+    @apply px-4 py-3;
+  }
+
+  /*
+   * Rows are the console's main unit of information. The hover is deliberately
+   * faint: it exists to follow a row while scanning, not to invite clicking,
+   * because nothing here is a button.
+   */
+  .row {
+    @apply grid items-baseline gap-x-4 border-b border-ink-850 px-4 py-2 last:border-b-0;
+  }
+
+  .row:hover {
+    @apply bg-ink-850/40;
+  }
+
+  .label {
+    @apply text-2xs font-medium uppercase tracking-wider text-ink-400;
+  }
+
+  .value {
+    @apply font-mono text-xs text-ink-100;
+  }
+
+  .muted {
+    @apply text-ink-400;
+  }
+
+  /*
+   * The reason a state is what it is. THN's own words, set apart from the
+   * value, because "down" is the conclusion and "eth0 is present but the
+   * carrier reports it down" is the thing an operator can act on.
+   */
+  .because {
+    @apply text-2xs text-ink-400;
+  }
+}
+
+/*
+ * A preformatted block for rendered output — rulesets, dnsmasq configuration,
+ * tc commands. These are the artefacts an operator copies, so they must be
+ * selectable and must not wrap: a wrapped command line cannot be copied.
+ */
+.pre-block {
+  @apply overflow-x-auto whitespace-pre rounded-md border border-ink-800 bg-ink-950 p-3 font-mono text-2xs leading-relaxed text-ink-200;
+}

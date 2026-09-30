@@ -14,7 +14,6 @@ package netns_test
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -328,24 +327,6 @@ func TestAvailableReportsWhyItCannot(t *testing.T) {
 		t.Fatal("Available returned an empty error; an operator would learn nothing")
 	}
 	t.Logf("unavailable: %v", err)
-}
-
-// TestNonLinuxReportsUnsupported pins the behaviour on the platform this
-// project is developed on, so a Windows developer sees a clear reason rather
-// than a nil-pointer.
-func TestNonLinuxReportsUnsupported(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("this test is about non-Linux platforms")
-	}
-
-	if err := netns.Available(); err == nil {
-		t.Error("Available must report that namespaces are unsupported off Linux")
-	}
-
-	// Create must refuse rather than attempt something.
-	if _, err := netns.Create("thn-should-not-exist"); err == nil {
-		t.Error("Create must fail off Linux")
-	}
 }
 
 // TestCloseIsIdempotent: cleanup runs in every exit path, including failures,

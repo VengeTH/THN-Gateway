@@ -1,0 +1,382 @@
+# Continuous integration for THN Gateway.
+#
+# # Why two runners, in this order
+#
+# THN is a Linux gateway tool developed on a Windows workstation against a
+# Linux device that is not present. The two platforms are not
+# interchangeable, and the differences are where the bugs are:
+#
+#   - internal/netns, internal/network/platform_linux.go and
+#     internal/cli/netns_linux_test.go are behind //go:build linux. The Windows
+#     runner never compiles them, so a change that breaks them passes the
+#     Windows build cleanly. The Linux runner is the only thing standing
+#     between that and a gateway.
+#   - The netns tests need CAP_SYS_ADMIN. A GitHub-hosted Linux runner grants
+#     that only through sudo, so they are run under it explicitly rather than
+#     being left to skip. A skipped test that always skips is not coverage.
+#
+# Linux runs first and Windows depends on it, so a change that breaks the
+# target platform does not also spend a Windows runner before anyone finds out.
+#
+# To run them in parallel instead, delete `needs: linux` from the windows job.
+# It is a one-line change and the only reason for the dependency is to avoid
+# spending the second runner on a change the first has already rejected.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run for the same ref. Without this, every
+# push to a branch with several commits in flight pays for all of them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The build needs to read the repository and nothing else. This is the default
+# but stating it means a future addition of a write scope is a visible diff.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Linux: the target platform. Runs first.
+  # ---------------------------------------------------------------------
+  linux:
+    name: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Pinned to the module's own declaration rather than to a version
+          # repeated here. A hardcoded version in this file and a different
+          # one in go.mod is a mismatch nobody notices until the build breaks
+          # in whichever direction is inconvenient.
+          go-version-file: go.mod
+          cache: true
+
+      # Formatting is checked separately from the build rather than folded into
+      # it, because `gofmt -l` succeeding and the build succeeding are
+      # different claims and a single combined step makes a failure ambiguous.
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            echo
+            echo "Run 'gofmt -w .' and commit the result."
+            exit 1
+          fi
+          echo "all files are gofmt-clean"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -trimpath -o /tmp/thn ./cmd/thn
+
+      # The safety invariant is THN's central property: it can read the host and
+      # it cannot change it. It gets its own step, named, so that it is
+      # visible in the run summary rather than buried in a green test log.
+      #
+      # TestRepoContainsNoUnguardedExec is the one that matters. It walks the
+      # repository looking for any os/exec call outside internal/guard, and
+      # fails on one. Everything else here is supporting evidence.
+      - name: Safety invariant
+        run: |
+          go test -count=1 -v \
+            -run 'TestRepoContainsNoUnguardedExec|TestMutatingInvocationsDenied|TestNoMutatingEntryInAllowlist|TestExecExemptionsAreJustified|TestPermittedReadOnlyInvocations' \
+            ./internal/guard/
+
+      # The gateway gate: the cross-subsystem integration tests in
+      # internal/cli. This is the check that a gateway's parts agree with each
+      # other, and it is the reason the gate exists.
+      - name: Gateway gate
+        run: |
+          go test -count=1 -v -run 'TestGate' ./internal/cli/
+
+      - name: Test
+        # -race on Linux only. It needs cgo and a C toolchain, which ubuntu
+        # runners have and Windows runners would need configured; the cost of
+        # that fragility is not worth paying for a project whose concurrency is
+        # almost entirely in the store and the registry.
+        #
+        # The netns tests are excluded here on purpose and run in their own
+        # step below. They need root, and running the whole suite as root would
+        # weaken the value of every other test in it.
+        run: go test -count=1 -race ./...
+
+      # The one part of the suite that cannot be verified anywhere else.
+      #
+      # These tests attach CAKE and fq_codel to a dummy interface inside a
+      # network namespace and read the result back from the kernel. That is the
+      # only way to know that the commands `thn qos render` produces are
+      # accepted by a real kernel, rather than merely being text that looks
+      # right. There is no Windows equivalent and no substitute.
+      #
+      # sudo is required: netns.Available() refuses without euid 0, so without
+      # it every one of these skips and the job passes having proved nothing.
+      - name: Network namespace tests (privileged)
+        # shell: bash, not the default. The default is `bash -e {0}`, which has
+        # no pipefail: the exit status of a pipeline is that of its last
+        # command, so `go test | tee` would report a failing suite as passing.
+        # A CI that cannot fail is worse than no CI, because it is believed.
+        shell: bash
+        run: |
+          # Both schedulers are loadable modules and a runner may not have them
+          # loaded. Best effort: whichever cannot load is reported by the
+          # suite's own skip, and the step enforces only the tests that do not
+          # depend on a module.
+          sudo modprobe sch_cake 2>/dev/null     && echo "loaded sch_cake"     || echo "sch_cake not available"
+          sudo modprobe sch_fq_codel 2>/dev/null  && echo "loaded sch_fq_codel" || echo "sch_fq_codel not available"
+
+          echo
+          echo "Running the netns suite as root; without this every test skips."
+          # The cache paths are read from go rather than from the environment,
+          # because setup-go does not necessarily export them and an empty
+          # GOCACHE under sudo would point the build at /root and re-download
+          # every module.
+          sudo -E env "PATH=$PATH" \
+            "GOCACHE=$(go env GOCACHE)" \
+            "GOMODCACHE=$(go env GOMODCACHE)" \
+            go test -count=1 -v ./internal/netns/ | tee /tmp/netns.log
+
+          # A green run in which everything skipped is the failure this step
+          # exists to catch.
+          #
+          # The enforced tests are the two that depend on nothing but the
+          # namespace itself. The algorithm-acceptance tests are reported
+          # rather than enforced, because both schedulers are loadable modules
+          # and a kernel without them is a legitimate environment rather than a
+          # broken runner. Enforcing them would make this step permanently red
+          # on some hosts, and a permanently red check is one people stop
+          # reading.
+          #
+          # The two design-skips below are reported with the rest, so their
+          # presence is never mistaken for coverage:
+          #   TestAvailableReportsWhyItCannot  skips because Available() succeeds
+          #   TestNonLinuxReportsUnsupported    skips because we ARE on Linux
+          for t in TestNamespaceIsIsolated \
+                   TestStatisticsParseFromARealKernel; do
+            if grep -q -- "--- SKIP: $t" /tmp/netns.log; then
+              echo
+              echo "$t skipped, but it must not have: the privileged suite did not"
+              echo "run. The runner needs iproute2 (ip, tc), util-linux (unshare),"
+              echo "and euid 0."
+              exit 1
+            fi
+            if ! grep -q -- "--- PASS: $t" /tmp/netns.log; then
+              echo
+              echo "$t did not pass and did not skip; see the log above."
+              exit 1
+            fi
+            echo "$t ran"
+          done
+
+          # These are the tests that prove `thn qos render` produces commands a
+          # real kernel accepts. Report which ran, because a silent skip here
+          # is the most plausible way for that claim to go unverified.
+          for t in TestRenderedFqCodelCommandIsAcceptedByTheKernel \
+                   TestRenderedCakeCommandIsAcceptedByTheKernel \
+                   TestKernelReportsTheShapedRate; do
+            if grep -q -- "--- SKIP: $t" /tmp/netns.log; then
+              echo "$t SKIPPED - this kernel does not provide that scheduler"
+            elif grep -q -- "--- PASS: $t" /tmp/netns.log; then
+              echo "$t ran"
+            else
+              echo "$t did not appear; see the log above"
+            fi
+          done
+
+          # Any remaining skips are listed so they are visible rather than
+          # inferred from silence.
+          remaining="$(grep -c -- '--- SKIP' /tmp/netns.log || true)"
+          if [ "$remaining" -ne 0 ]; then
+            echo
+            echo "$remaining further test(s) skipped:"
+            grep -- '--- SKIP' /tmp/netns.log
+          fi
+
+      - name: Verify the Linux binary is CGO-free
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags '-s -w' -o /tmp/thn-static ./cmd/thn
+          size="$(stat -c %s /tmp/thn-static)"
+          echo "static binary: $size bytes"
+          # The Dell is the only machine this runs on and it has no toolchain,
+          # so the binary must not depend on libc at runtime. A dependency
+          # would show up as a startup failure on a device nobody can reach
+          # easily.
+          if ldd /tmp/thn-static 2>&1 | grep -q 'not a dynamic executable'; then
+            echo "confirmed: not a dynamic executable"
+          else
+            echo "WARNING: the binary appears to be dynamically linked:"
+            ldd /tmp/thn-static || true
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------
+  # Console: the read-only web UI in ui/.
+  #
+  # Runs after Linux because the contract check needs a binary to compare the
+  # hand-written TypeScript types against, and the Linux job is where one is
+  # built and already known good.
+  #
+  # The contract check earns this job its place. It has already caught three
+  # real mismatches that no compiler could see, because TypeScript types are
+  # erased at runtime: two structs that serialised with Go field names because
+  # they carried no json tags, and a three-valued enum that marshalled as the
+  # integers 0, 1 and 2 — where 2 meant "unknown" and sat one integer away
+  # from "false". The console compiled cleanly against all three and would
+  # have rendered blanks, or worse, reported an unreadable signal as healthy.
+  # ---------------------------------------------------------------------
+  console:
+    name: console
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          # 24, not 22. `npm run schema:check` runs a .ts file directly and
+          # relies on Node stripping the types without a loader or a build
+          # step. That is unflagged from 23.6 onwards; on 22 it needs
+          # --experimental-strip-types, so pinning to 22 would break the one
+          # check this job exists to run. This is the version the check was
+          # verified against locally.
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build the binary the console reads through
+        run: go build -trimpath -o thn ./cmd/thn
+
+      # npm ci rather than npm install: the lockfile is the contract, and
+      # resolving fresh would test a dependency set nobody is shipping.
+      - name: Install
+        working-directory: ui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: ui
+        run: npm run typecheck
+
+      - name: Contract check
+        working-directory: ui
+        env:
+          THN_BINARY: ${{ github.workspace }}/thn
+        run: npm run schema:check
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+      # node_modules is the largest thing this job downloads and the build
+      # does not need it. Removing it keeps the job's disk use modest without
+      # costing a second install.
+      - name: Drop node_modules
+        working-directory: ui
+        run: rm -rf node_modules
+
+  # ---------------------------------------------------------------------
+  # Windows: the development platform. Runs second, after Linux.
+  # ---------------------------------------------------------------------
+  windows:
+    name: windows
+    needs: linux
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            Write-Output "These files are not gofmt-clean:"
+            $unformatted | ForEach-Object { Write-Output "  $_" }
+            Write-Output ""
+            Write-Output "Run 'gofmt -w .' and commit the result."
+            exit 1
+          }
+          Write-Output "all files are gofmt-clean"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -trimpath -o thn.exe ./cmd/thn
+
+      # The safety invariant is platform-independent, so it is checked here
+      # too. It is the project's central property and it should be verified on
+      # the platform that produces the binaries, not only the one that runs
+      # them.
+      - name: Safety invariant
+        run: |
+          go test -count=1 -v `
+            -run 'TestRepoContainsNoUnguardedExec|TestMutatingInvocationsDenied|TestNoMutatingEntryInAllowlist|TestExecExemptionsAreJustified|TestPermittedReadOnlyInvocations' `
+            ./internal/guard/
+
+      # The gate runs here as well, and on this runner it is the only place it
+      # runs for a developer's own change before pushing. It is 52 tests
+      # across nine phases and takes seconds, so there is no reason to skip it
+      # on the platform where it is fastest to run.
+      - name: Gateway gate
+        run: go test -count=1 -v -run 'TestGate' ./internal/cli/
+
+      # No -race, and no netns. Both are deliberate: race needs a C toolchain
+      # that would add fragility, and every netns test is behind a build tag
+      # that excludes them here. TestUnavailableReportsWhyCannot covers the
+      # non-Linux path and runs below, so the netns package is still exercised
+      # — as a check that it degrades honestly on a platform it cannot use.
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Cross-compile for Linux
+        # Building the Linux binary from the Windows runner is a cheap extra
+        # check that the target still compiles from a clean checkout, and it
+        # catches a linux-only file that a Windows-only vet would never see.
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'linux'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags '-s -w' -o thn-linux-amd64 ./cmd/thn
+          $size = (Get-Item thn-linux-amd64).Length
+          Write-Output "cross-compiled linux binary: $size bytes"
+
+      - name: Vet for Linux
+        # go vet under GOOS=linux compiles the //go:build linux files that the
+        # Windows build skips entirely. This is the only check in the whole
+        # workflow that would catch a compile error in netns_linux_test.go on a
+        # fast runner, and it needs no privileges to do it.
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'linux'
+          $env:GOARCH = 'amd64'
+          go vet ./...
+          Write-Output "linux vet clean; the //go:build linux files compile"

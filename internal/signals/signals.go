@@ -1,3 +1,50 @@
+// Package signals declares the observations THN can make about a gateway, in a
+// form that rules can be evaluated against.
+//
+// # Why a signal layer exists
+//
+// Every subsystem already reports its own state in its own vocabulary:
+// network.Snapshot carries interface links, dhcp.Summary carries pool
+// utilisation, qos/tc carries queue counters, diff.Observed carries a
+// flattened comparison projection. A rule that wanted to say "the uplink is
+// down" would otherwise have to reach into four packages and reconcile four
+// shapes, and every new subsystem would mean every rule author learning a new
+// API.
+//
+// The signal layer is the single vocabulary those observations are projected
+// into. It is deliberately thin: a name, a typed value, a timestamp, and an
+// explanation. It adds no new information and makes no judgements. Its only
+// job is to make "what did THN see" a thing rules can ask about.
+//
+// # Unknown is not false
+//
+// This is the property the whole package exists to get right.
+//
+// A gateway that THN cannot inspect fully — because a read failed, because the
+// platform is unsupported, because the tool it needs is not installed — has
+// not reported that everything is fine, and it has not reported that anything
+// is broken. It has reported nothing. Conflating that with false is the single
+// most damaging thing an alerting system can do, because it produces confident
+// conclusions from absent data.
+//
+// So every Value carries a Known flag, and Value.False is only ever what a
+// successful read actually said. A rule that tests a signal it could not read
+// gets TruthUnknown and does not fire. An operator looking at an incident can
+// then trust that the incident means something was observed, not merely that
+// something failed to be.
+//
+// # Every signal explains itself
+//
+// Detail is not decoration. THN is developed against an unattended device, so
+// the person reading an incident cannot go and look. "wan.link.up = false" is
+// a claim; "wan.link.up = false: eth0 is present but the carrier reports it
+// down" is something an operator can act on from the other side of the world.
+//
+// # Nothing here reads the host
+//
+// Derivation happens at the boundary, from types the caller already has. This
+// package imports no os/exec and no guard, so the repository-wide test that
+// forbids unguarded process spawning passes without needing an exemption.
 package signals
 
 import (
@@ -28,21 +75,27 @@ const (
 // Number, String or Unknown rather than by filling the struct directly: the
 // constructors are what keep a value from carrying, say, a string in the
 // numeric field, which would compare unpredictably.
+//
+// The json tags are explicit because this struct is serialised into every
+// `--json` response that carries observations or evidence. Untagged, Go emits
+// `Kind`, `Known`, `Number`, `Bool` and `Str` — capitals, amid a document whose
+// other fields are lower-case — and every consumer then needs to know that this
+// one struct is the odd one out.
 type Value struct {
 	// Kind is the value's type.
-	Kind Kind
+	Kind Kind `json:"kind"`
 
 	// Known reports whether the value was actually read.
 	//
 	// This is the field that carries the whole design. A false value and an
 	// unreadable value look identical without it, and every rule built on
 	// top would have to rediscover that difference.
-	Known bool
+	Known bool `json:"known"`
 
 	// Number, Bool and Str hold the value, per Kind.
-	Number float64
-	Bool   bool
-	Str    string
+	Number float64 `json:"number"`
+	Bool   bool    `json:"bool"`
+	Str    string  `json:"str"`
 }
 
 // Bool returns a known boolean value.

@@ -100,6 +100,42 @@ var commands = map[string]Command{
 		Summary: "render or inspect traffic shaping (render, validate, stats, available)",
 		Run:     runQoS,
 	},
+	"rules": {
+		Name:    "rules",
+		Tier:    TierPure,
+		Summary: "list the shipped rules, or evaluate them against an observation",
+		Run:     runRules,
+	},
+	"policy": {
+		Name:    "policy",
+		Tier:    TierPure,
+		Summary: "list per-device policies, or resolve what applies to a device",
+		Run:     runPolicy,
+	},
+	"incidents": {
+		Name:    "incidents",
+		Tier:    TierPure,
+		Summary: "show what the current observations imply",
+		Run:     runIncidents,
+	},
+	"explain": {
+		Name:    "explain",
+		Tier:    TierPure,
+		Summary: "explain the current observations in prose, with reasons and remedies",
+		Run:     runExplain,
+	},
+	"ask": {
+		Name:    "ask",
+		Tier:    TierPure,
+		Summary: "ask a question about the current observations in plain language",
+		Run:     runAsk,
+	},
+	"suggest": {
+		Name:    "suggest",
+		Tier:    TierPure,
+		Summary: "propose correlation rules from what has been observed, for review",
+		Run:     runSuggest,
+	},
 }
 
 // Run dispatches a command line and returns the process exit code.

@@ -14,3 +14,12 @@ vendor/
 Thumbs.db
 *.swp
 thn-linux-amd64
+thn.exe
+
+# Next.js console (ui/). The Go module ignores it: no .go files in that tree.
+# node_modules and .next must never be committed - both are large and the lockfile
+# already pins the exact dependency set.
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/*.tsbuildinfo

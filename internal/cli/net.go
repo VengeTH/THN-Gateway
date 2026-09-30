@@ -68,15 +68,35 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 
 	if cfg.Network.LANPrefix != "" {
 		if prefix, err := netip.ParsePrefix(cfg.Network.LANPrefix); err == nil {
-			// The LAN network is directly connected, so it is a route with no
-			// next hop. Without it, traffic from the LAN has nowhere to go.
-			p.Routing.Routes = append(p.Routing.Routes, netconfig.Route{
-				Destination: prefix.Masked(),
-				Interface:   cfg.Network.LAN,
-				Scope:       "link",
-				Protocol:    "thn",
-				Comment:     "the directly connected LAN network",
-			})
+			// A route needs an interface to leave through, so the directly
+			// connected LAN network is only a route once the LAN interface is
+			// known.
+			//
+			// It used to be added regardless, carrying an empty interface, and
+			// validation then reported that as an error — which turned "the LAN
+			// NIC has not been identified yet" into a blocking failure. That is
+			// backwards, and it contradicts what the configuration comments
+			// promise: absent hardware is pending, not broken. It also made
+			// `thn net render` refuse outright on the shipped example, which
+			// sets `lan: ""` on purpose.
+			//
+			// Omitting it is not silence. The coherence check already reports a
+			// configured forwarding rule with no LAN interface, `thn plan`
+			// reports the LAN as pending, and `p.Interfaces.LAN` stays empty —
+			// so the gap is reported in the three places that report gaps, and
+			// not by emitting a route that cannot be installed.
+			if cfg.Network.LAN != "" {
+				// The LAN network is directly connected, so it is a route with
+				// no next hop. Without it, traffic from the LAN has nowhere to
+				// go.
+				p.Routing.Routes = append(p.Routing.Routes, netconfig.Route{
+					Destination: prefix.Masked(),
+					Interface:   cfg.Network.LAN,
+					Scope:       "link",
+					Protocol:    "thn",
+					Comment:     "the directly connected LAN network",
+				})
+			}
 
 			// Restrict the NAT ingress to the LAN rather than any interface.
 			p.NAT.InInterface = cfg.Network.LAN

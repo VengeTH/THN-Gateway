@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/venth/thn-gateway/internal/policy"
 )
 
 // SchemaVersion is the configuration schema version. It is written into the
@@ -77,6 +79,19 @@ type Config struct {
 
 	// Activation governs the state machine and its safety gates.
 	Activation ActivationConfig `yaml:"activation"`
+
+	// Policies holds named settings that can be selected per device and per
+	// time.
+	//
+	// It is a block of its own rather than fields added to qos, dns and
+	// firewall, because a per-device override and a host-wide default are the
+	// same kind of setting applied to different subjects. Splitting them would
+	// mean two places to look for "what rate does this device get" and no
+	// single answer.
+	//
+	// The host-wide defaults stay in their own blocks; a device with no profile
+	// here gets exactly what it got before this block existed.
+	Policies policy.Set `yaml:"policies"`
 }
 
 // GatewayConfig holds gateway identity.

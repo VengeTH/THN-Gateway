@@ -405,6 +405,8 @@ var gateSubsystems = []string{
 	"qos",
 	"failure",
 	"rollback",
+	"policies",
+	"schedules",
 }
 
 // gateTestNames returns the names of every test in this package's gate files.
