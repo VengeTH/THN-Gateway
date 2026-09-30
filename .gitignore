@@ -1,0 +1,15 @@
+# Build output
+bin/
+
+# Go workspace / vendored deps
+vendor/
+
+# Local state, never commit a real gateway's database or config
+*.db
+*.db-wal
+*.db-shm
+
+# Editor noise
+.DS_Store
+Thumbs.db
+*.swp

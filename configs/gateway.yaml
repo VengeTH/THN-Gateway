@@ -1,0 +1,166 @@
+# THN gateway configuration
+#
+# This document is validated by `thn validate` and consumed by `thn plan`.
+# Unknown keys are rejected rather than ignored: a misspelled setting that is
+# silently accepted produces a gateway that is quietly not doing what the
+# operator believes it is doing.
+#
+# Validation order, lowest precedence first:
+#   1. compiled defaults
+#   2. this file
+#   3. THN_* environment variables
+#
+# Run `thn schema` to print every key this build understands.
+
+schema_version: 1
+
+gateway:
+  name: thn-gateway
+  # Incremented whenever the configuration changes. Plans, observations and
+  # activation records are all keyed on it, so it must move forward, never back.
+  generation: 1
+
+network:
+  # The uplink. On the Dell this is the onboard NIC; on a laptop it will not
+  # exist, which is why `thn plan` reports it as pending rather than failing.
+  wan: enp0s31f6
+
+  # The downstream interface. Deliberately unset: the downstream NIC is not
+  # attached while THN is being developed remotely. Set this once the hardware
+  # is identified, and the LAN-related parts of the plan become actionable.
+  lan: ""
+
+  # The address THN would place on the LAN interface.
+  lan_prefix: 10.77.0.1/24
+
+  dns:
+    - 1.1.1.1
+    - 9.9.9.9
+
+  mtu: 1500
+
+  # Next hop for the default route. Empty means "use whatever the host has".
+  upstream_gateway: ""
+
+nat:
+  enabled: true
+  # Derived from network.lan when empty. Because lan is unset, this stays
+  # unresolved and `thn plan` reports NAT as pending — which is correct: NAT
+  # has been asked for, but not yet told over which interface.
+  interfaces: []
+
+firewall:
+  enabled: true
+  backend: nftables
+  # drop is the safe default. `thn validate` warns if NAT is disabled while
+  # this is set, because the LAN would be able to reach nothing.
+  default_inbound_policy: drop
+
+qos:
+  # Off by default: the correct shaped rate depends on the uplink actually
+  # present, which THN cannot know while the hardware is absent. Enabling this
+  # with a guessed rate would silently cap a real link.
+  enabled: false
+  algorithm: cake
+  interface: ""
+  download_kbps: 0
+  upload_kbps: 0
+
+paths:
+  config: /etc/thn/config.yaml
+  state_dir: /var/lib/thn
+  state_db: /var/lib/thn/state.db
+  socket: /run/thn/thnd.sock
+  run_dir: /run/thn
+  # Empty means stdout, which is what systemd's journal captures.
+  log_file: ""
+
+dhcp:
+  # DHCP is on by default: a gateway that does not serve addresses on its own
+  # LAN is not usable out of the box.
+  enabled: true
+
+  # Authoritative stops a client that cannot reach this server from obtaining
+  # an address from the upstream network, which would place it outside this
+  # gateway entirely — including its firewall.
+  authoritative: true
+
+  # 12 hours keeps a sleeping laptop's address and reclaims abandoned ones
+  # within a day.
+  lease_time: 12h
+
+  # 0 leaves the cap to dnsmasq's default.
+  lease_max: 0
+
+  # Local domain advertised via option 15.
+  domain: lan
+
+  # Start at .100 so the first hundred addresses stay free for static hosts
+  # and for the gateway itself.
+  ranges:
+    - start: 10.77.0.100
+      end: 10.77.0.250
+
+  # Addresses pinned to devices. A reservation is intent, not lease state:
+  # dnsmasq still issues the lease and THN still observes it.
+  #
+  #   reservations:
+  #     - mac: "aa:bb:cc:dd:ee:ff"
+  #       address: 10.77.0.10
+  #       hostname: nas
+  reservations: []
+
+dns:
+  enabled: true
+
+  # Explicit, not inherited from the uplink's DHCP. Inheriting them would make
+  # THN's resolution depend on someone else's configuration and would hide a
+  # misconfiguration that sent queries somewhere unintended.
+  upstream:
+    - 1.1.1.1
+    - 9.9.9.9
+
+  # Names in this domain are answered locally and never forwarded.
+  local_domain: lan
+
+  # Additional names THN serves.
+  local_records: []
+  #   - hostname: nas
+  #     address: 10.77.0.10
+  #     aliases:
+  #       - storage
+
+  cache_size: 1000
+
+  # Off by default: this writes to disk continuously and is the fastest way
+  # to fill a small filesystem. It is the most useful DNS setting for
+  # security work, so keep it on only while investigating.
+  log_queries: false
+
+  # Off until IPv6 is actually configured. A working AAAA record for a path
+  # that does not work yet sends clients down a route that fails slowly
+  # rather than letting them fall back to IPv4 immediately.
+  no_ipv6: false
+
+services:
+  dnsmasq:
+    # THN-generated and THN-owned. Overwriting is safe; hand edits are lost on
+    # the next render.
+    config_file: /etc/thn/dnsmasq.conf
+
+    # Written by dnsmasq, read by THN. THN never writes it.
+    lease_file: /var/lib/thn/dnsmasq.leases
+
+logging:
+  level: info
+  format: json
+  retention: 336h0m0s
+  max_events: 50000
+
+activation:
+  auto_recover: false
+  health_check_interval: 30s
+  # Must remain true. THN is developed remotely against an unattended device,
+  # so holding root over SSH must not by itself be enough to activate. Setting
+  # this to false is a validation error, not a warning.
+  require_physical_presence: true

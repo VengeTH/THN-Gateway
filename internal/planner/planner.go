@@ -1,0 +1,651 @@
+// Package planner turns a diff into an ordered, reviewable plan.
+//
+// # What a plan is
+//
+// A plan is a document. It contains the steps that would be carried out, the
+// commands each step would run rendered as text, the ordering constraints
+// between them, and a simulation of the outcome. Producing one reads
+// configuration and an observation; it changes nothing.
+//
+// The rendered commands are documentation for the operator, not an execution
+// list. Nothing in this package executes them, and nothing outside this
+// package can: internal/guard would refuse the invocations anyway, because
+// every one of them is state-changing.
+//
+// # Ordering
+//
+// Steps are grouped into phases, because the order of network operations is
+// not arbitrary. Enabling a firewall before the addressing it depends on
+// exists locks the operator out. Enabling forwarding before NAT leaves the
+// host routing traffic it cannot translate. The phase order encodes that
+// dependency explicitly so an operator can see why step 4 happens before
+// step 2 would.
+//
+//	Phase 1  addressing   establish the LAN address and link state
+//	Phase 2  forwarding   enable kernel forwarding
+//	Phase 3  services     NAT, firewall, QoS
+//	Phase 4  housekeeping resolvers
+package planner
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/venth/thn-gateway/internal/diff"
+)
+
+// Phase groups steps that must run together, in order.
+type Phase struct {
+	// Number is the one-based execution order.
+	Number int `json:"number"`
+	// Name identifies the phase.
+	Name string `json:"name"`
+	// Purpose explains why this phase happens where it does.
+	Purpose string `json:"purpose"`
+}
+
+// phases is the fixed ordering. It is a declared table rather than something
+// computed, because the ordering is a safety decision that should be
+// reviewable at a glance.
+var phases = []Phase{
+	{Number: 1, Name: "addressing", Purpose: "establish the LAN address and link state, since every later phase depends on the LAN existing"},
+	{Number: 2, Name: "forwarding", Purpose: "enable kernel forwarding, required before any traffic can be routed"},
+	{Number: 3, Name: "services", Purpose: "apply NAT, firewall and shaping, which translate and filter the traffic forwarding will carry"},
+	{Number: 4, Name: "housekeeping", Purpose: "apply resolvers, which affect name resolution rather than connectivity"},
+}
+
+// Phases returns a copy of the phase table.
+//
+// It is exported so that the CLI can render the same ordering the planner
+// used, rather than hard-coding phase names and risking the two disagreeing.
+func Phases() []Phase {
+	out := make([]Phase, len(phases))
+	copy(out, phases)
+	return out
+}
+
+// phasesTable returns a copy of the phase table.
+func phasesTable() []Phase { return Phases() }
+
+// Step is one unit of work in a plan.
+type Step struct {
+	// ID is the change ID this step resolves.
+	ID string `json:"id"`
+	// Phase is the phase number this step belongs to.
+	Phase int `json:"phase"`
+	// PhaseName is the phase's name.
+	PhaseName string `json:"phase_name"`
+	// Subsystem is the affected subsystem.
+	Subsystem string `json:"subsystem"`
+	// Field is the affected setting.
+	Field string `json:"field"`
+	// Risk is the change's risk classification.
+	Risk diff.Risk `json:"risk"`
+	// Summary is a one-line description.
+	Summary string `json:"summary"`
+	// Reason explains why the change is needed.
+	Reason string `json:"reason"`
+	// Current is the observed value.
+	Current string `json:"current,omitempty"`
+	// Desired is the target value.
+	Desired string `json:"desired,omitempty"`
+	// Commands are the shell commands this step would run, rendered as text
+	// for the operator to read. Nothing here executes them.
+	Commands []string `json:"commands,omitempty"`
+	// RequiresRoot marks a step that would need elevated privilege.
+	RequiresRoot bool `json:"requires_root"`
+	// Disruptive marks a step that would interrupt connectivity.
+	Disruptive bool `json:"disruptive"`
+	// Reversible records whether the change could be undone.
+	Reversible string `json:"reversible"`
+}
+
+// Plan is a complete, reviewable description of intended work.
+type Plan struct {
+	// ID is a content-addressed identifier, so regenerating an identical plan
+	// yields an identical ID and two plans can be compared.
+	ID string `json:"id"`
+	// GeneratedAt is when the plan was produced.
+	GeneratedAt time.Time `json:"generated_at"`
+	// Generation is the configuration generation this plan targets.
+	Generation uint64 `json:"generation"`
+	// Source describes where the configuration came from.
+	Source string `json:"source"`
+	// Live reports whether the plan was built against an observed host.
+	Live bool `json:"live"`
+	// Steps are the actionable changes, in phase order.
+	Steps []Step `json:"steps"`
+	// Blocked lists changes that cannot proceed.
+	Blocked []diff.Change `json:"blocked,omitempty"`
+	// Pending lists changes that are not yet determined.
+	Pending []diff.Change `json:"pending,omitempty"`
+	// Simulation describes the outcome without performing it.
+	Simulation Simulation `json:"simulation"`
+	// Ready reports whether the plan is complete and internally consistent.
+	Ready bool `json:"ready"`
+	// Summary is a one-line description.
+	Summary string `json:"summary"`
+}
+
+// Simulation describes what applying the plan would do.
+type Simulation struct {
+	// Headline is the single most important consequence.
+	Headline string `json:"headline"`
+	// WouldApply lists the steps that would take effect.
+	WouldApply []string `json:"would_apply,omitempty"`
+	// AlreadySatisfied lists changes the host already matches.
+	AlreadySatisfied []string `json:"already_satisfied,omitempty"`
+	// Pending lists changes that could not be evaluated.
+	Pending []string `json:"pending,omitempty"`
+	// Blocked lists changes that cannot proceed.
+	Blocked []string `json:"blocked,omitempty"`
+	// Consequences describes the resulting behaviour.
+	Consequences []string `json:"consequences,omitempty"`
+	// Disruptions describes connectivity interruptions that would occur.
+	Disruptions []string `json:"disruptions,omitempty"`
+	// OutOfOrder lists steps that would violate a dependency.
+	OutOfOrder []string `json:"out_of_order,omitempty"`
+}
+
+// Options configures plan generation.
+type Options struct {
+	// Generation is the configuration generation.
+	Generation uint64
+	// Source describes where the configuration was read from.
+	Source string
+	// Live reports whether an observed host was available.
+	Live bool
+	// Now overrides the timestamp, for deterministic tests.
+	Now time.Time
+}
+
+// Build produces a plan from a diff.
+//
+// The diff is the only input describing what needs to change; the planner does
+// not re-compare observed against desired. Keeping comparison in one place is
+// what guarantees that `thn plan` and `thn status` cannot disagree about what
+// the differences are.
+func Build(d diff.Result, opts Options) *Plan {
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	p := &Plan{
+		GeneratedAt: now,
+		Generation:  opts.Generation,
+		Source:      opts.Source,
+		Live:        opts.Live,
+	}
+
+	// Only drift becomes an actionable step. Pending is outstanding work and
+	// blocked is unresolvable; neither is something a plan should try to do.
+	for _, c := range d.ByKind(diff.KindDrift) {
+		step := stepFor(c)
+		if step == nil {
+			continue
+		}
+		p.Steps = append(p.Steps, *step)
+	}
+	p.Blocked = d.ByKind(diff.KindBlocked)
+	p.Pending = d.ByKind(diff.KindPending)
+
+	p.order()
+	p.simulate()
+	p.Ready = p.checkReady()
+
+	// The ID is derived before the summary is rendered, because the summary
+	// embeds it. Deriving it afterwards would print an empty identifier.
+	p.ID = deriveID(p)
+	p.Summary = p.summarise()
+	return p
+}
+
+// stepFor builds a step from a drift change, or nil when the change carries
+// no actionable work.
+func stepFor(c diff.Change) *Step {
+	phase := phaseFor(c.Subsystem)
+
+	s := &Step{
+		ID:           c.ID,
+		Phase:        phase.Number,
+		PhaseName:    phase.Name,
+		Subsystem:    c.Subsystem,
+		Field:        c.Field,
+		Risk:         c.Risk,
+		Summary:      summaryFor(c),
+		Reason:       c.Reason,
+		Current:      c.Current,
+		Desired:      c.Desired,
+		RequiresRoot: true,
+		Reversible:   reversibilityFor(c),
+	}
+
+	s.Commands = commandsFor(c)
+	s.Disruptive = isDisruptive(c)
+
+	return s
+}
+
+// phaseFor maps a subsystem onto its phase.
+func phaseFor(subsystem string) Phase {
+	switch subsystem {
+	case "address", "link":
+		return phasesTable()[0]
+	case "sysctl":
+		return phasesTable()[1]
+	case "nftables", "qdisc":
+		return phasesTable()[2]
+	default:
+		return phasesTable()[3]
+	}
+}
+
+// summaryFor renders a one-line description of a change.
+func summaryFor(c diff.Change) string {
+	switch c.ID {
+	case "wan-link-state", "lan-link-state":
+		return fmt.Sprintf("set %s link state to %s", c.Field, c.Desired)
+	case "lan-address-add":
+		return "add the configured address to the LAN interface"
+	case "lan-address-remove":
+		return "remove an address the configuration does not list"
+	case "default-route-add":
+		return "install the configured default route"
+	case "default-route-gateway":
+		return "point the default route at the configured gateway"
+	case "ip-forwarding":
+		return "enable IPv4 forwarding"
+	case "firewall-absent":
+		return "install the configured firewall ruleset"
+	case "firewall-empty":
+		return "populate the empty firewall ruleset"
+	case "qos-absent":
+		return "install the configured queue discipline"
+	case "qos-algorithm":
+		return "replace the queue discipline with the configured algorithm"
+	case "resolvers":
+		return "replace the resolver set"
+	default:
+		return fmt.Sprintf("reconcile %s", c.Field)
+	}
+}
+
+// reversibilityFor classifies whether a change could be undone.
+func reversibilityFor(c diff.Change) string {
+	switch c.Risk {
+	case diff.RiskCritical:
+		// A firewall change cannot be reverted without a captured ruleset,
+		// which is precisely why it is the riskiest operation.
+		return "partially-reversible"
+	case diff.RiskHigh:
+		return "reversible"
+	case diff.RiskMedium:
+		return "reversible"
+	default:
+		return "reversible"
+	}
+}
+
+// isDisruptive reports whether a change would interrupt connectivity.
+func isDisruptive(c diff.Change) bool {
+	switch c.ID {
+	case "lan-address-remove", "default-route-gateway",
+		"firewall-absent", "firewall-empty", "qos-absent", "qos-algorithm":
+		return true
+	default:
+		return c.Risk == diff.RiskCritical
+	}
+}
+
+// commandsFor renders the commands a change would run.
+//
+// These strings are for the operator to read and for review. They are never
+// passed to exec: every one of them is a state-changing invocation that
+// internal/guard would refuse, which is the mechanism that keeps a rendering
+// bug from becoming an execution.
+func commandsFor(c diff.Change) []string {
+	switch c.ID {
+	case "wan-link-state", "lan-link-state":
+		return []string{fmt.Sprintf("ip link set %s %s", interfaceFromField(c.Field), c.Desired)}
+
+	case "lan-address-add":
+		return []string{fmt.Sprintf("ip addr add %s dev %s", c.Desired, lanNameFromChange(c))}
+
+	case "lan-address-remove":
+		var cmds []string
+		for _, addr := range splitList(c.Current) {
+			cmds = append(cmds, fmt.Sprintf("ip addr del %s dev %s", addr, lanNameFromChange(c)))
+		}
+		return cmds
+
+	case "default-route-add":
+		return []string{fmt.Sprintf("ip route add default via %s", c.Desired)}
+
+	case "default-route-gateway":
+		return []string{fmt.Sprintf("ip route replace default via %s", c.Desired)}
+
+	case "ip-forwarding":
+		return []string{"sysctl -w net.ipv4.ip_forward=1"}
+
+	case "firewall-absent", "firewall-empty":
+		return firewallCommands(c.Desired)
+
+	case "qos-absent", "qos-algorithm":
+		return qosCommands(c)
+
+	case "resolvers":
+		return []string{fmt.Sprintf("# write resolvers %s to the resolver configuration", c.Desired)}
+
+	default:
+		return nil
+	}
+}
+
+// firewallCommands renders the nftables command set for a firewall policy.
+
+// qosCommands renders the tc command for a shaping change.
+//
+// The interface and rates are carried on the change's Desired value as
+// "algorithm on device down=N up=N". When the rates are absent the command
+// is rendered without them rather than with a placeholder, so that a plan
+// never shows a plausible-looking but wrong command.
+func qosCommands(c diff.Change) []string {
+	device := qosDevice(c.Desired)
+	if device == "" {
+		return nil
+	}
+
+	down, up := qosRates(c.Desired)
+	if down == 0 || up == 0 {
+		return []string{fmt.Sprintf("tc qdisc replace dev %s root %s", device, qosAlgorithm(c.Desired))}
+	}
+	return []string{fmt.Sprintf(
+		"tc qdisc replace dev %s root %s bandwidth %dkbit upload %dkbit",
+		device, qosAlgorithm(c.Desired), down, up)}
+}
+
+// qosAlgorithm extracts the algorithm from a desired value such as
+// "cake on enp0s31f6 down=100000 up=20000".
+func qosAlgorithm(desired string) string {
+	fields := strings.Fields(desired)
+	if len(fields) == 0 {
+		return "cake"
+	}
+	return fields[0]
+}
+
+// qosDevice extracts the interface name from a desired value.
+func qosDevice(desired string) string {
+	fields := strings.Fields(desired)
+	for i, f := range fields {
+		if f == "on" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+// qosRates extracts the download and upload rates from a desired value.
+func qosRates(desired string) (down, up int) {
+	for _, f := range strings.Fields(desired) {
+		switch {
+		case strings.HasPrefix(f, "down="):
+			fmt.Sscanf(f, "down=%d", &down)
+		case strings.HasPrefix(f, "up="):
+			fmt.Sscanf(f, "up=%d", &up)
+		}
+	}
+	return down, up
+}
+func firewallCommands(desired string) []string {
+	policy := "drop"
+	if strings.Contains(desired, "accept") {
+		policy = "accept"
+	}
+	return []string{
+		"nft add table inet thn",
+		fmt.Sprintf("nft add chain inet thn input { type filter hook input priority 0 ; policy %s ; }", policy),
+		fmt.Sprintf("nft add chain inet thn forward { type filter hook forward priority 0 ; policy %s ; }", policy),
+		"nft add rule inet thn input ct state established,related accept",
+		"nft add rule inet thn input iifname lo accept",
+	}
+}
+
+// interfaceFromField recovers an interface name from a change's field path.
+func interfaceFromField(field string) string {
+	switch {
+	case strings.HasPrefix(field, "wan"):
+		return "(wan)"
+	case strings.HasPrefix(field, "lan"):
+		return "(lan)"
+	default:
+		return "(iface)"
+	}
+}
+
+// lanNameFromChange recovers the LAN interface name for a command.
+func lanNameFromChange(c diff.Change) string {
+	if c.Desired != "" && !strings.Contains(c.Desired, "/") {
+		return c.Desired
+	}
+	return "(lan)"
+}
+
+// splitList splits a comma-separated current value.
+func splitList(s string) []string {
+	if s == "" || s == "(none)" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// order sorts the steps by phase, then by descending risk within a phase.
+//
+// Sorting by risk within a phase means the most dangerous item in a phase
+// appears first in the rendered plan, which is what an operator scanning for
+// "what could go wrong" wants to see.
+func (p *Plan) order() {
+	sort.SliceStable(p.Steps, func(i, j int) bool {
+		a, b := p.Steps[i], p.Steps[j]
+		if a.Phase != b.Phase {
+			return a.Phase < b.Phase
+		}
+		if a.Risk != b.Risk {
+			return riskRank(a.Risk) > riskRank(b.Risk)
+		}
+		return a.Field < b.Field
+	})
+}
+
+// riskRank orders risks for sorting.
+func riskRank(r diff.Risk) int {
+	switch r {
+	case diff.RiskNone:
+		return 0
+	case diff.RiskLow:
+		return 1
+	case diff.RiskMedium:
+		return 2
+	case diff.RiskHigh:
+		return 3
+	case diff.RiskCritical:
+		return 4
+	default:
+		return 0
+	}
+}
+
+// simulate describes the outcome without performing it.
+func (p *Plan) simulate() {
+	sim := Simulation{}
+
+	for _, s := range p.Steps {
+		sim.WouldApply = append(sim.WouldApply, s.Summary)
+	}
+	for _, c := range p.Pending {
+		sim.Pending = append(sim.Pending, c.Reason)
+	}
+	for _, c := range p.Blocked {
+		sim.Blocked = append(sim.Blocked, c.Reason)
+	}
+
+	// Consequences.
+	applied := map[string]bool{}
+	for _, s := range p.Steps {
+		applied[s.ID] = true
+	}
+	if applied["ip-forwarding"] {
+		sim.Consequences = append(sim.Consequences,
+			"the host would forward IPv4 traffic between interfaces")
+	}
+	for id := range applied {
+		switch {
+		case id == "firewall-absent" || id == "firewall-empty":
+			sim.Consequences = append(sim.Consequences,
+				"inbound and forwarded traffic would be filtered by the configured policy")
+		case id == "lan-address-add":
+			sim.Consequences = append(sim.Consequences,
+				"the LAN interface would carry the configured address")
+		case id == "default-route-add" || id == "default-route-gateway":
+			sim.Consequences = append(sim.Consequences,
+				"traffic would leave through the configured default gateway")
+		case id == "qos-absent" || id == "qos-algorithm":
+			sim.Consequences = append(sim.Consequences,
+				"outbound traffic would be shaped by the configured queue discipline")
+		}
+	}
+
+	// Disruptions, worst first.
+	for _, s := range p.Steps {
+		if !s.Disruptive {
+			continue
+		}
+		switch s.ID {
+		case "lan-address-remove":
+			sim.Disruptions = append(sim.Disruptions,
+				fmt.Sprintf("%s: traffic on the LAN segment would be interrupted while the address is replaced", s.ID))
+		case "firewall-absent", "firewall-empty":
+			sim.Disruptions = append(sim.Disruptions,
+				fmt.Sprintf("%s: if the ruleset has no accept path for the management session, this host becomes unreachable and needs physical access to recover", s.ID))
+		case "default-route-gateway":
+			sim.Disruptions = append(sim.Disruptions,
+				fmt.Sprintf("%s: the current default route would be replaced, which would drop any session using it", s.ID))
+		case "qos-absent", "qos-algorithm":
+			sim.Disruptions = append(sim.Disruptions,
+				fmt.Sprintf("%s: traffic on the shaped interface would pause briefly while the queue discipline is replaced", s.ID))
+		}
+	}
+	sort.Strings(sim.Disruptions)
+
+	// Dependency check. Address changes must precede the services that depend
+	// on the interface existing.
+	sawAddress := false
+	for _, s := range p.Steps {
+		if s.Subsystem == "address" || s.ID == "lan-link-state" {
+			sawAddress = true
+			continue
+		}
+		if (s.Subsystem == "nftables" || s.Subsystem == "qdisc") && !sawAddress && s.Phase > 1 {
+			sim.OutOfOrder = append(sim.OutOfOrder,
+				fmt.Sprintf("%s would run before the LAN interface is configured", s.ID))
+		}
+	}
+
+	// Headline: the single most important thing for the operator to read.
+	switch {
+	case len(sim.Blocked) > 0:
+		sim.Headline = fmt.Sprintf("%d change(s) cannot be made with this configuration; see the blocked section", len(sim.Blocked))
+	case len(sim.Disruptions) > 0:
+		sim.Headline = fmt.Sprintf("%d change(s) would be made, %d of which would interrupt connectivity",
+			len(sim.WouldApply), len(sim.Disruptions))
+	case len(sim.WouldApply) > 0:
+		sim.Headline = fmt.Sprintf("%d change(s) would be made, none of which interrupt connectivity", len(sim.WouldApply))
+	case len(sim.Pending) > 0:
+		sim.Headline = "nothing to do yet; the configuration is not yet complete enough to act on"
+	default:
+		sim.Headline = "nothing to do: the host already matches the configuration"
+	}
+
+	p.Simulation = sim
+}
+
+// checkReady reports whether the plan can be acted on.
+func (p *Plan) checkReady() bool {
+	if len(p.Blocked) > 0 {
+		return false
+	}
+	if len(p.Steps) == 0 && len(p.Pending) > 0 {
+		return false
+	}
+	for _, s := range p.Steps {
+		if s.Reversible == "irreversible" {
+			return false
+		}
+	}
+	return true
+}
+
+// summarise renders the one-line description.
+func (p *Plan) summarise() string {
+	return fmt.Sprintf("plan %s generation %d: %d step(s), %d pending, %d blocked%s",
+		p.ID, p.Generation, len(p.Steps), len(p.Pending), len(p.Blocked),
+		map[bool]string{true: "", false: " [NOT READY]"}[p.Ready])
+}
+
+// deriveID computes a content-addressed plan identifier.
+//
+// Content addressing matters here: if regenerating a plan from unchanged
+// inputs produces a different ID, then comparing two plans tells you nothing,
+// and "has the configuration drifted since the last plan?" becomes
+// unanswerable.
+func deriveID(p *Plan) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "gen=%d;live=%t;", p.Generation, p.Live)
+	for _, s := range p.Steps {
+		fmt.Fprintf(h, "%s|%d|%s|%s;", s.ID, s.Phase, s.Field, s.Desired)
+	}
+	for _, c := range p.Blocked {
+		fmt.Fprintf(h, "blocked:%s;", c.ID)
+	}
+	for _, c := range p.Pending {
+		fmt.Fprintf(h, "pending:%s;", c.ID)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// StepsByPhase returns the steps in one phase.
+func (p *Plan) StepsByPhase(n int) []Step {
+	var out []Step
+	for _, s := range p.Steps {
+		if s.Phase == n {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Riskiest returns the highest-risk step, or nil when there are none.
+func (p *Plan) Riskiest() *Step {
+	if len(p.Steps) == 0 {
+		return nil
+	}
+	best := p.Steps[0]
+	for _, s := range p.Steps[1:] {
+		if riskRank(s.Risk) > riskRank(best.Risk) {
+			best = s
+		}
+	}
+	return &best
+}

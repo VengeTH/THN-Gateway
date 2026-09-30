@@ -1,0 +1,698 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"net/netip"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/dhcp"
+	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
+	"github.com/venth/thn-gateway/internal/dns"
+	"github.com/venth/thn-gateway/internal/identity"
+	"github.com/venth/thn-gateway/internal/sandbox"
+)
+
+// dhcpPolicyFromConfig derives a DHCP policy from configuration.
+func dhcpPolicyFromConfig(cfg config.Config) (dhcp.Policy, error) {
+	var prefix netip.Prefix
+	if cfg.Network.LANPrefix != "" {
+		p, err := netip.ParsePrefix(cfg.Network.LANPrefix)
+		if err != nil {
+			return dhcp.Policy{}, fmt.Errorf("network.lan_prefix %q is not valid: %w", cfg.Network.LANPrefix, err)
+		}
+		prefix = p
+	}
+
+	var gateway netip.Addr
+	if prefix.IsValid() {
+		gateway = prefix.Addr()
+	}
+
+	p := dhcp.Policy{
+		Enabled:        cfg.DHCP.Enabled,
+		Interface:      cfg.Network.LAN,
+		LANPrefix:      prefix,
+		Authoritative:  cfg.DHCP.Authoritative,
+		LeaseTime:      cfg.DHCP.LeaseTime,
+		LeaseMax:       cfg.DHCP.LeaseMax,
+		Domain:         cfg.DHCP.Domain,
+		GatewayAddress: gateway,
+		Backend: dhcp.BackendConfig{
+			Name:       "dnsmasq",
+			ConfigFile: cfg.Services.Dnsmasq.ConfigFile,
+			LeaseFile:  cfg.Services.Dnsmasq.LeaseFile,
+		},
+	}
+
+	for _, rg := range cfg.DHCP.Ranges {
+		start, err := netip.ParseAddr(rg.Start)
+		if err != nil {
+			return dhcp.Policy{}, fmt.Errorf("dhcp.ranges.start %q is not an address: %w", rg.Start, err)
+		}
+		end, err := netip.ParseAddr(rg.End)
+		if err != nil {
+			return dhcp.Policy{}, fmt.Errorf("dhcp.ranges.end %q is not an address: %w", rg.End, err)
+		}
+		var mask netip.Addr
+		if rg.Netmask != "" {
+			if mask, err = netip.ParseAddr(rg.Netmask); err != nil {
+				return dhcp.Policy{}, fmt.Errorf("dhcp.ranges.netmask %q is not an address: %w", rg.Netmask, err)
+			}
+		}
+		p.Ranges = append(p.Ranges, dhcp.Range{Start: start, End: end, Netmask: mask})
+	}
+
+	for _, res := range cfg.DHCP.Reservations {
+		var addr netip.Addr
+		if res.Address != "" {
+			a, err := netip.ParseAddr(res.Address)
+			if err != nil {
+				return dhcp.Policy{}, fmt.Errorf("dhcp.reservations.address %q is not an address: %w", res.Address, err)
+			}
+			addr = a
+		}
+		p.Reservations = append(p.Reservations, dhcp.Reservation{
+			MAC:       res.MAC,
+			Address:   addr,
+			Hostname:  res.Hostname,
+			LeaseTime: res.LeaseTime,
+		})
+	}
+
+	if len(p.Ranges) == 0 && cfg.DHCP.Enabled && prefix.IsValid() {
+		p.Ranges = dhcp.DerivePool(prefix, 100, 150)
+	}
+
+	return p, nil
+}
+
+// dnsPolicyFromConfig derives a DNS policy from configuration.
+func dnsPolicyFromConfig(cfg config.Config) (dns.Policy, error) {
+	p := dns.Policy{
+		Enabled:              cfg.DNS.Enabled,
+		Interface:            cfg.Network.LAN,
+		LocalDomain:          cfg.DNS.LocalDomain,
+		CacheSize:            cfg.DNS.CacheSize,
+		LogQueries:           cfg.DNS.LogQueries,
+		NoIPv6:               cfg.DNS.NoIPv6,
+		RejectUnmappedBlocks: true,
+	}
+
+	if cfg.Network.LANPrefix != "" {
+		if prefix, err := netip.ParsePrefix(cfg.Network.LANPrefix); err == nil {
+			p.ListenAddress = prefix.Addr()
+		}
+	}
+
+	for _, u := range cfg.Network.DNS {
+		addr, err := netip.ParseAddr(u)
+		if err != nil {
+			return dns.Policy{}, fmt.Errorf("network.dns %q is not an address: %w", u, err)
+		}
+		p.Upstream = append(p.Upstream, addr)
+	}
+
+	for _, rec := range cfg.DNS.LocalRecords {
+		addr, err := netip.ParseAddr(rec.Address)
+		if err != nil {
+			return dns.Policy{}, fmt.Errorf("dns.local_records.address %q is not an address: %w", rec.Address, err)
+		}
+		p.LocalRecords = append(p.LocalRecords, dns.Record{
+			Hostname: rec.Hostname,
+			Address:  addr,
+			Aliases:  rec.Aliases,
+		})
+	}
+
+	return p, nil
+}
+
+// runDHCP implements the `thn dhcp` group.
+func runDHCP(env *Env, args []string) ExitCode {
+	if len(args) == 0 {
+		return env.fatalf("thn dhcp: expected a subcommand (render, validate, leases)\n")
+	}
+
+	switch args[0] {
+	case "render":
+		return runDHCPRender(env, args[1:])
+	case "validate":
+		return runDHCPValidate(env, args[1:])
+	case "leases":
+		return runDHCPLeases(env, args[1:])
+	default:
+		return env.fatalf("thn dhcp: unknown subcommand %q; expected render, validate or leases\n", args[0])
+	}
+}
+
+// resolveServiceRoot determines the sandbox root.
+//
+// --root confines every file operation to a directory, which is what makes the
+// whole pipeline testable without touching a real system. It is the same
+// switch CI uses.
+func resolveServiceRoot(env *Env, explicit string) sandbox.Root {
+	if explicit != "" {
+		return sandbox.New(explicit)
+	}
+	if v := env.Getenv("THN_ROOT"); v != "" {
+		return sandbox.New(v)
+	}
+	return sandbox.System()
+}
+
+// servicePolicies loads configuration and derives both policies.
+func servicePolicies(env *Env, configPath string) (dhcp.Policy, dns.Policy, string, ExitCode) {
+	path := env.resolveConfigPath(configPath)
+
+	cfg, err := loadConfig(env, path)
+	if err != nil {
+		env.errorf("thn: %v\n", err)
+		return dhcp.Policy{}, dns.Policy{}, path, ExitProblems
+	}
+
+	dp, err := dhcpPolicyFromConfig(cfg)
+	if err != nil {
+		env.errorf("thn: %v\n", err)
+		return dhcp.Policy{}, dns.Policy{}, path, ExitProblems
+	}
+
+	np, err := dnsPolicyFromConfig(cfg)
+	if err != nil {
+		env.errorf("thn: %v\n", err)
+		return dhcp.Policy{}, dns.Policy{}, path, ExitProblems
+	}
+
+	return dp, np, path, ExitOK
+}
+
+// runDHCPValidate implements `thn dhcp validate`.
+func runDHCPValidate(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn dhcp validate: %v\n", err)
+	}
+	if len(rest) > 0 {
+		*configPath = rest[0]
+	}
+
+	dp, np, path, code := servicePolicies(env, *configPath)
+	if code != ExitOK {
+		return code
+	}
+
+	dhcpResult := dhcp.Validate(dp)
+	dnsResult := dns.Validate(np)
+
+	if env.IsJSON {
+		if err := env.printJSON(map[string]any{
+			"config": path,
+			"dhcp": map[string]any{
+				"valid":    dhcpResult.Valid,
+				"findings": dhcpResult.Findings,
+			},
+			"dns": map[string]any{
+				"valid":    dnsResult.Valid,
+				"findings": dnsResult.Findings,
+			},
+		}); err != nil {
+			env.errorf("thn dhcp validate: %v\n", err)
+			return ExitProblems
+		}
+	} else {
+		printServiceValidation(env, path, dp, np, dhcpResult, dnsResult)
+	}
+
+	if !dhcpResult.Valid || !dnsResult.Valid {
+		return ExitProblems
+	}
+	return ExitOK
+}
+
+// printServiceValidation renders DHCP and DNS validation.
+func printServiceValidation(env *Env, path string, dp dhcp.Policy, np dns.Policy, dr dhcp.Result, nr dns.Result) {
+	env.printf("DHCP (from %s)\n", path)
+	env.printf("────────────\n")
+	env.printf("%s\n", dp)
+	env.printf("Result: %s (%d error, %d warning, %d info)\n",
+		passFail(dr.Valid), dr.ErrorCount, dr.WarningCount, dr.InfoCount)
+	printFindings(env, dhcpFindings(dr.Findings))
+
+	env.printf("\nDNS\n")
+	env.printf("────────────\n")
+	env.printf("%s\n", np)
+	env.printf("Result: %s (%d error, %d warning, %d info)\n",
+		passFail(nr.Valid), nr.ErrorCount, nr.WarningCount, nr.InfoCount)
+	printFindings(env, dnsFindings(nr.Findings))
+}
+
+// dhcpFindings projects DHCP findings into the shared view.
+func dhcpFindings(in []dhcp.Finding) []findingView {
+	out := make([]findingView, 0, len(in))
+	for _, f := range in {
+		out = append(out, findingView{
+			severity: string(f.Severity),
+			field:    f.Field,
+			message:  f.Message,
+			hint:     f.Hint,
+		})
+	}
+	return out
+}
+
+// dnsFindings projects DNS findings into the shared view.
+func dnsFindings(in []dns.Finding) []findingView {
+	out := make([]findingView, 0, len(in))
+	for _, f := range in {
+		out = append(out, findingView{
+			severity: string(f.Severity),
+			field:    f.Field,
+			message:  f.Message,
+			hint:     f.Hint,
+		})
+	}
+	return out
+}
+
+// printFindings renders a finding list.
+func printFindings(env *Env, findings []findingView) {
+	if len(findings) == 0 {
+		env.printf("\nNo findings.\n")
+		return
+	}
+	env.printf("\n")
+	for _, f := range findings {
+		env.printf("  %-8s %-30s %s\n", f.severity, f.field, f.message)
+		if f.hint != "" {
+			env.printf("  %-8s %-30s hint: %s\n", "", "", f.hint)
+		}
+	}
+}
+
+// findingView is a minimal projection of a finding, so that the two services'
+// finding types can be rendered by one function despite being distinct types.
+type findingView struct {
+	severity string
+	field    string
+	message  string
+	hint     string
+}
+
+// runDHCPRender implements `thn dhcp render`.
+//
+// Render produces the dnsmasq configuration. It does not start dnsmasq, does
+// not reload it, and does not touch the running server: loading the file is a
+// deliberate operator action.
+func runDHCPRender(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rootPath := fs.String("root", "")
+	out := fs.String("out", "")
+	force := fs.Bool("force", false)
+	skipValidate := fs.Bool("no-validate", false)
+
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn dhcp render: %v\n", err)
+	}
+	if len(rest) > 0 {
+		*configPath = rest[0]
+	}
+
+	dp, np, path, code := servicePolicies(env, *configPath)
+	if code != ExitOK {
+		return code
+	}
+
+	if !*skipValidate {
+		dhcpResult := dhcp.Validate(dp)
+		dnsResult := dns.Validate(np)
+		if !dhcpResult.Valid || !dnsResult.Valid {
+			env.errorf("thn dhcp render: the configuration is not valid; not rendering.\n\n")
+			printServiceValidation(env, path, dp, np, dhcpResult, dnsResult)
+			env.errorf("\nFix the findings above, or pass --no-validate to render anyway.\n")
+			return ExitProblems
+		}
+	}
+
+	content := dnsmasq.Render(dp, np, dp.LANPrefix, dp.GatewayAddress)
+
+	// The generated file is checked against dnsmasq's directive vocabulary
+	// before it is offered. A typo produces a file dnsmasq accepts and
+	// ignores, which is how a gateway ends up with no DNS and no indication
+	// why.
+	issues := dnsmasq.ValidateConfig(content)
+	if len(issues) > 0 && !*skipValidate {
+		env.errorf("thn dhcp render: the generated file contains unknown directives:\n\n")
+		for _, is := range issues {
+			env.errorf("  line %d: %s\n", is.Line, is.Message)
+		}
+		env.errorf("\nThis build would generate a file dnsmasq silently ignores.\n")
+		return ExitProblems
+	}
+
+	root := resolveServiceRoot(env, *rootPath)
+	target := *out
+	if target == "" {
+		target = dp.Backend.ConfigFile
+	}
+
+	if *out == "" {
+		if env.IsJSON {
+			if err := env.printJSON(map[string]any{
+				"config":      path,
+				"root":        root.String(),
+				"config_file": target,
+				"content":     content,
+				"written":     false,
+			}); err != nil {
+				env.errorf("thn dhcp render: %v\n", err)
+				return ExitProblems
+			}
+			return ExitOK
+		}
+		env.printf("%s", content)
+		return ExitOK
+	}
+
+	if root.Exists(target) && !*force {
+		env.errorf("thn dhcp render: %s already exists; pass --force to overwrite it.\n", target)
+		env.errorf("The generated file is THN-owned, so overwriting is safe, but this\n")
+		env.errorf("check exists so a render cannot overwrite a file by accident.\n")
+		return ExitProblems
+	}
+
+	if err := root.WriteFile(target, content, 0o644); err != nil {
+		env.errorf("thn dhcp render: %v\n", err)
+		return ExitProblems
+	}
+
+	if !env.IsJSON {
+		env.errorf("Wrote %d bytes to %s\n", len(content), root.Resolve(target))
+		env.errorf("\n")
+		env.errorf("Nothing has been applied. dnsmasq has not been started or reloaded.\n")
+		env.errorf("To check and load it:\n")
+		env.errorf("  dnsmasq --test --conf-file=%s\n", root.Resolve(target))
+		env.errorf("  systemctl reload dnsmasq\n")
+	}
+	return ExitOK
+}
+
+// runDHCPLeases implements `thn dhcp leases`, reading the lease file.
+func runDHCPLeases(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rootPath := fs.String("root", "")
+	asJSON := fs.Bool("json", false)
+	limit := fs.String("limit", "0")
+
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn dhcp leases: %v\n", err)
+	}
+	if len(rest) > 0 {
+		*configPath = rest[0]
+	}
+
+	dp, _, path, code := servicePolicies(env, *configPath)
+	if code != ExitOK {
+		return code
+	}
+
+	root := resolveServiceRoot(env, *rootPath)
+	source := dnsmasq.LeaseSource{Path: dp.Backend.LeaseFile}
+	collector := dhcp.NewCollector(source, identity.NewRegistry())
+
+	now := time.Now().UTC()
+	set, changes, err := collector.Collect(context.Background(), root, now)
+	if err != nil {
+		env.errorf("thn dhcp leases: %v\n", err)
+		return ExitProblems
+	}
+
+	reserved := reservedSet(dp.Reservations)
+	summary := dhcp.Summarise(set.Leases, dp.TotalAddresses(), now, reserved)
+
+	// Sorting by address is how an operator reads a lease table.
+	leases := make([]dhcp.Lease, len(set.Leases))
+	copy(leases, set.Leases)
+	dhcp.SortLeases(leases)
+
+	if *limit != "" && *limit != "0" {
+		if n, convErr := parsePort(*limit); convErr == nil && n > 0 && n < len(leases) {
+			leases = leases[:n]
+		}
+	}
+
+	if env.IsJSON || *asJSON {
+		if err := env.printJSON(map[string]any{
+			"config":     path,
+			"root":       root.String(),
+			"lease_file": dp.Backend.LeaseFile,
+			"summary":    summary,
+			"leases":     leases,
+			"devices":    collector.Registry().All(),
+			"problems":   set.Problems,
+			"changes":    changes,
+		}); err != nil {
+			env.errorf("thn dhcp leases: %v\n", err)
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	printLeases(env, path, root, dp, set, summary, leases, collector.Registry(), changes)
+	return ExitOK
+}
+
+// reservedSet returns the set of reserved hardware addresses.
+func reservedSet(reservations []dhcp.Reservation) map[string]bool {
+	out := make(map[string]bool, len(reservations))
+	for _, r := range reservations {
+		out[dhcp.NormalisedMAC(r.MAC)] = true
+	}
+	return out
+}
+
+// printLeases renders the lease table and device inventory.
+func printLeases(env *Env, path string, root sandbox.Root, dp dhcp.Policy,
+	set *dhcp.LeaseSet, summary dhcp.Summary, leases []dhcp.Lease,
+	reg *identity.Registry, changes []dhcp.DeviceChange) {
+
+	env.printf("Leases (from %s)\n", path)
+	env.printf("────────────\n")
+	env.printf("Lease file: %s\n", dp.Backend.LeaseFile)
+	env.printf("Root:       %s\n", root.String())
+	env.printf("Source:     %s\n", set.Source)
+	env.printf("Collected:  %s\n", set.CollectedAt.Format(time.RFC3339))
+	env.printf("\n")
+	env.printf("Total:      %d\n", summary.Total)
+	env.printf("Active:     %d\n", summary.Active)
+	env.printf("Expired:    %d\n", summary.Expired)
+	env.printf("Reserved:   %d\n", summary.Reserved)
+	env.printf("Uncorrelated: %d\n", summary.Uncorrelated)
+	env.printf("Addresses:  %d of %d in pool\n", summary.AddressesInUse, summary.PoolCapacity)
+	if summary.PoolCapacity > 0 {
+		env.printf("Utilisation: %.1f%%\n", summary.PoolUtilisation)
+	}
+	if summary.ShortestRemaining > 0 {
+		env.printf("Shortest lease: %s\n", roundDuration(summary.ShortestRemaining))
+	}
+
+	if len(set.Problems) > 0 {
+		env.printf("\nProblems\n")
+		for _, p := range set.Problems {
+			env.printf("  %s\n", p)
+		}
+	}
+
+	if len(changes) > 0 {
+		env.printf("\nNew since last observation\n")
+		for _, c := range changes {
+			env.printf("  %-17s %s  %s\n", c.Device.MAC, c.Device.String(), c.Kind)
+		}
+	}
+
+	env.printf("\n%-15s %-15s %-17s %-10s %s\n", "HOSTNAME", "ADDRESS", "MAC", "LEASE", "DEVICE")
+	now := set.CollectedAt
+	for _, l := range leases {
+		host := l.Hostname
+		if host == "" {
+			host = "-"
+		}
+		dev := "-"
+		if l.DeviceID != "" {
+			if d, ok := reg.Get(l.DeviceID); ok {
+				dev = d.ID
+			}
+		}
+		env.printf("%-15s %-15s %-17s %-10s %s\n",
+			truncate(host, 15), l.Address.String(), l.MAC,
+			roundDuration(l.Remaining(now)), dev)
+	}
+
+	devices := reg.All()
+	if len(devices) > 0 {
+		env.printf("\nDevices (%d)\n", len(devices))
+		env.printf("%-16s %-15s %-17s %-9s %s\n", "HOSTNAME", "ADDRESS", "MAC", "CONFIDENCE", "AGE")
+		for _, d := range devices {
+			addr := "-"
+			if a, ok := d.CurrentAddress(); ok {
+				addr = a.String()
+			}
+			env.printf("%-16s %-15s %-17s %-9s %s\n",
+				truncate(d.PrimaryHostname(), 16), addr, d.MAC,
+				string(d.Confidence), roundDuration(d.Age(now)))
+		}
+	}
+}
+
+// runDNS implements the `thn dns` group.
+func runDNS(env *Env, args []string) ExitCode {
+	if len(args) == 0 {
+		return env.fatalf("thn dns: expected a subcommand (render, validate, lookup)\n")
+	}
+
+	switch args[0] {
+	case "render":
+		return runDHCPRender(env, args[1:])
+	case "validate":
+		return runDHCPValidate(env, args[1:])
+	case "lookup":
+		return runDNSLookup(env, args[1:])
+	default:
+		return env.fatalf("thn dns: unknown subcommand %q; expected render, validate or lookup\n", args[0])
+	}
+}
+
+// runDNSLookup reports what a name would resolve to under the policy.
+//
+// It answers from the configuration alone. A name that is not a local record
+// would be forwarded upstream, and THN does not query upstream resolvers: doing
+// so from a planning tool would make its output depend on the internet.
+func runDNSLookup(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	name := fs.String("name", "")
+
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn dns lookup: %v\n", err)
+	}
+	if len(rest) > 0 {
+		*configPath = rest[0]
+	}
+
+	_, np, path, code := servicePolicies(env, *configPath)
+	if code != ExitOK {
+		return code
+	}
+
+	if *name == "" {
+		return env.fatalf("thn dns lookup: --name is required\n")
+	}
+
+	// The gateway's own name always resolves to itself.
+	matches := findRecords(np, *name)
+
+	if env.IsJSON {
+		if err := env.printJSON(map[string]any{
+			"config":    path,
+			"name":      *name,
+			"answers":   matches,
+			"forwarded": len(matches) == 0,
+		}); err != nil {
+			env.errorf("thn dns lookup: %v\n", err)
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	env.printf("%s\n", *name)
+	if len(matches) == 0 {
+		env.printf("  no local record; the query would be forwarded upstream to %s\n",
+			strings.Join(np.UpstreamStrings(), ", "))
+		return ExitOK
+	}
+	for _, m := range matches {
+		env.printf("  %-30s %s\n", m, "local record")
+	}
+	return ExitOK
+}
+
+// findRecords returns the addresses a name resolves to locally.
+func findRecords(p dns.Policy, name string) []string {
+	query := strings.ToLower(strings.TrimSuffix(name, "."))
+	var out []string
+
+	for _, rec := range p.LocalRecords {
+		names := append([]string{rec.Hostname}, rec.Aliases...)
+		for _, n := range names {
+			if strings.ToLower(n) == query ||
+				strings.ToLower(rec.FQDN(p.LocalDomain)) == query {
+				out = append(out, rec.Address.String())
+				break
+			}
+		}
+	}
+
+	return out
+}
+
+// truncate shortens a string for table display.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 1 {
+		return s[:max]
+	}
+	return s[:max-1] + "…"
+}
+
+// roundDuration renders a duration to a readable, fixed-width form.
+//
+// A sub-second duration is rendered as "just now" rather than "expired":
+// "expired" means a lease has lapsed, and using it for a device first seen
+// moments ago would report a newly-discovered device as if it were gone.
+func roundDuration(d time.Duration) string {
+	if d < 0 {
+		return "expired"
+	}
+	if d < time.Second {
+		return "just now"
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		days := int(d.Hours()) / 24
+		return fmt.Sprintf("%dd%02dh", days, int(d.Hours())%24)
+	}
+}
+
+// writeIfRequested writes content to a path inside the sandbox root.
+func writeIfRequested(root sandbox.Root, path, content string, force bool) error {
+	if root.Exists(path) && !force {
+		return fmt.Errorf("%s already exists; pass --force to overwrite it", path)
+	}
+	return root.WriteFile(path, content, 0o644)
+}
+
+// ensureRootExists creates the sandbox root, for tests and CI.
+func ensureRootExists(root sandbox.Root) error {
+	if root.Base == "" {
+		return nil
+	}
+	return os.MkdirAll(root.Base, 0o755)
+}
