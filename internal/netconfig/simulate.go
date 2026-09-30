@@ -132,6 +132,19 @@ func Simulate(p Policy, pkt Packet) Simulation {
 
 	s.simulateIngress(&p, pkt)
 
+	// A packet addressed to the gateway itself is delivered locally. It never
+	// reaches the forward chain, so running it through the forwarding rules
+	// would apply a decision that does not exist on a real host.
+	//
+	// This is checked before routing because it is a property of the
+	// destination address alone: whether the gateway could route the packet
+	// anywhere is irrelevant when the packet is already for it.
+	if p.isLocal(pkt.Destination) {
+		s.simulateLocalDelivery(pkt)
+		s.finish(VerdictAccepted)
+		return *s
+	}
+
 	// Routing is resolved before the forward chain is evaluated, because the
 	// forwarding decision depends on the direction of travel: lan-to-wan and
 	// wan-to-lan are different rules. A simulation that picked the direction
@@ -196,6 +209,30 @@ func (s *Simulation) simulateIngress(p *Policy, pkt Packet) {
 				"no ingress interface was given and the source address matches no configured network",
 				pkt.Source))
 	}
+}
+
+// simulateLocalDelivery records a packet addressed to the gateway itself.
+//
+// The result is deliberately not a verdict of "forwarded": nothing was
+// forwarded, and an operator reading the trace should not have to know the
+// difference between local delivery and egress to understand it.
+func (s *Simulation) simulateLocalDelivery(pkt Packet) {
+	s.addStep(StageRouting, OutcomePass, "local-delivery",
+		fmt.Sprintf("%s is an address of the gateway itself, so the packet is delivered "+
+			"locally and never traverses the forward chain", pkt.Destination))
+}
+
+// isLocal reports whether dst is one of the gateway's own addresses.
+func (p Policy) isLocal(dst netip.Addr) bool {
+	if !dst.IsValid() {
+		return false
+	}
+	for _, a := range p.LocalAddresses {
+		if a.IsValid() && a == dst {
+			return true
+		}
+	}
+	return false
 }
 
 // simulateForwarding walks the forwarding rules. It reports whether the packet

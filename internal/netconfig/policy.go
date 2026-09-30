@@ -218,6 +218,24 @@ type Policy struct {
 	// Interfaces names the roles.
 	Interfaces Interfaces `json:"interfaces"`
 
+	// LocalAddresses are the gateway's own addresses, across every
+	// interface.
+	//
+	// They are needed because a packet addressed to the gateway does not
+	// traverse the forward chain at all: it is delivered locally and
+	// filtered by the input chain instead. Without this list the data
+	// plane cannot tell "this packet is for me" from "this packet is for
+	// a client", and reports a client's ping to the gateway as dropped by
+	// the forward chain's default policy. That is the opposite of what
+	// the rendered ruleset does, which accepts LAN ICMP on the input
+	// chain — a gateway that simulates as unreachable to its own clients.
+	//
+	// An empty list means the gateway has no known address, so nothing is
+	// recognised as local and every destination is treated as forwarded.
+	// That is the conservative direction: a packet wrongly treated as
+	// forwarded is a less harmful wrong answer than one wrongly dropped.
+	LocalAddresses []netip.Addr `json:"local_addresses,omitempty"`
+
 	// Routing is the desired routing table.
 	Routing Routing `json:"routing"`
 
@@ -285,6 +303,15 @@ func Default() Policy {
 // mutating the policy concurrently.
 func (p Policy) Clone() Policy {
 	out := p
+
+	// Every slice is copied rather than shared. A shallow copy of a
+	// slice shares its backing array, so an append on the clone would
+	// write into the original — and the original is frequently the
+	// caller's policy, which must not be mutated by a render or a
+	// simulation.
+	if p.LocalAddresses != nil {
+		out.LocalAddresses = append([]netip.Addr(nil), p.LocalAddresses...)
+	}
 
 	out.Routing.Routes = make([]Route, len(p.Routing.Routes))
 	copy(out.Routing.Routes, p.Routing.Routes)

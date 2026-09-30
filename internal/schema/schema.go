@@ -84,10 +84,11 @@ var fields = []Field{
 	{Key: "firewall.default_inbound_policy", Type: TypeEnum, Enum: []string{"accept", "drop"}, Description: "Base policy for unmatched traffic", Default: "drop"},
 
 	{Key: "qos.enabled", Type: TypeBool, Description: "Shape outbound traffic", Default: "false", Mutating: true},
-	{Key: "qos.algorithm", Type: TypeEnum, Enum: []string{"cake"}, Description: "Shaping algorithm", Default: "cake"},
-	{Key: "qos.interface", Type: TypeInterface, Description: "Device to shape", Mutating: true},
-	{Key: "qos.download_kbps", Type: TypeInt, Description: "Shaped download rate in kbps", Mutating: true},
-	{Key: "qos.upload_kbps", Type: TypeInt, Description: "Shaped upload rate in kbps", Mutating: true},
+	{Key: "qos.algorithm", Type: TypeEnum, Enum: []string{"cake", "fq_codel"}, Description: "Shaping algorithm; only cake can enforce a rate", Default: "cake"},
+	{Key: "qos.interface", Type: TypeInterface, Description: "Device to shape; must face the bottleneck link", Mutating: true},
+	{Key: "qos.download_kbps", Type: TypeInt, Description: "Provisioned download rate in kbps, not the negotiated link speed", Mutating: true},
+	{Key: "qos.upload_kbps", Type: TypeInt, Description: "Provisioned upload rate in kbps", Mutating: true},
+	{Key: "qos.overhead_percent", Type: TypeInt, Description: "Framing overhead compensation; 0 takes the 10% default", Default: "0", Mutating: true},
 
 	{Key: "dhcp.enabled", Type: TypeBool, Description: "Serve addresses on the LAN", Default: "true", Mutating: true},
 	{Key: "dhcp.authoritative", Type: TypeBool, Description: "Declare authority for the LAN", Default: "true", Mutating: true},

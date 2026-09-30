@@ -137,7 +137,11 @@ type FirewallConfig struct {
 type QoSConfig struct {
 	Enabled bool `yaml:"enabled"`
 
-	// Algorithm is the shaping algorithm. Only "cake" is supported.
+	// Algorithm is the shaping algorithm: "cake" or "fq_codel".
+	//
+	// Only cake can enforce the configured rate. fq_codel is accepted as an
+	// explicit choice but is reported as rate-unaware, and THN falls back to
+	// it when a kernel cannot provide cake.
 	Algorithm string `yaml:"algorithm"`
 
 	// Interface is the egress device to shape.
@@ -148,6 +152,12 @@ type QoSConfig struct {
 
 	// UploadKbps is the shaped upload rate in kilobits per second.
 	UploadKbps int `yaml:"upload_kbps"`
+
+	// OverheadPercent compensates for protocol and Ethernet framing overhead.
+	// Zero means "not configured", which is not the same as zero: THN applies
+	// its 10 percent default rather than shaping at the payload rate, which
+	// would leave the link permanently a tenth under-utilised.
+	OverheadPercent int `yaml:"overhead_percent"`
 }
 
 // DHCPRangeConfig is one address pool handed out by DHCP.
@@ -758,15 +768,28 @@ func (c Config) Validate() ValidationResult {
 
 	// --- QoS ---
 
+	// fq_codel is accepted as an explicit choice, not only as a fallback. An
+	// operator who knows their kernel lacks CAKE, or who wants flow
+	// separation without shaping, should be able to say so rather than have
+	// the decision made for them. internal/qos reports it as rate-unaware
+	// either way.
 	switch c.QoS.Algorithm {
 	case "":
 		if c.QoS.Enabled {
-			v.Add("qos.algorithm", SeverityError, "must be set when QoS is enabled; supported algorithms: cake")
+			v.Add("qos.algorithm", SeverityError,
+				"must be set when QoS is enabled; supported algorithms: cake, fq_codel")
 		}
-	case "cake":
+	case "cake", "fq_codel":
+		if c.QoS.Algorithm == "fq_codel" && c.QoS.Enabled {
+			// Not an error, and not a rule that should be worked around: it
+			// says plainly what the operator is giving up.
+			v.Add("qos.algorithm", SeverityWarning,
+				"fq_codel is not rate-aware; it smooths bursts and controls the local queue but cannot "+
+					"reduce bufferbloat on the bottleneck link. Use cake if latency under load is the problem")
+		}
 	default:
 		v.Add("qos.algorithm", SeverityError,
-			fmt.Sprintf("unsupported algorithm %q; supported algorithms: cake", c.QoS.Algorithm))
+			fmt.Sprintf("unsupported algorithm %q; supported algorithms: cake, fq_codel", c.QoS.Algorithm))
 	}
 
 	if c.QoS.Enabled {
@@ -781,7 +804,7 @@ func (c Config) Validate() ValidationResult {
 			v.Add("qos.upload_kbps", SeverityError,
 				"must be a positive rate when QoS is enabled")
 		}
-		if c.QoS.Enabled && c.QoS.DownloadKbps > 0 && c.QoS.UploadKbps > c.QoS.DownloadKbps {
+		if c.QoS.DownloadKbps > 0 && c.QoS.UploadKbps > c.QoS.DownloadKbps {
 			v.Add("qos.upload_kbps", SeverityWarning,
 				fmt.Sprintf("upload rate (%d kbps) exceeds download rate (%d kbps), which is unusual for a WAN uplink",
 					c.QoS.UploadKbps, c.QoS.DownloadKbps))

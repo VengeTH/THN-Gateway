@@ -43,6 +43,18 @@ func policyFromConfig(cfg config.Config) fwpolicy.Policy {
 		p.Masquerade.Enabled = false
 	}
 
+	// NAT is a separate switch from the firewall, and the two are configured
+	// separately. Honouring it here matters because the masquerade rule is
+	// what makes the LAN reachable from the internet: leaving it in place
+	// after NAT was turned off would keep rewriting source addresses for a
+	// configuration that asked not to be rewritten.
+	//
+	// The data plane is told the same thing in netPolicyFromConfig, so the
+	// two models cannot drift apart on this.
+	if !cfg.NAT.Enabled {
+		p.Masquerade.Enabled = false
+	}
+
 	// A drop-by-default inbound policy is what THN emits. An accept policy is
 	// a genuine operator choice, and it is recorded as a warning by policy
 	// validation rather than silently ignored here.

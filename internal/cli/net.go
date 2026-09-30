@@ -42,6 +42,30 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 		},
 	}
 
+	// A disabled firewall means no forwarding at all, and the data plane has
+	// to say so.
+	//
+	// Without this the two models disagree in the worst possible direction:
+	// policyFromConfig drops lan-to-wan when the firewall is off, so the
+	// rendered ruleset black-holes the LAN, while this policy keeps reporting
+	// that traffic forwards. Every simulation would then describe a gateway
+	// that does not work. The intent is documented in policyFromConfig; this
+	// is the other half of it.
+	if !cfg.Firewall.Enabled {
+		p.Forwarding.Rules = []netconfig.ForwardRule{
+			{
+				Direction: netconfig.LANToWAN,
+				Action:    "drop",
+				Comment:   "the firewall is disabled, so no direction is forwarded",
+			},
+			{
+				Direction: netconfig.WANToLAN,
+				Action:    "drop",
+				Comment:   "the firewall is disabled, so no direction is forwarded",
+			},
+		}
+	}
+
 	if cfg.Network.LANPrefix != "" {
 		if prefix, err := netip.ParsePrefix(cfg.Network.LANPrefix); err == nil {
 			// The LAN network is directly connected, so it is a route with no
@@ -56,6 +80,12 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 
 			// Restrict the NAT ingress to the LAN rather than any interface.
 			p.NAT.InInterface = cfg.Network.LAN
+
+			// The gateway's own LAN address. Traffic addressed to it is
+			// delivered locally and must not be run through the forward
+			// chain's rules, which would report a client reaching the
+			// gateway as dropped.
+			p.LocalAddresses = append(p.LocalAddresses, prefix.Addr())
 		}
 	}
 

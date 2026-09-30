@@ -37,6 +37,14 @@ func qosPolicyFromConfig(cfg config.Config) qos.Policy {
 	p.Algorithm = qos.Algorithm(cfg.QoS.Algorithm)
 	p.Bandwidth.DownloadKbps = cfg.QoS.DownloadKbps
 	p.Bandwidth.UploadKbps = cfg.QoS.UploadKbps
+
+	// A zero here means "not configured". Passing it through would look like
+	// an instruction to apply no overhead, which is not the same thing: THN
+	// substitutes its 10% default only when the field is left alone.
+	if cfg.QoS.OverheadPercent != 0 {
+		p.Bandwidth.OverheadPercent = cfg.QoS.OverheadPercent
+	}
+
 	p.MTU = cfg.Network.MTU
 	p.FallbackToFqCodel = true
 

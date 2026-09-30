@@ -80,13 +80,20 @@ func TestRenderCakeCarriesTheRate(t *testing.T) {
 // TestRenderCakeAppliesOverhead: the wire rate must exceed the payload rate,
 // or the link is permanently under-utilised by about a tenth.
 func TestRenderCakeAppliesOverhead(t *testing.T) {
-	cmd := soleCommand(t, Render(renderPolicy(), renderSelection()))
+	script := Render(renderPolicy(), renderSelection())
+	cmd := soleCommand(t, script)
 
 	if strings.Contains(cmd, "bandwidth 100000kbit") {
 		t.Error("the rendered bandwidth is the raw payload rate; overhead was not applied")
 	}
-	if !strings.Contains(cmd, "10% framing overhead") {
+	// The rate is raised by 10%, so the number in the command will not match
+	// the number in the configuration. An unexplained discrepancy reads as a
+	// bug, so the script has to account for it.
+	if !strings.Contains(script, "10% framing overhead") {
 		t.Error("the script must state that the rate includes overhead, or the number looks wrong")
+	}
+	if !strings.Contains(script, "reaches the configured 100000kbit/s down") {
+		t.Error("the script must restate the configured payload rate, so the wire rate reconciles")
 	}
 }
 
@@ -210,7 +217,7 @@ func TestRenderWithoutAnInterfaceEmitsNoCommand(t *testing.T) {
 	if cmds := commandLines(script); len(cmds) != 0 {
 		t.Errorf("expected no commands for an unset interface, got %v", cmds)
 	}
-	if !strings.Contains(script, "no interface is configured") {
+	if !strings.Contains(script, "No interface is configured") {
 		t.Error("the script must say why there is no command")
 	}
 }
@@ -226,28 +233,36 @@ func TestRenderWithAlgorithmNoneEmitsNoCommand(t *testing.T) {
 	}
 }
 
-// TestRenderIsValidShell: the output is offered as a script, so an unbalanced
-// quote or a stray backslash would break it at the worst moment.
+// TestRenderIsValidShell: the output is offered as a script, so a malformed
+// command line would break it at the worst moment.
+//
+// Only command lines are checked. Comments are prose and legitimately contain
+// apostrophes; counting quotes across the whole file would flag "device's
+// queue" as an unbalanced quote, which it is not.
 func TestRenderIsValidShell(t *testing.T) {
 	for name, script := range map[string]string{
 		"cake":     Render(renderPolicy(), renderSelection()),
 		"degraded": Render(renderPolicy(), degradedSelection()),
 		"noiface":  Render(func() qos.Policy { p := renderPolicy(); p.Interface = ""; return p }(), renderSelection()),
 	} {
-		if strings.Count(script, "'")%2 != 0 {
-			t.Errorf("%s: odd number of single quotes", name)
-		}
-		if strings.Count(script, "\"")%2 != 0 {
-			t.Errorf("%s: odd number of double quotes", name)
-		}
-		// Every non-comment line must be a complete shell statement.
 		for _, line := range strings.Split(script, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 				continue
 			}
-			if !strings.HasPrefix(trimmed, "tc ") {
+			if strings.Count(trimmed, "'")%2 != 0 {
+				t.Errorf("%s: unbalanced single quote in %q", name, trimmed)
+			}
+			if strings.Count(trimmed, "\"")%2 != 0 {
+				t.Errorf("%s: unbalanced double quote in %q", name, trimmed)
+			}
+			if !strings.HasPrefix(trimmed, "tc qdisc replace dev ") {
 				t.Errorf("%s: unexpected command line %q", name, trimmed)
+			}
+			// A line chaining two commands would apply the first and abandon
+			// the second, leaving the interface in a state neither asked for.
+			if strings.Contains(trimmed, ";") || strings.Contains(trimmed, "&&") {
+				t.Errorf("%s: command line chains two commands: %q", name, trimmed)
 			}
 		}
 	}
@@ -278,9 +293,10 @@ func TestRenderWarnsAboutRemoteApplication(t *testing.T) {
 	script := Render(renderPolicy(), renderSelection())
 
 	for _, want := range []string{
-		"Changes host networking",
+		"changes host networking",
+		"From a remote session",
 		"Capture the current state first",
-		"Nothing has been applied",
+		"THN does not apply this",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script is missing the warning %q", want)

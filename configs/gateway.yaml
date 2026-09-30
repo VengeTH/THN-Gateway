@@ -61,10 +61,26 @@ qos:
   # present, which THN cannot know while the hardware is absent. Enabling this
   # with a guessed rate would silently cap a real link.
   enabled: false
+
+  # cake shapes toward the configured bandwidth, which is what actually
+  # reduces bufferbloat. fq_codel only smooths bursts and controls the local
+  # queue. THN falls back to fq_codel on a kernel without cake and says so
+  # loudly, because the fallback does not fix latency under load.
   algorithm: cake
+
+  # The uplink facing the bottleneck. Shaping belongs there, not on the LAN:
+  # the queue that needs shortening is the one on the slow side.
   interface: ""
+
+  # What the link is actually provisioned for, not what the interface
+  # negotiates. A 500Mbit/s circuit on a gigabit port is provisioned at 500.
   download_kbps: 0
   upload_kbps: 0
+
+  # Framing overhead compensation, percent. CAKE's bandwidth is the wire rate,
+  # so this is added to the figures above before they are passed to tc. Leave
+  # it at 0 to take THN's 10% default; 8 to 12 is the realistic range.
+  overhead_percent: 0
 
 paths:
   config: /etc/thn/config.yaml

@@ -1,5 +1,4 @@
 package qos
-package qos
 
 import (
 	"strings"
