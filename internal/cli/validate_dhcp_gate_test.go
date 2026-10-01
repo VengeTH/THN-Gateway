@@ -116,9 +116,13 @@ func dhcpGateConfig(t *testing.T, c dhcpGateCase) (config.Config, string) {
 	cfg.Network.MTU = 1500
 
 	cfg.NAT.Enabled = true
+	cfg.NAT.Masquerade.Enabled = true
+	cfg.NAT.Masquerade.Outbound = "wan"
 	// LAN only: masquerading from the WAN is a routing loop and the static
 	// layer refuses to name the WAN here.
 	cfg.NAT.Interfaces = []string{"enp1s0"}
+	cfg.NAT.Masquerade.Enabled = true
+	cfg.NAT.Masquerade.Outbound = "wan"
 
 	cfg.Firewall.Enabled = true
 	cfg.Firewall.Backend = "nftables"
@@ -133,7 +137,6 @@ func dhcpGateConfig(t *testing.T, c dhcpGateCase) (config.Config, string) {
 
 	cfg.DNS.Enabled = true
 	cfg.DNS.LocalDomain = "lan.home"
-	cfg.DNS.Upstream = []string{"1.1.1.1"}
 
 	return loadTopology(t, cfg)
 }
@@ -239,7 +242,11 @@ func TestValidateDoesNotSilentlyBypassDHCP(t *testing.T) {
 			cfg.Network.LANPrefix = "192.168.1.1/24"
 			cfg.Network.MTU = 1500
 			cfg.NAT.Enabled = true
+			cfg.NAT.Masquerade.Enabled = true
+			cfg.NAT.Masquerade.Outbound = "wan"
 			cfg.NAT.Interfaces = []string{"enp1s0"}
+			cfg.NAT.Masquerade.Enabled = true
+			cfg.NAT.Masquerade.Outbound = "wan"
 			cfg.Firewall.Enabled = true
 			cfg.Firewall.Backend = "nftables"
 			cfg.Firewall.DefaultInboundPolicy = "drop"
@@ -249,7 +256,6 @@ func TestValidateDoesNotSilentlyBypassDHCP(t *testing.T) {
 			cfg.DHCP.Ranges = []config.DHCPRangeConfig{{Start: p[0], End: p[1]}}
 			cfg.DNS.Enabled = true
 			cfg.DNS.LocalDomain = "lan.home"
-			cfg.DNS.Upstream = []string{"1.1.1.1"}
 
 			loaded, path := loadTopology(t, cfg)
 

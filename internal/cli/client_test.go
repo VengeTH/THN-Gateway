@@ -10,6 +10,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,17 +66,44 @@ func startDaemon(t *testing.T) string {
 		_ = d.Close()
 	})
 
-	// Wait for the socket rather than sleeping a fixed amount.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return path
+	// Wait for the daemon to ACCEPT connections, not for the socket file to
+	// appear.
+	//
+	// The previous version polled os.Stat and returned as soon as the file
+	// existed. That is the wrong readiness signal: a Unix socket is created
+	// by the bind, which can happen before the listener is serving. The test
+	// would hand back a path the daemon had not begun accepting on, and the
+	// CLI under test would fail with ECONNREFUSED — a failure in the test
+	// rather than in the code, which is what made this intermittently red
+	// under load.
+	//
+	// Dialling is the same check the CLI itself performs, so the test waits
+	// for exactly the condition it is about to depend on. It is stricter than
+	// the file check, not looser.
+	if err := waitForSocket(path, 10*time.Second); err != nil {
+		t.Fatalf("the daemon never accepted a connection on %s: %v", path, err)
+	}
+	return path
+}
+
+// waitForSocket dials path until it connects or the deadline passes.
+func waitForSocket(path string, within time.Duration) error {
+	deadline := time.Now().Add(within)
+
+	var last error
+	for {
+		conn, err := net.Dial("unix", path)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		last = err
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("after %s: %w", within, last)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	t.Fatalf("the daemon never created %s", path)
-	return ""
 }
 
 // cliFor builds an Env pointed at a socket, capturing output.

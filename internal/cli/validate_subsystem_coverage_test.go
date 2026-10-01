@@ -45,6 +45,8 @@ func auditConfig() config.Config {
 	cfg.Network.DNS = []string{"1.1.1.1"}
 
 	cfg.NAT.Enabled = true
+	cfg.NAT.Masquerade.Enabled = true
+	cfg.NAT.Masquerade.Outbound = "wan"
 
 	cfg.Firewall.Enabled = true
 	cfg.Firewall.Backend = "nftables"
@@ -59,7 +61,6 @@ func auditConfig() config.Config {
 
 	cfg.DNS.Enabled = true
 	cfg.DNS.LocalDomain = "lan"
-	cfg.DNS.Upstream = []string{"1.1.1.1"}
 
 	return cfg
 }
@@ -213,6 +214,8 @@ func TestValidateAcceptsACompleteConfiguration(t *testing.T) {
 	cfg.Network.DNS = []string{"1.1.1.1", "9.9.9.9"}
 
 	cfg.NAT.Enabled = true
+	cfg.NAT.Masquerade.Enabled = true
+	cfg.NAT.Masquerade.Outbound = "wan"
 	// The NAT list is the LAN only; masquerading from the WAN is a routing
 	// loop and validation.Static refuses it.
 	cfg.NAT.Interfaces = []string{"enp1s0"}
@@ -230,7 +233,6 @@ func TestValidateAcceptsACompleteConfiguration(t *testing.T) {
 
 	cfg.DNS.Enabled = true
 	cfg.DNS.LocalDomain = "lan.home"
-	cfg.DNS.Upstream = []string{"1.1.1.1", "9.9.9.9"}
 
 	_, path := loadTopology(t, cfg)
 

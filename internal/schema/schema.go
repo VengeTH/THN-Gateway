@@ -78,10 +78,13 @@ var fields = []Field{
 
 	{Key: "nat.enabled", Type: TypeBool, Description: "Masquerade traffic from the LAN", Default: "true", Mutating: true},
 	{Key: "nat.interfaces", Type: TypeList, Description: "Interfaces to masquerade from", Mutating: true},
+	{Key: "nat.masquerade.enabled", Type: TypeBool, Description: "Source-NAT outbound traffic", Default: "true", Mutating: true},
+	{Key: "nat.masquerade.outbound", Type: TypeInterface, Description: "Interface masqueraded traffic leaves by, or the role \"wan\"", Mutating: true},
 
 	{Key: "firewall.enabled", Type: TypeBool, Description: "Filter unsolicited inbound traffic", Default: "true", Mutating: true},
 	{Key: "firewall.backend", Type: TypeEnum, Enum: []string{"nftables"}, Description: "Firewall implementation", Default: "nftables"},
 	{Key: "firewall.default_inbound_policy", Type: TypeEnum, Enum: []string{"accept", "drop"}, Description: "Base policy for unmatched traffic", Default: "drop"},
+	{Key: "firewall.admin_sources", Type: TypeList, Description: "Networks permitted to administer the gateway; empty means any source", Mutating: true},
 
 	{Key: "qos.enabled", Type: TypeBool, Description: "Shape outbound traffic", Default: "false", Mutating: true},
 	{Key: "qos.algorithm", Type: TypeEnum, Enum: []string{"cake", "fq_codel"}, Description: "Shaping algorithm; only cake can enforce a rate", Default: "cake"},

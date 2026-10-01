@@ -415,6 +415,41 @@ func validateCoherence(r *Result, cfg config.Config) {
 		}
 	}
 
+	// Resolvers may be named twice, and the two fields must not disagree.
+	//
+	// network.dns is the host's own resolver list; dns.upstream is what the
+	// DNS service forwards to. A document setting both to different values
+	// describes a machine whose queries and whose clients' queries go
+	// different ways, and nothing downstream could act on the difference.
+	//
+	// This check exists because the disagreement used to be invisible:
+	// dns.upstream was never read at all, so editing it changed nothing and
+	// nothing said so.
+	if len(cfg.DNS.Upstream) > 0 && len(cfg.Network.DNS) > 0 {
+		if sameResolverList(cfg.DNS.Upstream, cfg.Network.DNS) {
+			r.warnf(LayerStatic, "dns.upstream",
+				"resolvers are listed twice, as dns.upstream and network.dns; "+
+					"they agree today, but one of them should be removed",
+				"dns.upstream is authoritative for the DNS service; keep it and drop network.dns")
+		} else {
+			r.errorf(LayerStatic, "dns.upstream",
+				fmt.Sprintf("dns.upstream (%s) and network.dns (%s) name different resolvers",
+					strings.Join(cfg.DNS.Upstream, ", "), strings.Join(cfg.Network.DNS, ", ")),
+				"dns.upstream is authoritative for the DNS service; make network.dns match it or remove network.dns")
+		}
+	}
+
+	// NAT masquerading needs an outbound interface. Without one the rendered
+	// rule applies to every interface including the LAN, which rewrites
+	// LAN-to-LAN source addresses and presents as intermittent hardware
+	// failure rather than as a misconfiguration.
+	if cfg.NAT.Enabled && cfg.NAT.Masquerade.Enabled && cfg.NAT.Masquerade.Outbound == "" {
+		r.errorf(LayerStatic, "nat.masquerade.outbound",
+			"masquerading is enabled with no outbound interface, so source addresses "+
+				"would be rewritten on every interface including the LAN",
+			fmt.Sprintf("set nat.masquerade.outbound to the %q role or to the uplink interface name", "wan"))
+	}
+
 	// Everything requested, nothing identifiable to request it on.
 	if cfg.NAT.Enabled && cfg.Network.LAN == "" && len(cfg.NAT.Interfaces) == 0 {
 		r.infof(LayerStatic, "nat.interfaces",
@@ -516,6 +551,27 @@ func Combined(cfg config.Config, obs *diff.Observed, d diff.Result) Result {
 	}
 	merged.finalise()
 	return merged
+}
+
+// sameResolverList reports whether two resolver lists name the same set.
+//
+// Order is not significant: a document that lists the same resolvers in a
+// different order has not disagreed with itself.
+func sameResolverList(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // checkInterfaceName returns a message when an interface name is implausible.

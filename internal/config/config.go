@@ -133,7 +133,37 @@ type NATConfig struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Interfaces to masquerade traffic from.
+	//
+	// This is the INBOUND side: which networks get their source addresses
+	// rewritten. The outbound side — the interface traffic leaves by — is
+	// Masquerade.Outbound, and it is a separate field on purpose, because
+	// conflating them is how a ruleset ends up masquerading onto the LAN.
 	Interfaces []string `yaml:"interfaces"`
+
+	// Masquerade carries the source-NAT intent.
+	Masquerade MasqueradeConfig `yaml:"masquerade"`
+}
+
+// MasqueradeConfig is the source-NAT half of NAT.
+type MasqueradeConfig struct {
+	// Enabled reports whether outbound traffic is source-NATed.
+	//
+	// It is separate from NAT.Enabled so that "rewrite what leaves this host"
+	// and "which networks get rewritten" can be reasoned about separately.
+	// Masquerading without NAT is a legitimate transient state while an
+	// operator brings an uplink up.
+	Enabled bool `yaml:"enabled"`
+
+	// Outbound is the interface masqueraded traffic leaves by — the logical
+	// WAN role in practice.
+	//
+	// It may be a role ("wan") or an interface name. A role is resolved at
+	// plan time against the observed host; a name is taken literally. Empty
+	// means "unset", which policy validation reports, because a masquerade
+	// rule with no outbound interface applies to EVERY interface including
+	// the LAN — which breaks LAN-to-LAN traffic in a way that looks like
+	// intermittent hardware failure.
+	Outbound string `yaml:"outbound"`
 }
 
 // FirewallConfig controls filtering intent.
@@ -146,6 +176,21 @@ type FirewallConfig struct {
 
 	// DefaultInboundPolicy is "accept" or "drop".
 	DefaultInboundPolicy string `yaml:"default_inbound_policy"`
+
+	// AdminSources are the networks permitted to administer the gateway.
+	//
+	// Empty means any source, which policy validation reports as a risk
+	// finding rather than an error: an operator who has not yet decided where
+	// management traffic comes from should get a warning, not a refusal.
+	//
+	// This field exists because the firewall policy already models, validates
+	// and RENDERS an admin source restriction — without it, that restriction
+	// could not be expressed by any document, so the emitted rule would always
+	// be the open one. Naming it here makes the existing capability reachable.
+	//
+	// The values are networks, not addresses or interface names. Every entry
+	// becomes an nftables saddr match on the admin rule.
+	AdminSources []string `yaml:"admin_sources"`
 }
 
 // QoSConfig controls traffic shaping intent.
@@ -431,6 +476,10 @@ func Defaults() Config {
 			Interfaces: []string{},
 		},
 		Firewall: FirewallConfig{
+			// Defaulted off in the sense that nothing is restricted yet,
+			// which is what every previous default did. Policy validation
+			// warns about this on every run until an operator narrows it.
+			AdminSources:         []string{},
 			Enabled:              true,
 			Backend:              "nftables",
 			DefaultInboundPolicy: "drop",
@@ -472,8 +521,20 @@ func Defaults() Config {
 			Reservations: []DHCPReservationConfig{},
 		},
 		DNS: DNSConfig{
-			Enabled:      true,
-			Upstream:     []string{"1.1.1.1", "9.9.9.9"},
+			Enabled: true,
+			// Upstream is deliberately EMPTY by default.
+			//
+			// dns.upstream is the authoritative list for the DNS service, but
+			// populating it here would make every document that set
+			// network.dns — which is most of them, and is the older field —
+			// disagree with itself. Setting both by default made the two
+			// fields conflict for reasons no operator had done anything to
+			// cause.
+			//
+			// An empty list falls back to network.dns, which is populated
+			// below. A document that wants the DNS service to forward
+			// somewhere other than the host's own resolvers sets this.
+			Upstream:     []string{},
 			LocalDomain:  "lan",
 			LocalRecords: []LocalRecordConfig{},
 			CacheSize:    1000,

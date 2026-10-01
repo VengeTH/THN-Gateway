@@ -91,6 +91,38 @@ func dhcpPolicyFromConfig(cfg config.Config) (dhcp.Policy, error) {
 }
 
 // dnsPolicyFromConfig derives a DNS policy from configuration.
+// upstreamResolvers decides which resolvers the DNS service forwards to.
+//
+// # Two fields, one concept, and why this is explicit
+//
+// A configuration can name resolvers twice:
+//
+//	network.dns    the resolvers the HOST should use
+//	dns.upstream   the resolvers the DNS SERVICE should forward to
+//
+// Those are different concerns, and both are legitimate. They are not
+// different VALUES though: a document that set them to different resolvers
+// would be describing a machine whose own queries go one way and whose
+// clients' queries go another, and nothing in the rest of the model could
+// act on the difference.
+//
+// So: dns.upstream is canonical for the service, network.dns is the fallback
+// for documents that predate it, and a document that sets both to DIFFERENT
+// values is rejected by validation. Silently preferring one is what made this
+// invisible before — editing dns.upstream did nothing and said nothing.
+//
+// Which field was used is returned so the policy can record its provenance and
+// a caller can report it.
+func upstreamResolvers(cfg config.Config) (list []string, from string, err error) {
+	if len(cfg.DNS.Upstream) > 0 {
+		return cfg.DNS.Upstream, "dns.upstream", nil
+	}
+	if len(cfg.Network.DNS) > 0 {
+		return cfg.Network.DNS, "network.dns", nil
+	}
+	return nil, "", nil
+}
+
 func dnsPolicyFromConfig(cfg config.Config) (dns.Policy, error) {
 	p := dns.Policy{
 		Enabled:              cfg.DNS.Enabled,
@@ -108,10 +140,14 @@ func dnsPolicyFromConfig(cfg config.Config) (dns.Policy, error) {
 		}
 	}
 
-	for _, u := range cfg.Network.DNS {
-		addr, err := netip.ParseAddr(u)
-		if err != nil {
-			return dns.Policy{}, fmt.Errorf("network.dns %q is not an address: %w", u, err)
+	upstreams, from, err := upstreamResolvers(cfg)
+	if err != nil {
+		return dns.Policy{}, err
+	}
+	for _, u := range upstreams {
+		addr, perr := netip.ParseAddr(u)
+		if perr != nil {
+			return dns.Policy{}, fmt.Errorf("%s %q is not an address: %w", from, u, perr)
 		}
 		p.Upstream = append(p.Upstream, addr)
 	}

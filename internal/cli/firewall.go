@@ -9,6 +9,7 @@ import (
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/firewall/nft"
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/host"
 )
 
 // policyFromConfig derives a firewall policy from a configuration document.
@@ -34,6 +35,17 @@ func policyFromConfig(cfg config.Config) fwpolicy.Policy {
 	p.Admin.Enabled = true
 	p.Admin.Service = fwpolicy.SSH
 
+	// The administrative source restriction. This is the only place it can
+	// come from: the policy models, validates and renders it, but until this
+	// existed no configuration document could carry it, so the rendered admin
+	// rule was always the open one and policy validation warned about it on
+	// every single run.
+	//
+	// A nil slice and an empty slice are equivalent here. The distinction
+	// that matters is whether an operator narrowed it, and empty means they
+	// have not — which is a warning, not an error.
+	p.Admin.Source = cfg.Firewall.AdminSources
+
 	if !cfg.Firewall.Enabled {
 		// Disabled means disabled: no masquerade and no forwarding, which
 		// validation will report as an error because a gateway that forwards
@@ -53,6 +65,36 @@ func policyFromConfig(cfg config.Config) fwpolicy.Policy {
 	// two models cannot drift apart on this.
 	if !cfg.NAT.Enabled {
 		p.Masquerade.Enabled = false
+	}
+
+	// The masquerade rule's outbound interface.
+	//
+	// This was previously never set, which meant the rendered masquerade
+	// rule applied to EVERY interface — including the LAN. That rewrites
+	// LAN-to-LAN source addresses and presents as intermittent hardware
+	// failure rather than as the misconfiguration it is.
+	//
+	// The value may name a logical role or an interface. A role is the
+	// operator-friendly form and is resolved here against the interfaces the
+	// configuration has bound; a name is taken literally, which is what an
+	// advanced operator writing a specific interface expects.
+	if cfg.NAT.Masquerade.Enabled {
+		p.Masquerade.OutInterface = resolveOutbound(cfg)
+	}
+
+	// The masquerade rule's outbound interface.
+	//
+	// This was previously never set, which meant the rendered masquerade
+	// rule applied to EVERY interface — including the LAN. That rewrites
+	// LAN-to-LAN source addresses and presents as intermittent hardware
+	// failure rather than as the misconfiguration it is.
+	//
+	// The value may name a logical role or an interface. A role is the
+	// operator-friendly form and is resolved here against the interfaces the
+	// configuration has bound; a name is taken literally, which is what an
+	// advanced operator writing a specific interface expects.
+	if cfg.NAT.Masquerade.Enabled {
+		p.Masquerade.OutInterface = resolveOutbound(cfg)
 	}
 
 	// A drop-by-default inbound policy is what THN emits. An accept policy is
@@ -368,7 +410,33 @@ func portsLabel(ports []fwpolicy.PortRange) string {
 	return strings.Join(parts, ",")
 }
 
-// outIfaceLabel renders the masquerade outbound interface.
+// resolveOutbound turns nat.masquerade.outbound into an interface name.
+//
+// An empty result means "unset", and policy validation reports it. A role that
+// cannot be resolved also yields empty rather than a guess: substituting the
+// wrong interface here would masquerade traffic onto the LAN.
+func resolveOutbound(cfg config.Config) string {
+	raw := strings.TrimSpace(cfg.NAT.Masquerade.Outbound)
+	if raw == "" {
+		return ""
+	}
+
+	switch strings.ToLower(raw) {
+	case string(host.RoleWAN):
+		return cfg.Network.WAN
+	case string(host.RoleLAN):
+		return cfg.Network.LAN
+	case string(host.RoleMGMT), string(host.RoleGuest), string(host.RoleDMZ):
+		// These roles exist in the model but the configuration has no field
+		// binding them yet, so they cannot be resolved to a name. Returning
+		// empty is correct: validation will say the outbound is unset, which
+		// is true, rather than masquerading onto the WAN as a fallback.
+		return ""
+	default:
+		return raw
+	}
+}
+
 func outIfaceLabel(iface string) string {
 	if iface == "" {
 		return " (unscoped)"

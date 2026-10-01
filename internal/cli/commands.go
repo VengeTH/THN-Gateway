@@ -184,6 +184,18 @@ var commands = map[string]Command{
 		Summary: "describe what returning to a previous configuration would involve",
 		Run:     runRollback,
 	},
+	"readiness": {
+		Name:    "readiness",
+		Tier:    TierPure,
+		Summary: "report whether this gateway could be activated, and what blocks it",
+		Run:     runReadiness,
+	},
+	"discover": {
+		Name:    "discover",
+		Tier:    TierPure,
+		Summary: "report this machine's interfaces, roles and capabilities",
+		Run:     runDiscover,
+	},
 	"appliance": {
 		Name:    "appliance",
 		Tier:    TierPure,

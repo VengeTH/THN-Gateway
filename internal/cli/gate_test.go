@@ -154,7 +154,6 @@ func topologyConfig() config.Config {
 
 	cfg.DNS.Enabled = true
 	cfg.DNS.LocalDomain = "lan"
-	cfg.DNS.Upstream = []string{"1.1.1.1", "9.9.9.9"}
 	cfg.DNS.LocalRecords = []config.LocalRecordConfig{
 		{Hostname: "nas", Address: "10.77.0.10", Aliases: []string{"storage"}},
 		{Hostname: "printer", Address: "10.77.0.20"},

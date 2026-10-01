@@ -25,10 +25,20 @@ network:
   # exist, which is why `thn plan` reports it as pending rather than failing.
   wan: enp0s31f6
 
-  # The downstream interface. Deliberately unset: the downstream NIC is not
-  # attached while THN is being developed remotely. Set this once the hardware
-  # is identified, and the LAN-related parts of the plan become actionable.
-  lan: ""
+  # The downstream interface, carrying the gateway's own address on the LAN
+  # that serves the switch.
+  #
+  # It was deliberately empty while THN was developed remotely, because no
+  # downstream NIC was attached. That is no longer the shape of a deployable
+  # gateway: NAT and LAN-to-WAN forwarding are enabled below, and with no LAN
+  # interface both are incoherent — `thn validate` reports that as an error,
+  # correctly.
+  #
+  # SET THIS to the real interface name before deploying. `thn network inspect`
+  # lists what this host actually has. A wrong name is caught: the lan-identified
+  # readiness gate fails and the plan stays pending, so it cannot silently
+  # produce a gateway that serves nobody.
+  lan: enp1s0
 
   # The address THN would place on the LAN interface.
   lan_prefix: 10.77.0.1/24
@@ -44,10 +54,33 @@ network:
 
 nat:
   enabled: true
-  # Derived from network.lan when empty. Because lan is unset, this stays
-  # unresolved and `thn plan` reports NAT as pending — which is correct: NAT
-  # has been asked for, but not yet told over which interface.
-  interfaces: []
+
+  # The LAN interface only. Masquerading traffic that arrives on the WAN is a
+  # routing loop, and `thn validate` rejects naming the WAN here.
+  #
+  # Derived from network.lan when empty. It is written out rather than left
+  # implicit so the rendered masquerade rule can be reviewed against a named
+  # interface.
+  interfaces:
+    - enp1s0
+
+  # Source NAT, stated explicitly.
+  masquerade:
+    enabled: true
+
+    # The interface masqueraded traffic LEAVES by.
+    #
+    # This is the outbound half of NAT and is separate from `interfaces` above,
+    # which is the inbound half. Without it the rendered masquerade rule would
+    # apply to every interface including the LAN, rewriting LAN-to-LAN source
+    # addresses — which presents as intermittent hardware failure rather than as
+    # the misconfiguration it is.
+    #
+    # Accepts a logical role ("wan") or an interface name. The role is the form
+    # to prefer: it keeps working if the uplink is renamed or moved between
+    # slots. `thn validate` rejects masquerading with no outbound at all.
+    outbound: wan
+
 
 firewall:
   enabled: true
@@ -55,6 +88,26 @@ firewall:
   # drop is the safe default. `thn validate` warns if NAT is disabled while
   # this is set, because the LAN would be able to reach nothing.
   default_inbound_policy: drop
+
+  # Networks permitted to administer the gateway.
+  #
+  # THN always emits an administrative rule — without one the device cannot be
+  # recovered over SSH, which is the opposite of safe. Left empty that rule
+  # admits any source address, and `thn validate` warns on every run, because
+  # an unrestricted SSH rule on a machine reachable from the internet is how a
+  # gateway gets taken over.
+  #
+  # Restricting it to the LAN is the narrowest source that is derivable from
+  # this document rather than from the host.
+  #
+  # ADD YOUR MANAGEMENT PATH HERE BEFORE DEPLOYING.
+  #
+  # If you administer the Dell over Tailscale or from anywhere outside the LAN,
+  # its range must be listed too or the firewall will refuse your own session
+  # and the device will need physical access to recover. Verify the rendered
+  # rule with `thn firewall render` before loading anything.
+  admin_sources:
+    - 10.77.0.0/24
 
 qos:
   # Off by default: the correct shaped rate depends on the uplink actually
