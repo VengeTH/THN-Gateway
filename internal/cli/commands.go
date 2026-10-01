@@ -11,6 +11,7 @@ import (
 	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/desired"
+	"github.com/venth/thn-gateway/internal/dhcp"
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/firewall"
 	"github.com/venth/thn-gateway/internal/network"
@@ -434,6 +435,19 @@ func runValidate(env *Env, args []string) ExitCode {
 
 	result := validation.Combined(cfg, obs, d)
 
+	// DHCP is validated by internal/dhcp, which owns the range arithmetic and
+	// the pool policy, and which `thn dhcp validate` calls directly. Folding
+	// that same call's output in here is what keeps the two commands from
+	// drifting apart: they derive the policy the same way and run the same
+	// function on it.
+	//
+	// Without this, `thn validate` reported "no findings" and exited 0 for a
+	// configuration whose pool ran off the end of the LAN. The gate had never
+	// asked the component that knows. Copying the checks in instead would
+	// create a second implementation that could drift from the first, which
+	// is the duplication internal/dhcp exists to prevent.
+	result = result.Merge(dhcpValidationFor(cfg))
+
 	if env.IsJSON {
 		if err := env.printJSON(map[string]any{
 			"config":   path,
@@ -453,6 +467,32 @@ func runValidate(env *Env, args []string) ExitCode {
 		return ExitOK
 	}
 	return ExitProblems
+}
+
+// dhcpValidationFor runs the production DHCP validator over a configuration.
+//
+// It returns a validation result rather than an error so that `thn validate`
+// reports everything wrong with a document in one pass. A pool bound the CLI
+// cannot parse becomes a finding at dhcp.ranges rather than an early exit:
+// stopping at the first malformed address would hide the four that follow it.
+//
+// This is the only place `thn validate` learns about DHCP, and it calls the
+// same internal/dhcp function `thn dhcp validate` calls.
+func dhcpValidationFor(cfg config.Config) validation.Result {
+	policy, err := dhcpPolicyFromConfig(cfg)
+	if err != nil {
+		return validation.Result{
+			Findings: []validation.Finding{{
+				Layer:    validation.LayerStatic,
+				Field:    "dhcp.ranges",
+				Severity: validation.SeverityError,
+				Message:  err.Error(),
+				Hint:     "write each pool bound as an address, for example 10.77.0.100",
+			}},
+			Layers: []validation.Layer{validation.LayerStatic},
+		}
+	}
+	return validation.FromDHCP(dhcp.Validate(policy))
 }
 
 // printValidation renders a validation result for a human.
