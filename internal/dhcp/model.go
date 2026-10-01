@@ -30,6 +30,7 @@ package dhcp
 
 import (
 	"fmt"
+	"math"
 	"net/netip"
 	"sort"
 	"strings"
@@ -156,6 +157,13 @@ func (r Range) Contains(addr netip.Addr) bool {
 // This computes a numeric distance, not a comparison: a compare function that
 // returns -1/0/1 would make every multi-address range report a size of 1 or
 // 2, which is wrong in a way that looks plausible in a pool-capacity report.
+//
+// The +1 is guarded against overflowing the int it returns into. distance
+// saturates at the largest int, so an IPv6 range wider than that returned
+// MaxInt64 and adding one for the inclusive end wrapped to MinInt64 — a
+// negative size for a range that contains most of the IPv6 space. A caller
+// checking `size <= 0` to detect an empty pool would then read a saturated
+// IPv6 pool as empty.
 func (r Range) Size() int {
 	if !r.Start.IsValid() || !r.End.IsValid() {
 		return 0
@@ -166,7 +174,14 @@ func (r Range) Size() int {
 	if compareAddr(r.End, r.Start) < 0 {
 		return 0
 	}
-	return distance(r.Start, r.End) + 1
+
+	d := distance(r.Start, r.End)
+	if d == math.MaxInt {
+		// Saturated: the true count does not fit an int, and reporting it
+		// as such is more useful than wrapping to a negative number.
+		return math.MaxInt
+	}
+	return d + 1
 }
 
 // distance returns how many addresses separate a and b, or -1 when they are
@@ -331,12 +346,40 @@ func Default(lanPrefix netip.Prefix, gateway netip.Addr, iface string) Policy {
 	return p
 }
 
+// usableHosts returns the number of assignable host addresses in a prefix
+// with the given host bit count.
+//
+// The host bit count is not the prefix length, and the two ranges callers
+// hold differ: a /32 has zero host bits and a /0 has thirty-two. Anything
+// outside 1..30 describes a prefix with no network/broadcast pair to exclude,
+// or one too large for the subtraction to be meaningful, so the answer is
+// zero rather than a negative number.
+//
+// This exists because `1<<hostBits - 2` is -1 at hostBits 0. Written inline
+// that produced the warning "the pool holds 1 of -1 usable addresses", which
+// is both wrong and unactionable. The same guard appears in
+// internal/validation.usableHosts and internal/config.usableHostCount; all
+// three must agree.
+func usableHosts(hostBits int) int {
+	if hostBits <= 0 || hostBits > 30 {
+		return 0
+	}
+	return 1<<hostBits - 2
+}
+
 // DerivePool returns a pool of n addresses starting at offset from the
 // prefix's base address.
 //
 // The pool is clamped to the prefix so a request for more addresses than the
 // network holds does not produce a range that escapes it — which would hand
 // out addresses the gateway cannot route.
+//
+// The clamp covers the offset as well as the length. Clamping only the end
+// left a hole: an offset larger than the subnet wrapped the uint32 inside
+// addOffset, producing a start in a *different* network, and because the
+// wrapped start still sorted below the clamped end the result passed the
+// start-vs-end check. DerivePool(10.0.0.0/16, 4294967280, 16) returned
+// 9.255.255.240-10.0.255.255 — the first of which is outside the subnet.
 func DerivePool(prefix netip.Prefix, offset, n int) []Range {
 	if !prefix.IsValid() || n <= 0 || offset < 0 {
 		return nil
@@ -356,15 +399,38 @@ func DerivePool(prefix netip.Prefix, offset, n int) []Range {
 		return nil // a /32 has no room for a pool
 	}
 
+	// The number of addresses in the subnet, as a uint64 so that hostBits 32
+	// does not overflow an int on a 32-bit platform.
+	subnetSize := uint64(1) << uint(hostBits)
+	lastValue := toUint32(base.As4()) | uint32(subnetSize-1)
+
+	// Clamp the offset to the subnet before it reaches the address
+	// arithmetic. An offset at or past the broadcast leaves no room for a
+	// pool at all.
+	if uint64(offset) >= subnetSize {
+		return nil
+	}
+
+	// Clamp the length to what remains of the subnet.
+	available := subnetSize - uint64(offset)
+	if uint64(n) > available {
+		n = int(available)
+	}
+	if n <= 0 {
+		return nil
+	}
+
 	start := addOffset(base, offset)
 	end := addOffset(base, offset+n-1)
 
-	// Clamp to the end of the network.
-	last := addOffset(base, (1<<hostBits)-1)
-	if compareAddr(end, last) > 0 {
-		end = last
-	}
 	if compareAddr(start, end) > 0 {
+		return nil
+	}
+
+	// Belt and braces: the derived pair must actually be inside the prefix.
+	// This is what the fuzz target asserts, so it is checked here too rather
+	// than only in the test.
+	if toUint32(start.As4()) > lastValue || toUint32(end.As4()) > lastValue {
 		return nil
 	}
 
@@ -372,10 +438,23 @@ func DerivePool(prefix netip.Prefix, offset, n int) []Range {
 }
 
 // addOffset returns an IPv4 address advanced by n.
+//
+// The addition saturates at the last address in the space rather than
+// wrapping. Wrapping is silent: addOffset(x, 2^32-1) returned x-1, which is
+// a valid address on a different network, so the caller could not tell it had
+// overflowed.
 func addOffset(a netip.Addr, n int) netip.Addr {
 	b := a.As4()
 	v := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
-	v += uint32(n)
+
+	if n > 0 {
+		if uint64(v)+uint64(n) > math.MaxUint32 {
+			v = math.MaxUint32
+		} else {
+			v += uint32(n)
+		}
+	}
+
 	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 }
 
@@ -391,12 +470,17 @@ func (p *Policy) Normalise() {
 
 // TotalAddresses returns the number of addresses across all pools, after
 // removing overlaps between them.
+//
+// The running total is clamped at MaxInt. A single saturated IPv6 range
+// already reaches it, and adding a second would wrap to a negative count,
+// which every caller reads as "no addresses configured".
 func (p Policy) TotalAddresses() int {
 	total := 0
 	counted := make([]Range, 0, len(p.Ranges))
 
 	for _, r := range p.Ranges {
-		if r.Size() == 0 {
+		size := r.Size()
+		if size <= 0 {
 			continue
 		}
 		// Subtract any address already covered by an accepted range.
@@ -404,7 +488,17 @@ func (p Policy) TotalAddresses() int {
 		for _, c := range counted {
 			overlap += intersectionSize(r, c)
 		}
-		total += r.Size() - overlap
+		if overlap >= size {
+			// Fully covered already; adding it would not change the total.
+			continue
+		}
+
+		add := size - overlap
+		if total > math.MaxInt-add {
+			total = math.MaxInt
+		} else {
+			total += add
+		}
 		counted = append(counted, r)
 	}
 	return total

@@ -232,11 +232,53 @@ func validateRanges(r *Result, p Policy) {
 		// A pool outside the LAN prefix hands out addresses the gateway
 		// cannot route, so clients would configure successfully and then
 		// fail every connection.
-		if p.LANPrefix.IsValid() && !p.LANPrefix.Masked().Contains(rg.Start) {
-			r.errorf(field+".start",
-				fmt.Sprintf("the pool starts at %s, outside the LAN prefix %s", rg.Start, p.LANPrefix.Masked()),
-				"place the pool inside the LAN network")
-			continue
+		//
+		// Both endpoints are checked. Checking only the start accepts a pool
+		// whose end has run off the far edge of the subnet — 192.168.1.250 to
+		// 192.168.2.10 passes a start-only check, spans the broadcast and the
+		// next network address, and would hand a client an address on a
+		// network the gateway does not route.
+		if p.LANPrefix.IsValid() {
+			masked := p.LANPrefix.Masked()
+
+			if !masked.Contains(rg.Start) {
+				r.errorf(field+".start",
+					fmt.Sprintf("the pool starts at %s, outside the LAN prefix %s", rg.Start, masked),
+					"place the pool inside the LAN network")
+				continue
+			}
+			if !masked.Contains(rg.End) {
+				r.errorf(field+".end",
+					fmt.Sprintf("the pool ends at %s, outside the LAN prefix %s", rg.End, masked),
+					"a pool must lie entirely inside the LAN network")
+				continue
+			}
+
+			// The network and broadcast addresses are not assignable. A pool
+			// containing either produces a host that cannot reach anything,
+			// and it looks correctly configured on the client.
+			//
+			// A /31 and a /32 are exempt: RFC 3021 gives a /31 two usable
+			// point-to-point addresses, and a /32 has no network or broadcast
+			// address at all.
+			if p.LANPrefix.Addr().Is4() && p.LANPrefix.Bits() <= 30 {
+				hostBits := 32 - p.LANPrefix.Bits()
+				network := masked.Addr()
+				broadcast := addOffset(network, (1<<hostBits)-1)
+
+				if rg.Start == network {
+					r.errorf(field+".start",
+						fmt.Sprintf("the pool starts at %s, which is the network address of %s", rg.Start, masked),
+						"begin the pool at the first host address")
+					continue
+				}
+				if rg.End == broadcast {
+					r.errorf(field+".end",
+						fmt.Sprintf("the pool ends at %s, which is the broadcast address of %s", rg.End, masked),
+						"end the pool at the last host address")
+					continue
+				}
+			}
 		}
 
 		// A pool that contains the gateway's own address would eventually
@@ -261,10 +303,15 @@ func validateRanges(r *Result, p Policy) {
 		// flagging, because there will be nowhere to put a static host. The
 		// threshold is deliberately generous: a /24 with 151 dynamic
 		// addresses leaves 103 spare, which is normal and must not warn.
+		//
+		// usableHosts is computed with the same guarded helper the config and
+		// validation layers use, rather than as 1<<hostBits - 2 inline. That
+		// expression is -1 at /32 and 0 at /31, which produced a warning
+		// reading "the pool holds 1 of -1 usable addresses".
 		if rg.Start.Is4() && p.LANPrefix.IsValid() && p.LANPrefix.Addr().Is4() {
 			hostBits := 32 - p.LANPrefix.Bits()
-			usable := 1<<hostBits - 2 // exclude network and broadcast
-			if size := rg.Size(); hostBits > 0 && size > 0 && size*10 > usable*9 {
+			usable := usableHosts(hostBits)
+			if size := rg.Size(); usable > 0 && size > 0 && size*10 > usable*9 {
 				r.warnf(field,
 					fmt.Sprintf("the pool holds %d of %d usable addresses in %s, leaving little room for static hosts",
 						size, usable, p.LANPrefix.Masked()),

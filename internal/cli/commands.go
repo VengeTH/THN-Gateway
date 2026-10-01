@@ -190,12 +190,22 @@ var commands = map[string]Command{
 
 // Run dispatches a command line and returns the process exit code.
 func Run(env *Env) ExitCode {
-	if len(env.Args) == 0 {
+	// --json is documented as a global flag, so it has to work before the verb
+	// as well as after it. `thn --json status` used to be read as a command
+	// called "--json" and fail with the usage text, which is the first thing
+	// anyone writes after seeing "Global flags: --json" in --help.
+	args := env.Args
+	if len(args) > 0 && args[0] == "--json" {
+		env.IsJSON = true
+		args = args[1:]
+	}
+
+	if len(args) == 0 {
 		printUsage(env.Stdout)
 		return ExitUsage
 	}
 
-	name := env.Args[0]
+	name := args[0]
 	cmd, ok := commands[name]
 	if !ok {
 		env.errorf("thn: unknown command %q\n\n", name)
@@ -203,9 +213,9 @@ func Run(env *Env) ExitCode {
 		return ExitUsage
 	}
 
-	rest := env.Args[1:]
+	rest := args[1:]
 
-	// A global --json before the verb enables machine output everywhere.
+	// The same flag after the verb, which is where it has always worked.
 	if hasJSONFlag(rest) {
 		env.IsJSON = true
 		rest = stripJSONFlag(rest)

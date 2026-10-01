@@ -63,19 +63,59 @@ import (
 	"github.com/venth/thn-gateway/internal/daemon"
 )
 
-// These match the paths the CLI already uses, so one installation serves both
-// binaries. The environment overrides exist so that a test, a second instance or
-// a development checkout can each have their own.
-const (
-	// defaultSocket is where thnd listens when nothing says otherwise.
-	defaultSocket = "/run/thn/thnd.sock"
-
-	// defaultStateDB is the state database thnd records into.
-	defaultStateDB = "/var/lib/thn/state.db"
-)
+// defaultConfigPath mirrors the compiled default configuration location.
+//
+// Duplicated as a constant rather than imported so that the dependency
+// direction stays one-way; internal/config asserts in its own tests that the
+// two agree.
+const defaultConfigPath = "/etc/thn/config.yaml"
 
 func main() {
 	os.Exit(int(run(os.Args[1:])))
+}
+
+// loadConfigDoc resolves the configuration thnd should start from.
+//
+// Best-effort by design, and the fallback is the compiled default rather than
+// an empty value: a daemon that cannot read its configuration should still come
+// up and observe the network, because a daemon that will not start is a gateway
+// nobody can ask anything. The failure is reported on stderr so it is not
+// silent — a daemon quietly running on defaults while the operator believes it
+// is running on their configuration is exactly the confusion this avoids.
+//
+// THN_CONFIG is honoured, and then the default location, so that the daemon
+// reads the same file the CLI does by default.
+func loadConfigDoc() config.Config {
+	path := os.Getenv("THN_CONFIG")
+	if path == "" {
+		path = defaultConfigPath
+	}
+
+	doc, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"thnd: could not read %s (%v); falling back to compiled defaults\n", path, err)
+
+		// config.Defaults has not been through Load, so the THN_* overrides
+		// it would have applied are applied here rather than lost.
+		doc = config.Defaults()
+		applyEnvironment(&doc)
+		if err := doc.Normalize(); err != nil {
+			return config.Defaults()
+		}
+	}
+	return doc
+}
+
+// applyEnvironment mirrors the THN_* overrides that config.Load applies, for
+// the path where loading failed and only the defaults are available.
+func applyEnvironment(c *config.Config) {
+	if v := os.Getenv("THN_SOCKET"); v != "" {
+		c.Paths.Socket = v
+	}
+	if v := os.Getenv("THN_STATE_DB"); v != "" {
+		c.Paths.StateDB = v
+	}
 }
 
 // run is main, separated so the exit path is testable.
@@ -156,24 +196,29 @@ func run(args []string) int {
 // on its behalf is a dependency whose behaviour a security argument would have
 // to be written about.
 func parseArgs(args []string) (daemon.Config, bool, bool, error) {
+	// Resolve the socket and the state database from the same configuration the
+	// CLI reads, in the same order.
+	//
+	// This used to be two hardcoded constants plus THN_SOCKET and THN_STATE_DB,
+	// which meant the configuration file was consulted for the shaping
+	// interface and nothing else. An operator who set `paths.socket` in
+	// /etc/thn/config.yaml got a daemon listening on /run/thn/thnd.sock and a
+	// `thn status` looking at the configured path — so the two binaries
+	// disagreed and the daemon could never be reached. config.Load already
+	// applies the THN_* environment overrides on top of the document, so
+	// delegating to it makes flag > environment > file > default the single
+	// precedence order for both binaries.
+	doc := loadConfigDoc()
+
 	cfg := daemon.Config{
-		Mode:     daemon.ModeDevelopment,
-		Socket:   envOr("THN_SOCKET", defaultSocket),
-		StateDB:  envOr("THN_STATE_DB", defaultStateDB),
-		Interval: daemon.DefaultInterval,
+		Mode:         daemon.ModeDevelopment,
+		Socket:       doc.Paths.Socket,
+		StateDB:      doc.Paths.StateDB,
+		QoSInterface: doc.QoS.Interface,
+		Interval:     daemon.DefaultInterval,
 	}
 	showVersion := false
 	verbList := false
-
-	// The configuration supplies the shaping interface to watch. Loading it is
-	// best-effort: a daemon that cannot read the configuration should still come
-	// up and observe the network, because a daemon that will not start is a
-	// gateway nobody can ask anything.
-	if path := os.Getenv("THN_CONFIG"); path != "" {
-		if c, err := config.Load(path); err == nil {
-			cfg.QoSInterface = c.QoS.Interface
-		}
-	}
 
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
@@ -262,13 +307,6 @@ func ensureDir(path string) error {
 		return fmt.Errorf("creating %s: %w", path, err)
 	}
 	return nil
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // versionString names this build.
