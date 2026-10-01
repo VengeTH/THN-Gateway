@@ -247,23 +247,45 @@ func ipLinks(ctx context.Context) ([]Interface, []Diagnostic) {
 		}}
 	}
 
-	var raw []ipLinkJSON
-	if err := json.Unmarshal([]byte(out.Stdout), &raw); err != nil {
+	ifaces, err := ParseLinks([]byte(out.Stdout))
+	if err != nil {
 		return nil, []Diagnostic{{
 			Subject:  "interfaces",
 			Severity: "error",
 			Message:  fmt.Sprintf("could not parse ip link output: %v", err),
 		}}
 	}
+	return ifaces, nil
+}
 
-	ifaces := make([]Interface, 0, len(raw))
-	for _, r := range raw {
+// ParseLinks turns `ip -j -d link show` output into interfaces.
+//
+// Split from ipLinks so it can be tested without an `ip` binary and a Linux
+// host. That split is the whole reason this function is separate: the parser
+// decides whether THN understands the host, and while it was welded to the
+// exec call it could only ever be exercised on the device it was written for —
+// which is a device nobody can reach during development. A parser that has
+// never run is not a parser that works; it is a parser that has not been found
+// to be broken yet.
+//
+// The input is real `ip -j` output, byte for byte, because the whole risk is
+// that the shape was imagined rather than observed. Fixtures are checked in
+// rather than generated, so a change in what the parser expects is a visible
+// edit rather than a test that quietly agrees with itself.
+func ParseLinks(raw []byte) ([]Interface, error) {
+	var parsed []ipLinkJSON
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
+
+	ifaces := make([]Interface, 0, len(parsed))
+	for _, r := range parsed {
 		ifaces = append(ifaces, Interface{
 			Name:  r.IfName,
 			Index: r.IfIndex,
 			MAC:   r.Address,
 			MTU:   r.MTU,
-			State: linkStateFromOperstate(r.Operstate),
+			State: linkState(r.Operstate, r.Flags, r.LinkInfo.InfoKind),
 			Kind:  r.LinkInfo.InfoKind,
 			Flags: r.Flags,
 			Role:  RoleUnassigned,
@@ -271,6 +293,47 @@ func ipLinks(ctx context.Context) ([]Interface, []Diagnostic) {
 	}
 	sort.Slice(ifaces, func(a, b int) bool { return ifaces[a].Name < ifaces[b].Name })
 	return ifaces, nil
+}
+
+// linkState maps a kernel operstate onto THN's link state.
+//
+// # The loopback case
+//
+// The kernel reports `lo` as operstate UNKNOWN even when it is fully up. That
+// is not a quirk of any distribution: an interface with no carrier has no
+// operational state to report, and a loopback device has no carrier, so the
+// kernel declines to guess. `ip -j` nevertheless reports the IFF_UP *flag* on
+// it, because the interface is administratively up.
+//
+// Reading operstate alone therefore reports the loopback as unknown on every
+// Linux host ever shipped. That matters more than it sounds: the resolver
+// binds to the loopback, and a gateway whose loopback reads as unknown cannot
+// verify that its own name resolution is working — so a resolver check reports
+// "undetermined" forever, on every gateway, for a reason that has nothing to
+// do with the resolver.
+//
+// So an unknown operstate with the UP flag set is treated as up, which is what
+// it means. An unknown operstate without the flag stays unknown, because that
+// genuinely is not something anybody can say.
+func linkState(operstate string, flags []string, kind string) LinkState {
+	state := linkStateFromOperstate(operstate)
+
+	if state == LinkUnknown && kind == "loopback" && hasFlag(flags, "UP") {
+		return LinkUp
+	}
+	if state == LinkUnknown && hasFlag(flags, "UP") && hasFlag(flags, "LOWER_UP") {
+		return LinkUp
+	}
+	return state
+}
+
+func hasFlag(flags []string, want string) bool {
+	for _, f := range flags {
+		if strings.EqualFold(f, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // linkStateFromOperstate maps a kernel operstate onto THN's link state.
@@ -296,17 +359,26 @@ func ipAddresses(ctx context.Context) ([]Address, []Diagnostic) {
 		}}
 	}
 
-	var raw []ipAddrJSON
-	if err := json.Unmarshal([]byte(out.Stdout), &raw); err != nil {
+	addrs, err := ParseAddresses([]byte(out.Stdout))
+	if err != nil {
 		return nil, []Diagnostic{{
 			Subject:  "addresses",
 			Severity: "error",
 			Message:  fmt.Sprintf("could not parse ip addr output: %v", err),
 		}}
 	}
+	return addrs, nil
+}
+
+// parseAddresses turns `ip -j addr show` output into addresses.
+func ParseAddresses(raw []byte) ([]Address, error) {
+	var parsed []ipAddrJSON
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
 
 	var addrs []Address
-	for _, r := range raw {
+	for _, r := range parsed {
 		for _, a := range r.AddrInfo {
 			if a.Family != "inet" && a.Family != "inet6" {
 				continue
@@ -334,17 +406,31 @@ func ipRoutes(ctx context.Context) ([]Route, []Diagnostic) {
 		}}
 	}
 
-	var raw []ipRouteJSON
-	if err := json.Unmarshal([]byte(out.Stdout), &raw); err != nil {
+	routes, err := ParseRoutes([]byte(out.Stdout))
+	if err != nil {
 		return nil, []Diagnostic{{
 			Subject:  "routes",
 			Severity: "error",
 			Message:  fmt.Sprintf("could not parse ip route output: %v", err),
 		}}
 	}
+	return routes, nil
+}
+
+// parseAddresses turns `ip -j route show` output into routes.
+//
+// The destination needs normalising because `ip -j` reports the default route
+// as `"dst": "default"` on some versions and as an absent field on others.
+// Both mean the same route, and a gateway that treats them as two different
+// routes has a default route it did not know it had.
+func ParseRoutes(raw []byte) ([]Route, error) {
+	var parsed []ipRouteJSON
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
 
 	var routes []Route
-	for _, r := range raw {
+	for _, r := range parsed {
 		dest := r.Destination
 		if dest == "" || dest == "default" {
 			dest = "default"
@@ -376,13 +462,26 @@ func ipNeighbours(ctx context.Context) ([]Neighbour, []Diagnostic) {
 		return nil, nil
 	}
 
-	var raw []ipNeighJSON
-	if err := json.Unmarshal([]byte(out.Stdout), &raw); err != nil {
+	n, err := ParseNeighbours([]byte(out.Stdout))
+	if err != nil {
+		// A missing or unparseable neighbour table is not interesting on its
+		// own. The ARP table is a cache, and a gateway that refused to report
+		// because the cache was in an odd state would be worse than one that
+		// reports what it could read.
 		return nil, nil
+	}
+	return n, nil
+}
+
+// parseNeighbours turns `ip -j neigh show` output into neighbours.
+func ParseNeighbours(raw []byte) ([]Neighbour, error) {
+	var parsed []ipNeighJSON
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
 	}
 
 	var n []Neighbour
-	for _, r := range raw {
+	for _, r := range parsed {
 		n = append(n, Neighbour{
 			Interface: r.Dev,
 			Address:   r.Dst,

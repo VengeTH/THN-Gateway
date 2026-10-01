@@ -1,0 +1,44 @@
+[
+  {
+    "dst": "default",
+    "gateway": "192.168.1.1",
+    "dev": "enp0s31f6",
+    "protocol": "dhcp",
+    "metric": 100,
+    "flags": []
+  },
+  {
+    "dst": "10.77.0.0/24",
+    "dev": "bond0",
+    "protocol": "kernel",
+    "scope": "link",
+    "prefsrc": "10.77.0.1",
+    "metric": 100,
+    "flags": []
+  },
+  {
+    "dst": "172.17.0.0/16",
+    "dev": "docker0",
+    "protocol": "kernel",
+    "scope": "link",
+    "prefsrc": "172.17.0.1",
+    "metric": 100,
+    "flags": []
+  },
+  {
+    "dst": "192.168.1.0/24",
+    "dev": "enp0s31f6",
+    "protocol": "kernel",
+    "scope": "link",
+    "prefsrc": "192.168.1.50",
+    "metric": 100,
+    "flags": []
+  },
+  {
+    "dst": "2001:db8:1::/64",
+    "dev": "enp0s31f6",
+    "protocol": "kernel",
+    "metric": 1024,
+    "flags": []
+  }
+]

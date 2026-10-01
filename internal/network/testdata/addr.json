@@ -1,0 +1,71 @@
+[
+  {
+    "ifindex": 1,
+    "ifname": "lo",
+    "flags": ["LOOPBACK","UP","LOWER_UP"],
+    "mtu": 65536,
+    "operstate": "UNKNOWN",
+    "link_type": "ether",
+    "address": "00:00:00:00:00:00",
+    "broadcast": "00:00:00:00:00:00",
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host", "label": "lo" },
+      { "family": "inet6", "local": "::1", "prefixlen": 128, "scope": "host" }
+    ]
+  },
+  {
+    "ifindex": 2,
+    "ifname": "enp0s31f6",
+    "flags": ["BROADCAST","MULTICAST","UP","LOWER_UP"],
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "e4:90:69:3a:1c:2f",
+    "broadcast": "ff:ff:ff:ff:ff:ff",
+    "addr_info": [
+      { "family": "inet", "local": "192.168.1.50", "prefixlen": 24, "scope": "global" },
+      { "family": "inet6", "local": "2001:db8:1::50", "prefixlen": 64, "scope": "global" },
+      { "family": "inet6", "local": "fe80::3690:69ff:fe3a:1c2f", "prefixlen": 64, "scope": "link" }
+    ]
+  },
+  {
+    "ifindex": 3,
+    "ifname": "bond0",
+    "flags": ["BROADCAST","MULTICAST","MASTER","UP","LOWER_UP"],
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "3c:ec:ef:1a:2b:3c",
+    "broadcast": "ff:ff:ff:ff:ff:ff",
+    "addr_info": [
+      { "family": "inet", "local": "10.77.0.1", "prefixlen": 24, "scope": "global" },
+      { "family": "inet6", "local": "2001:db8:77::1", "prefixlen": 64, "scope": "global" }
+    ]
+  },
+  {
+    "ifindex": 4,
+    "ifname": "eno1",
+    "flags": ["BROADCAST","MULTICAST","SLAVE","UP","LOWER_UP"],
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "3c:ec:ef:1a:2b:3c",
+    "broadcast": "ff:ff:ff:ff:ff:ff",
+    "addr_info": [
+      { "family": "inet6", "local": "fe80::3cec:efff:fe1a:2b3c", "prefixlen": 64, "scope": "link" }
+    ]
+  },
+  {
+    "ifindex": 8,
+    "ifname": "docker0",
+    "flags": ["BROADCAST","MULTICAST","UP","LOWER_UP"],
+    "mtu": 1500,
+    "operstate": "DOWN",
+    "link_type": "ether",
+    "address": "02:42:8a:1b:2c:3d",
+    "broadcast": "ff:ff:ff:ff:ff:ff",
+    "addr_info": [
+      { "family": "inet", "local": "172.17.0.1", "prefixlen": 16, "scope": "global" }
+    ]
+  }
+]

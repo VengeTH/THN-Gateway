@@ -1,0 +1,33 @@
+[
+  {
+    "dst": "10.77.0.50",
+    "dev": "bond0",
+    "lladdr": "aa:bb:cc:dd:ee:01",
+    "state": ["REACHABLE"],
+    "router": true,
+    "failed": false
+  },
+  {
+    "dst": "10.77.0.51",
+    "dev": "bond0",
+    "lladdr": "aa:bb:cc:dd:ee:02",
+    "state": ["STALE"],
+    "router": false,
+    "failed": false
+  },
+  {
+    "dst": "192.168.1.1",
+    "dev": "enp0s31f6",
+    "lladdr": "00:11:22:33:44:55",
+    "state": ["REACHABLE"],
+    "router": true,
+    "failed": false
+  },
+  {
+    "dst": "10.77.0.99",
+    "dev": "bond0",
+    "state": ["FAILED"],
+    "router": false,
+    "failed": true
+  }
+]

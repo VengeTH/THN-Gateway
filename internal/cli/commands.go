@@ -76,6 +76,12 @@ var commands = map[string]Command{
 		Summary: "render, validate or simulate routing, NAT and forwarding",
 		Run:     runNet,
 	},
+	"network": {
+		Name:    "network",
+		Tier:    TierPure,
+		Summary: "inspect the host's network, read-only",
+		Run:     runNetwork,
+	},
 	"simulate": {
 		Name:    "simulate",
 		Tier:    TierPure,
@@ -135,6 +141,48 @@ var commands = map[string]Command{
 		Tier:    TierPure,
 		Summary: "propose correlation rules from what has been observed, for review",
 		Run:     runSuggest,
+	},
+	"authority": {
+		Name:    "authority",
+		Tier:    TierPure,
+		Summary: "show what may be changed, by whom, and under what approval",
+		Run:     runAuthority,
+	},
+	"reconcile": {
+		Name:    "reconcile",
+		Tier:    TierPure,
+		Summary: "ask the gateway whether it would accept the configured state",
+		Run:     runReconcile,
+	},
+	"verify": {
+		Name:    "verify",
+		Tier:    TierPure,
+		Summary: "check a signed artifact's provenance and refuse it if anything is wrong",
+		Run:     runVerify,
+	},
+	"health": {
+		Name:    "health",
+		Tier:    TierPure,
+		Summary: "assess the gateway against a change set, including what cannot be read",
+		Run:     runHealth,
+	},
+	"rollout": {
+		Name:    "rollout",
+		Tier:    TierPure,
+		Summary: "report what a staged deployment should do next, and stop on deterioration",
+		Run:     runRollout,
+	},
+	"rollback": {
+		Name:    "rollback",
+		Tier:    TierPure,
+		Summary: "describe what returning to a previous configuration would involve",
+		Run:     runRollback,
+	},
+	"appliance": {
+		Name:    "appliance",
+		Tier:    TierPure,
+		Summary: "describe and verify the appliance image (manifest, verify, status)",
+		Run:     runAppliance,
 	},
 }
 
@@ -640,61 +688,6 @@ func runSchema(env *Env, args []string) ExitCode {
 		env.printf("%-42s %-10s %-8s %s\n", f.Key, f.Type, mutates, f.Description)
 	}
 	return ExitOK
-}
-
-// runActivate implements `thn activate`, which refuses in this build.
-func runActivate(env *Env, args []string) ExitCode {
-	fs := newFlagSet()
-	fs.Bool("yes", false)
-	fs.Bool("confirm-present", false)
-
-	if _, err := fs.Parse(args); err != nil {
-		return env.fatalf("thn activate: %v\n", err)
-	}
-
-	m := activation.NewMachine(activation.StatePrepared)
-	if fs.Seen("confirm-present") {
-		m.ConfirmPresence()
-	}
-
-	// The gate input is filled in from what is actually known, so that the
-	// rendered reasons describe this run rather than a placeholder. Presence
-	// is wired through the machine so that --confirm-present is visibly
-	// reflected; it still cannot enable activation, because the apply-path
-	// gate is separate and remains unsatisfied.
-	gates := activation.Evaluate(activation.GateInput{
-		PresenceConfirmed: m.PresenceConfirmed(),
-		WANProblem:        "no WAN interface has been confirmed against this host; run `thn plan --live` on the gateway",
-		LANProblem:        "no LAN interface has been identified",
-		ConfigProblem:     "the configuration was not validated; run `thn validate`",
-		RecoveryProblem:   "no recovery plan exists; run `thn plan` to generate one",
-	})
-
-	env.errorf("thn activate: %v\n", activation.ErrNoApplyPath)
-	env.errorf("\n")
-	env.errorf("This build of THN implements observe, model, plan, validate and simulate.\n")
-	env.errorf("It contains no code path that can modify host networking.\n")
-	env.errorf("\n")
-	env.errorf("Implemented: %v\n", activation.ImplementedStages())
-	env.errorf("Not implemented: %v\n", activation.UnsupportedStages())
-	env.errorf("\n")
-	env.errorf("Unmet safety gates:\n")
-	for _, g := range gates.Gates {
-		if g.Satisfied {
-			continue
-		}
-		env.errorf("  - %-22s %s\n", g.Name, g.Reason)
-	}
-
-	if env.IsJSON {
-		_ = env.printJSON(map[string]any{
-			"refused": true,
-			"reason":  activation.ErrNoApplyPath.Error(),
-			"gates":   gates,
-		})
-	}
-
-	return ExitProblems
 }
 
 // runStatus implements `thn status`, which requires the daemon.
