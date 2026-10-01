@@ -1,3 +1,4 @@
+package daemon
 // Package daemon implements thnd, the long-running controller on the gateway.
 //
 // # What thnd is
@@ -104,13 +105,14 @@ var (
 	ErrUnknownMode = errors.New("thnd: unknown mode")
 )
 
+// ParseMode reads a mode name.
+//
 // ACTIVE is a *valid name* and parses successfully. It is refused later, by
 // New, and that separation is deliberate: there is exactly one place where
 // activation is declined, so there is exactly one place to look when asking why
 // the daemon would not start, and exactly one to change when it is eventually
 // allowed. A parser that also refused would put the same decision in two places
 // and let them disagree.
-// ParseMode reads a mode name.
 //
 // Case-insensitive, because an operator typing "active" at a shell should get
 // the refusal rather than a spelling complaint.
@@ -125,6 +127,35 @@ func ParseMode(s string) (Mode, error) {
 	default:
 		return "", fmt.Errorf("%w: %q; expected one of %s",
 			ErrUnknownMode, s, modeList())
+	}
+}
+
+// Supported reports whether a mode can be entered in this build.
+//
+// True for DEVELOPMENT and PREPARED. False for ACTIVE.
+func (m Mode) Supported() bool {
+	switch m {
+	case ModeDevelopment, ModePrepared:
+		return true
+	default:
+		return false
+	}
+}
+
+// Supported reports whether a mode can be entered in this build.
+//
+// True for DEVELOPMENT and PREPARED. False for ACTIVE.
+//
+// This is the predicate for "may the daemon start in this mode", as opposed to
+// Applies, which is the predicate for "may the daemon change the host". Both
+// are false for ACTIVE here, for different reasons: Supported is about refusing
+// to start, Applies is about there being nothing to do.
+func (m Mode) Supported() bool {
+	switch m {
+	case ModeDevelopment, ModePrepared:
+		return true
+	default:
+		return false
 	}
 }
 

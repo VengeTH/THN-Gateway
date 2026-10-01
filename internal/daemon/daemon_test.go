@@ -1,3 +1,4 @@
+package daemon
 package daemon_test
 
 import (

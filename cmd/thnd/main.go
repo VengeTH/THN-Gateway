@@ -16,6 +16,11 @@
 // setting that is turned off — the verb table contains no such entry, so there
 // is no code performing one and nothing for a reviewer to audit.
 //
+// Because the verb table *is* the safety argument, it is printable without
+// starting anything:
+//
+//	thnd --verbs
+//
 // The daemon will not even start in ACTIVE mode, and refuses with a distinct
 // error explaining why. Refusing to start is a stronger statement than starting
 // and declining to act: a daemon that came up and then quietly did nothing would
@@ -48,8 +53,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/venth/thn-gateway/internal/config"
@@ -65,9 +72,6 @@ const (
 
 	// defaultStateDB is the state database thnd records into.
 	defaultStateDB = "/var/lib/thn/state.db"
-
-	// defaultRunDir is the directory holding the socket.
-	defaultRunDir = "/run/thn"
 )
 
 func main() {
@@ -76,15 +80,31 @@ func main() {
 
 // run is main, separated so the exit path is testable.
 func run(args []string) int {
-	cfg, showVersion, err := parseArgs(args)
+	cfg, verbList, showVersion, err := parseArgs(args)
 	if err != nil {
+		// Not "thnd: %v": the errors from internal/daemon already name the
+		// binary, and a doubled prefix reads like two processes failing.
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
 
+	// The verb table is the daemon's whole safety argument — "there is no code
+	// path that can modify host networking" is a claim about this list, so the
+	// list has to be readable without starting anything. Answering it here, from
+	// the package, also means the answer cannot be a stale claim the daemon makes
+	// about itself.
+	if verbList {
+		printVerbs(os.Stdout)
+		return 0
+	}
+
 	if showVersion {
-		fmt.Printf("thnd %s\n", versionString())
-		fmt.Println("  mode: DEVELOPMENT or PREPARED; ACTIVE is not available in this build")
+		fmt.Printf("thnd %s\n", versionString(cfg.Mode))
+		fmt.Printf("  mode: %s", cfg.Mode)
+		if !cfg.Mode.Supported() {
+			fmt.Print(" (refused at startup; see the ACTIVE message)")
+		}
+		fmt.Println()
 		fmt.Println("  verbs: serve read-only queries on a local socket; this daemon cannot apply")
 		return 0
 	}
@@ -93,7 +113,7 @@ func run(args []string) int {
 	// on a real gateway /run is a tmpfs that is empty at boot — so this is not
 	// a case that can be left to installation.
 	if err := ensureDir(filepath.Dir(cfg.Socket)); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Fprintf(os.Stderr, "thnd: %v\n", err)
 		return 1
 	}
 
@@ -119,7 +139,7 @@ func run(args []string) int {
 	defer cancel()
 
 	if err := d.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Fprintf(os.Stderr, "thnd: %v\n", err)
 		return 1
 	}
 	return 0
@@ -131,7 +151,7 @@ func run(args []string) int {
 // process that would eventually run as root, and a dependency that parses flags
 // on its behalf is a dependency whose behaviour a security argument would have
 // to be written about.
-func parseArgs(args []string) (daemon.Config, bool, error) {
+func parseArgs(args []string) (daemon.Config, bool, bool, error) {
 	cfg := daemon.Config{
 		Mode:     daemon.ModeDevelopment,
 		Socket:   envOr("THN_SOCKET", defaultSocket),
@@ -139,6 +159,7 @@ func parseArgs(args []string) (daemon.Config, bool, error) {
 		Interval: daemon.DefaultInterval,
 	}
 	showVersion := false
+	verbList := false
 
 	// The configuration supplies the shaping interface to watch. Loading it is
 	// best-effort: a daemon that cannot read the configuration should still come
@@ -158,39 +179,44 @@ func parseArgs(args []string) (daemon.Config, bool, error) {
 		case a == "--help" || a == "-h":
 			showVersion = true
 
+		case a == "--verbs":
+			// Independent of mode, and honoured before anything can start the
+			// daemon: asking what this daemon may do must not itself start it.
+			verbList = true
+
 		case a == "--mode" || a == "-m":
 			if i+1 >= len(args) {
-				return cfg, false, fmt.Errorf("--mode requires a value")
+				return cfg, false, false, fmt.Errorf("--mode requires a value")
 			}
 			i++
 			m, err := daemon.ParseMode(args[i])
 			if err != nil {
-				return cfg, false, err
+				return cfg, false, false, err
 			}
 			cfg.Mode = m
 
 		case a == "--socket" || a == "-s":
 			if i+1 >= len(args) {
-				return cfg, false, fmt.Errorf("--socket requires a value")
+				return cfg, false, false, fmt.Errorf("--socket requires a value")
 			}
 			i++
 			cfg.Socket = args[i]
 
 		case a == "--state-db":
 			if i+1 >= len(args) {
-				return cfg, false, fmt.Errorf("--state-db requires a value")
+				return cfg, false, false, fmt.Errorf("--state-db requires a value")
 			}
 			i++
 			cfg.StateDB = args[i]
 
 		case a == "--interval":
 			if i+1 >= len(args) {
-				return cfg, false, fmt.Errorf("--interval requires a value")
+				return cfg, false, false, fmt.Errorf("--interval requires a value")
 			}
 			i++
 			d, err := time.ParseDuration(args[i])
 			if err != nil {
-				return cfg, false, fmt.Errorf("--interval %q is not a duration", args[i])
+				return cfg, false, false, fmt.Errorf("--interval %q is not a duration", args[i])
 			}
 			cfg.Interval = d
 
@@ -201,11 +227,23 @@ func parseArgs(args []string) (daemon.Config, bool, error) {
 			cfg.StateDB = ""
 
 		default:
-			return cfg, false, fmt.Errorf("unknown flag %q; try --help", a)
+			return cfg, false, false, fmt.Errorf("unknown flag %q; try --help", a)
 		}
 	}
 
-	return cfg, showVersion, nil
+	return cfg, verbList, showVersion, nil
+}
+
+// printVerbs writes the verb table with each verb's description.
+//
+// Descriptions are printed because the question being asked of this table is
+// "what is this allowed to do", and names alone do not answer it.
+func printVerbs(w io.Writer) {
+	all := daemon.Verbs()
+	for _, v := range all {
+		fmt.Fprintf(w, "  %-8s %s\n", v.Name, v.Description)
+	}
+	fmt.Fprintf(w, "\n  %d verbs, none of which modify the host.\n", len(all))
 }
 
 // ensureDir creates a directory if it is missing.
@@ -233,4 +271,10 @@ func envOr(key, fallback string) string {
 //
 // There is no version command elsewhere in THN yet, and a daemon that writes to
 // a state database wants to be identifiable in that database's records.
-func versionString() string { return "development (no apply path)" }
+//
+// The mode is part of the string rather than printed beside it: a record saying
+// "thnd development" when the process was started with --mode PREPARED is a
+// record that cannot be trusted later.
+func versionString(mode daemon.Mode) string {
+	return fmt.Sprintf("%s (no apply path)", strings.ToLower(string(mode)))
+}
