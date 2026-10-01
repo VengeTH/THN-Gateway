@@ -143,6 +143,18 @@ func TestActivateAlwaysRefusesEvenWithEveryGateSatisfied(t *testing.T) {
 }
 
 func TestLiveCommandsReportDaemonUnavailable(t *testing.T) {
+	// Hermetic against the developer's shell. config.Load reads THN_SOCKET and
+	// friends through os.Getenv rather than through Env.Getenv, so an exported
+	// THN_SOCKET in the terminal that started `go test` pointed these commands
+	// at a real daemon and they reported success. Emptying is enough: the
+	// loader treats an empty value as unset.
+	for _, key := range []string{
+		"THN_SOCKET", "THN_STATE_DB", "THN_STATE_DIR",
+		"THN_RUN_DIR", "THN_CONFIG", "THN_WAN", "THN_LAN",
+	} {
+		t.Setenv(key, "")
+	}
+
 	for _, name := range []string{"status", "diagnostics"} {
 		cmd, ok := commands[name]
 		if !ok {

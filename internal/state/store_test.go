@@ -3,7 +3,9 @@ package state
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +305,69 @@ func TestHealthReportsSchema(t *testing.T) {
 	}
 	if _, ok := h["size_bytes"]; !ok {
 		t.Error("Health should report a size")
+	}
+}
+
+// The database records the gateway's topology and its whole control history.
+// Open has always documented the file as owner-only, but nothing set the mode —
+// the driver created it with the process umask, so on a default install every
+// local account could read it.
+func TestOpenRestrictsTheDatabaseFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not model Unix permission bits")
+	}
+
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("state database mode = %04o, want 0600", perm)
+	}
+}
+
+// The restriction has to survive a re-open, not just first creation: the second
+// daemon start finds an existing file and must still leave it owner-only.
+func TestReopenKeepsTheDatabaseOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not model Unix permission bits")
+	}
+
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Widen it the way a stray umask or a careless copy would.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	defer second.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("state database mode after reopen = %04o, want 0600", perm)
 	}
 }
 

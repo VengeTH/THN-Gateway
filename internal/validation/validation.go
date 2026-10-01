@@ -264,7 +264,10 @@ func validateAddressing(r *Result, cfg config.Config) {
 				fmt.Sprintf("%s is a public address; a LAN is normally a private range", prefix),
 				"use 10.x, 172.16-31.x or 192.168.x")
 
-		case prefix.Bits() > 29:
+		// A narrow prefix is an IPv4 concept. /64 is the ordinary IPv6 LAN size, and
+		// "how many host addresses does this prefix have" is not a question that
+		// has a useful answer at v6 scale.
+		case prefix.Addr().Is4() && prefix.Bits() > 29:
 			r.warnf(LayerStatic, "network.lan_prefix",
 				fmt.Sprintf("%s leaves only %d usable host addresses", prefix, usableHosts(prefix.Bits())),
 				"a /29 or smaller is rarely enough for a household LAN")
@@ -319,11 +322,10 @@ func validateServices(r *Result, cfg config.Config) {
 		}
 	}
 
-	if len(cfg.Network.DNS) > 0 && cfg.Network.LANPrefix == "" {
-		r.warnf(LayerStatic, "network.dns",
-			"resolvers are configured but no LAN prefix is set, so clients on the LAN would have no gateway to use them",
-			"set network.lan_prefix as well")
-	}
+	// A missing LAN prefix used to be reported here, but only when resolvers
+	// happened to be configured. It is now an unconditional
+	// network.lan_prefix warning from config.Validate, so an operator who had
+	// cleared both fields is told something rather than nothing.
 
 	// Firewall.
 	switch cfg.Firewall.Backend {
@@ -545,7 +547,14 @@ func isPrivateOrUla(addr netip.Addr) bool {
 }
 
 // usableHosts returns the number of usable host addresses in a prefix.
+//
+// IPv4 only, and defensively so: it was written before IPv6 LAN prefixes were
+// exercised, and 1 << (32-bits) with bits above 32 is a negative shift, which
+// takes the process down rather than returning a wrong number.
 func usableHosts(bits int) int {
+	if bits > 30 || bits < 0 {
+		return 0
+	}
 	total := uint64(1) << (32 - bits)
 	if total <= 2 {
 		return 0

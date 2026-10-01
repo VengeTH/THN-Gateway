@@ -1,4 +1,3 @@
-package daemon
 package daemon_test
 
 import (
@@ -268,5 +267,136 @@ func TestTheSocketIsOwnerOnly(t *testing.T) {
 	// included, which is where these tests mostly run.
 	if info.Mode().Perm() != 0o600 {
 		t.Logf("socket mode is %04o on this platform; not asserting", info.Mode().Perm())
+	}
+}
+
+// A second daemon must not take the socket from a running one.
+//
+// The failure this guards against is quiet: the newcomer removes the path,
+// listens on it, and the incumbent carries on serving an unlinked socket that
+// no client can name. `ps` shows one healthy daemon and `thn status` cannot
+// reach it. Refusing to start is the only answer that leaves one reachable
+// daemon.
+func TestASecondDaemonDoesNotStealALiveSocket(t *testing.T) {
+	path := socketPath(t)
+	start(t, daemon.Config{Socket: path})
+
+	second, err := daemon.New(daemon.Config{Socket: path, Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	started := time.Now()
+	err = second.Run(ctx)
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("a second daemon started on a socket that is already being served")
+	}
+	if !strings.Contains(err.Error(), "already listening") {
+		t.Errorf("error = %v, want it to say another daemon is already listening", err)
+	}
+
+	// A refusal has to arrive promptly. Run used to wait on the observation
+	// loop, which only stopped when the caller's context was cancelled, so a
+	// daemon that had refused to start looked exactly like one that had
+	// started and was working quietly.
+	if elapsed > 5*time.Second {
+		t.Errorf("Run took %v to report the refusal; it should return as soon as serving ends", elapsed)
+	}
+
+	// The incumbent must still be reachable. A refusal that took the socket
+	// with it would satisfy the check above and still leave nothing serving.
+	if resp := ask(t, path, "status"); resp["error"] != nil {
+		t.Fatalf("the original daemon stopped answering: %v", resp["error"])
+	}
+}
+
+// A stale socket from an unclean exit is the case that actually needs clearing.
+// Connect-refused with nobody behind it is how a stale socket presents, so the
+// probe has to be a real connect and not an existence check.
+func TestAStaleSocketIsClearedAndReplaced(t *testing.T) {
+	path := socketPath(t)
+
+	// Create a socket and walk away from it without closing the listener, which
+	// is what a killed daemon leaves behind.
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("unix sockets are unavailable here: %v", err)
+	}
+	_ = ln.Close() // leaves the socket file on disk with nothing behind it
+
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("this platform removed the socket file on close: %v", err)
+	}
+
+	start(t, daemon.Config{Socket: path})
+
+	if resp := ask(t, path, "status"); resp["error"] != nil {
+		t.Fatalf("the daemon did not take over the stale socket: %v", resp["error"])
+	}
+}
+
+// The socket path comes from configuration, and a regular file sitting there is
+// somebody's data rather than THN's litter.
+func TestANonSocketAtTheSocketPathIsNotRemoved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "thnd.sock")
+
+	const body = "not a socket\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := daemon.New(daemon.Config{Socket: path, Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := d.Run(ctx); err == nil {
+		t.Fatal("the daemon started on a path occupied by a regular file")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the file was removed: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("the file was modified: got %q, want %q", got, body)
+	}
+}
+
+// Starting twice in a row on the same path must leave exactly one daemon
+// serving, reachable at that path.
+func TestRestartingLeavesOneReachableDaemon(t *testing.T) {
+	path := socketPath(t)
+	start(t, daemon.Config{Socket: path})
+
+	first := ask(t, path, "status")
+	if first["error"] != nil {
+		t.Fatalf("the first daemon is not answering: %v", first["error"])
+	}
+
+	// The second is expected to refuse; what matters is that the first survives.
+	second, err := daemon.New(daemon.Config{Socket: path, Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = second.Run(ctx)
+
+	if resp := ask(t, path, "status"); resp["error"] != nil {
+		t.Fatalf("after a refused restart the daemon stopped answering: %v", resp["error"])
 	}
 }

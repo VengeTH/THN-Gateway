@@ -1,4 +1,3 @@
-package daemon
 // Package daemon implements thnd, the long-running controller on the gateway.
 //
 // # What thnd is
@@ -127,18 +126,6 @@ func ParseMode(s string) (Mode, error) {
 	default:
 		return "", fmt.Errorf("%w: %q; expected one of %s",
 			ErrUnknownMode, s, modeList())
-	}
-}
-
-// Supported reports whether a mode can be entered in this build.
-//
-// True for DEVELOPMENT and PREPARED. False for ACTIVE.
-func (m Mode) Supported() bool {
-	switch m {
-	case ModeDevelopment, ModePrepared:
-		return true
-	default:
-		return false
 	}
 }
 

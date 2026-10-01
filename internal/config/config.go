@@ -373,6 +373,22 @@ func (f Finding) String() string {
 	return fmt.Sprintf("[%s] %s: %s", f.Severity, f.Field, f.Message)
 }
 
+// usableHostCount reports how many addresses a prefix leaves for hosts.
+//
+// The address THN is told to place on the LAN is one of them, so a /30 offers
+// the gateway and two devices, not four.
+func usableHostCount(prefix netip.Prefix) int {
+	bits := prefix.Bits()
+	if !prefix.Addr().Is4() || bits < 0 || bits > 30 {
+		return 0
+	}
+	total := uint64(1) << (32 - bits)
+	if total <= 2 {
+		return 0
+	}
+	return int(total - 2)
+}
+
 // ValidationResult aggregates findings from a validation pass.
 type ValidationResult struct {
 	Findings []Finding `json:"findings"`
@@ -704,10 +720,24 @@ func (c Config) Validate() ValidationResult {
 		case prefix.Addr().IsMulticast():
 			v.Add("network.lan_prefix", SeverityError,
 				"LAN prefix must not be a multicast address")
-		case prefix.Bits() > 30:
+		case prefix.Addr().Is4() && prefix.Bits() > 29:
+			// IPv4 only. /64 is an ordinary IPv6 LAN size, so applying this
+			// to both families reports every IPv6 configuration as too narrow.
 			v.Add("network.lan_prefix", SeverityWarning,
-				fmt.Sprintf("%s leaves fewer than 4 usable addresses", prefix))
+				fmt.Sprintf("%s leaves only %d usable host address(es)", prefix, usableHostCount(prefix)))
 		}
+	} else {
+		// An absent LAN prefix is pending rather than broken — the LAN
+		// interface may not have been identified yet — so this warns instead
+		// of erroring. It used to produce no finding here at all, which made
+		// the gap visible only as a side effect of DNS being configured, in
+		// internal/validation. THN's own principle is that an absent reading
+		// is reported as absent rather than as zero, and this is the field
+		// the absence actually belongs to.
+		v.Add("network.lan_prefix", SeverityWarning,
+			"no LAN address is configured. Everything downstream of the LAN address "+
+				"(DHCP scope, DNS zone, NAT interface, anti-spoofing) stays pending until "+
+				"this is set, e.g. 10.77.0.1/24")
 	}
 
 	for i, s := range c.Network.DNS {
@@ -729,9 +759,24 @@ func (c Config) Validate() ValidationResult {
 	}
 
 	if c.Network.UpstreamGateway != "" {
-		if _, err := netip.ParseAddr(c.Network.UpstreamGateway); err != nil {
+		upstream, err := netip.ParseAddr(c.Network.UpstreamGateway)
+		if err != nil {
 			v.Add("network.upstream_gateway", SeverityError,
 				fmt.Sprintf("%q is not a valid IP address", c.Network.UpstreamGateway))
+		} else if c.Network.LANPrefix != "" {
+			// A default route pointing back into the downstream segment is a
+			// routing loop, and it was only caught by internal/validation —
+			// so `thn config validate` passed a document `thn validate`
+			// rejected. The two layers must not answer differently about one
+			// file, which is the same dual-modelling trap the gate catches in
+			// forwarding and NAT.
+			if prefix, perr := netip.ParsePrefix(c.Network.LANPrefix); perr == nil &&
+				prefix.Contains(upstream) {
+				v.Add("network.upstream_gateway", SeverityError,
+					fmt.Sprintf("the upstream gateway %s is inside the LAN prefix %s; "+
+						"the default route must leave through the WAN, not back into the LAN",
+						upstream, prefix))
+			}
 		}
 	}
 

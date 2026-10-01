@@ -138,8 +138,12 @@ func run(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Same rule as the argument errors above: internal/daemon already names
+	// the binary, so prefixing again prints "thnd: thnd: another daemon is
+	// already listening" — which reads like two processes failing and is the
+	// first thing an operator sees when they accidentally start a second one.
 	if err := d.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "thnd: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
 	return 0

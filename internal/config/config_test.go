@@ -356,3 +356,155 @@ func hasField(v ValidationResult, field string, sev Severity) bool {
 	}
 	return false
 }
+
+// ------------------------------------------------------------ LAN prefix
+
+// The empty case, which had no coverage and no finding at all.
+//
+// LANPrefix is the address THN would place on the LAN interface, so an empty
+// one is the single fact behind a dozen pending steps. The LAN interface
+// itself may not be identified yet, which makes this incomplete rather than
+// incoherent — it warns, it does not error. What it must never do is pass
+// without a word.
+func TestEmptyLANPrefixIsReportedNotSilent(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  func(*Config)
+	}{
+		{"LAN identified", func(c *Config) { c.Network.LAN = "enx001122334455" }},
+		{"LAN not identified", func(c *Config) { c.Network.LAN = "" }},
+		{"no resolvers either", func(c *Config) {
+			c.Network.LAN = ""
+			c.Network.DNS = nil
+		}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Defaults()
+			c.cfg(&cfg)
+			cfg.Network.LANPrefix = ""
+
+			v := cfg.Validate()
+
+			if !hasField(v, "network.lan_prefix", SeverityWarning) {
+				t.Errorf("an empty LAN prefix must warn on network.lan_prefix, got %v", v.Findings)
+			}
+			if v.HasErrors() {
+				t.Errorf("an empty LAN prefix is pending, not invalid; got errors %v", v.Findings)
+			}
+		})
+	}
+}
+
+// The shipped document clears nothing, but a document that clears both the LAN
+// and its address is a real state: absent, not broken.
+func TestAnEmptyLANPrefixDoesNotBlockAUsableConfig(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LAN = ""
+	cfg.Network.LANPrefix = ""
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+
+	if v := cfg.Validate(); v.HasErrors() {
+		t.Errorf("an unbuilt gateway must still validate, got: %v", v.Findings)
+	}
+}
+
+// Host bits are required here, and rejecting them would be wrong.
+//
+// Unlike a network address, LANPrefix names the address THN assigns to the LAN
+// interface — 10.77.0.1/24, gateway host bits set and all. A rule borrowed
+// from tools that want a masked network would reject the one correct value.
+func TestLANPrefixAcceptsAGatewayAddressWithHostBits(t *testing.T) {
+	for _, prefix := range []string{"10.77.0.1/24", "192.168.1.1/16", "172.16.0.1/20"} {
+		cfg := Defaults()
+		cfg.Network.LANPrefix = prefix
+
+		if v := cfg.Validate(); v.HasErrors() {
+			t.Errorf("prefix %q must be valid, got %v", prefix, v.Findings)
+		}
+	}
+}
+
+// A LAN is expected to be private or ULA. A public one is legal and routes, so
+// it warns in internal/validation; this layer must not turn it into an error,
+// and must not stay silent about it either.
+func TestAPublicLANPrefixWarnsButDoesNotError(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LANPrefix = "203.0.113.1/24"
+
+	v := cfg.Validate()
+
+	if v.HasErrors() {
+		t.Errorf("a public LAN prefix must not be an error, got %v", v.Findings)
+	}
+}
+
+// IPv6 is parsed by the same field, so it must be exercised rather than assumed.
+func TestIPv6LANPrefixesAreAccepted(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LANPrefix = "fd00::1/64"
+
+	v := cfg.Validate()
+
+	if v.HasErrors() {
+		t.Errorf("a ULA LAN prefix must be valid, got %v", v.Findings)
+	}
+	// A /64 leaves more addresses than are worth counting, so the narrow-prefix
+	// warning must not fire on the arithmetic overflowing.
+	if hasField(v, "network.lan_prefix", SeverityWarning) {
+		t.Errorf("a /64 must not be reported as too narrow: %v", v.Findings)
+	}
+}
+
+// The narrow-prefix threshold has to agree between this layer and
+// internal/validation, which re-runs config.Validate and then adds findings of
+// its own. The two disagreed at /30: this layer thought four addresses were
+// enough, the other thought otherwise, and `thn config validate` and
+// `thn validate` printed different verdicts for one document.
+func TestNarrowLANPrefixThresholdAgreesWithValidation(t *testing.T) {
+	for _, prefix := range []string{"10.77.0.1/30", "10.77.0.1/31", "10.77.0.1/32"} {
+		cfg := Defaults()
+		cfg.Network.LANPrefix = prefix
+
+		v := cfg.Validate()
+
+		if !hasField(v, "network.lan_prefix", SeverityWarning) {
+			t.Errorf("prefix %q: want a warning about the number of usable addresses, got %v",
+				prefix, v.Findings)
+		}
+	}
+}
+
+func TestAReasonableLANPrefixDoesNotWarnAboutSize(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LANPrefix = "10.77.0.1/24"
+
+	if hasField(cfg.Validate(), "network.lan_prefix", SeverityWarning) {
+		t.Error("a /24 is a normal LAN and must not warn about size")
+	}
+}
+
+// Overlapping WAN and LAN is the incoherence that matters most: the gateway
+// would route the internet into its own downstream segment.
+func TestUpstreamGatewayInsideTheLANIsRejected(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LANPrefix = "10.77.0.1/24"
+	cfg.Network.UpstreamGateway = "10.77.0.99"
+
+	if !hasField(cfg.Validate(), "network.upstream_gateway", SeverityError) {
+		t.Error("a default route pointing into the LAN must be an error")
+	}
+}
+
+func TestUpstreamGatewayOutsideTheLANIsAccepted(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.LANPrefix = "10.77.0.1/24"
+	cfg.Network.UpstreamGateway = "203.0.113.1"
+
+	if v := cfg.Validate(); v.HasErrors() {
+		t.Errorf("an upstream gateway outside the LAN is the normal case, got %v", v.Findings)
+	}
+}

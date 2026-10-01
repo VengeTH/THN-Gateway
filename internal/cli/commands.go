@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -707,10 +709,31 @@ func runStatus(env *Env, args []string) ExitCode {
 		return runStatusLocal(env)
 	}
 
-	env.errorf("thn status: cannot reach thnd.\n")
+	// Ask the daemon first. It is the only thing that can say what the gateway
+	// is actually doing, and it holds the state database this command would
+	// otherwise have to guess about.
+	client := newDaemonClient(env)
+
+	st, err := client.statusFrom()
+	if err == nil {
+		if env.IsJSON {
+			if err := env.printJSON(st); err != nil {
+				return env.fatalf("thn status: %v\n", err)
+			}
+			return ExitOK
+		}
+		renderDaemonStatus(env, st)
+		return ExitOK
+	}
+
+	// The daemon did not answer. Report why in the daemon's terms before the
+	// CLI's, because "permission denied" and "no such file" need different
+	// things done about them, and flattening both into "not running" is what
+	// sends somebody to restart a healthy daemon.
+	env.errorf("thn status: %v\n", err)
 	env.errorf("\n")
 	env.errorf("thnd is not running, or its socket is not readable by this user.\n")
-	env.errorf("Expected socket: %s\n", socketPath(env))
+	env.errorf("Expected socket: %s\n", client.path)
 	env.errorf("\n")
 	env.errorf("Use `thn status --local` for configuration-derived status without the daemon.\n")
 	return ExitUnavailable
@@ -784,14 +807,62 @@ func runDiagnostics(env *Env, args []string) ExitCode {
 		return runDiagnosticsLocal(env)
 	}
 
-	env.errorf("thn diagnostics: cannot reach thnd.\n")
-	env.errorf("\n")
-	env.errorf("Live diagnostics are reported by the daemon, which owns the state\n")
-	env.errorf("database and the gateway's own view of itself.\n")
-	env.errorf("Expected socket: %s\n", socketPath(env))
-	env.errorf("\n")
-	env.errorf("Use `thn diagnostics --local` for host-level checks without the daemon.\n")
-	return ExitUnavailable
+	// The daemon owns the state database, so it is the only thing that can
+	// report whether it is readable. As with `status`, the daemon is asked
+	// before anything is concluded about it.
+	client := newDaemonClient(env)
+
+	if err := client.reachable(); err != nil {
+		env.errorf("thn diagnostics: %v\n", err)
+		env.errorf("\n")
+		env.errorf("Live diagnostics are reported by the daemon, which owns the state\n")
+		env.errorf("database and the gateway's own view of itself.\n")
+		env.errorf("Expected socket: %s\n", client.path)
+		env.errorf("\n")
+		env.errorf("Use `thn diagnostics --local` for host-level checks without the daemon.\n")
+		return ExitUnavailable
+	}
+
+	st, err := client.statusFrom()
+	if err != nil {
+		// It answered ping but not status, so it is running and unhappy. That
+		// is a different situation from unreachable and deserves its own text.
+		env.errorf("thn diagnostics: thnd answered but did not report its status: %v\n", err)
+		return ExitProblems
+	}
+
+	if env.IsJSON {
+		if err := env.printJSON(st); err != nil {
+			return env.fatalf("thn diagnostics: %v\n", err)
+		}
+		return ExitOK
+	}
+
+	env.printf("thnd: reachable\n")
+	renderDaemonStatus(env, st)
+
+	// The most recent observation is a best-effort extra. A daemon that has
+	// just started has not taken one yet, and that is normal rather than a
+	// fault, so it is reported as absent instead of failing the command.
+	env.printf("\n")
+	if raw, lerr := client.call("last"); lerr != nil {
+		env.printf("Last observation: none yet (%v)\n", lerr)
+	} else {
+		env.printf("Last observation:\n%s\n", prettyJSON(raw))
+	}
+
+	return ExitOK
+}
+
+// prettyJSON re-indents a raw JSON value for display under a heading.
+func prettyJSON(raw json.RawMessage) string {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "  ", "  "); err != nil {
+		// The daemon always marshals its own results, so this cannot normally
+		// happen. Printing the bytes as they came is better than losing them.
+		return string(raw)
+	}
+	return buf.String()
 }
 
 // runDiagnosticsLocal renders host-level diagnostics.
@@ -977,12 +1048,18 @@ func activationLabel(p *planner.Plan) string {
 }
 
 // socketPath reports where thnd is expected to be listening.
+//
+// Resolved the same way every other path is — an explicit flag, then
+// THN_CONFIG, then the default. This used to load a hardcoded
+// /etc/thn/config.yaml directly, so a run against any other configuration
+// printed an "expected socket" that was simply wrong, which is the least
+// useful thing an error message can do.
 func socketPath(env *Env) string {
 	if v := env.Getenv("THN_SOCKET"); v != "" {
 		return v
 	}
-	cfg, err := config.Load("/etc/thn/config.yaml")
-	if err != nil {
+	cfg, err := loadConfig(env, env.resolveConfigPath(""))
+	if err != nil || cfg.Paths.Socket == "" {
 		return "/run/thn/thnd.sock"
 	}
 	return cfg.Paths.Socket

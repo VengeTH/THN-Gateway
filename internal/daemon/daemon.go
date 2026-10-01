@@ -46,6 +46,14 @@ type Config struct {
 // DefaultInterval is the observation cadence when none is given.
 const DefaultInterval = time.Minute
 
+// socketProbeTimeout bounds the liveness check made against an existing
+// socket before it is treated as stale.
+//
+// Short on purpose. The peer is either listening or gone, both of which
+// resolve immediately; a timeout here means start-up is delayed rather than
+// that the answer is slow.
+const socketProbeTimeout = 250 * time.Millisecond
+
 // Daemon is thnd.
 type Daemon struct {
 	cfg      Config
@@ -167,14 +175,25 @@ func (d *Daemon) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The observation loop lives exactly as long as the socket does.
+	loopCtx, stopLoop := context.WithCancel(ctx)
+	defer stopLoop()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		d.loop.run(ctx, d.cfg.Now)
+		d.loop.run(loopCtx, d.cfg.Now)
 	}()
 
 	serveErr := d.serve(ctx)
+
+	// Serving is over, so the loop has nothing left to observe through. This
+	// matters most when serving ended in a refusal: without it, Run blocked in
+	// wg.Wait until the caller cancelled a context it may not know is still
+	// open, so a daemon that decided not to start looked exactly like a daemon
+	// that started and was working quietly.
+	stopLoop()
 	wg.Wait()
 
 	if serveErr != nil {
@@ -357,12 +376,8 @@ type Response struct {
 
 // serve listens on the unix socket until the context is cancelled.
 func (d *Daemon) serve(ctx context.Context) error {
-	// A stale socket from a previous unclean exit would make Listen fail with
-	// "address already in use" for a file with nobody listening. Removing it
-	// is safe here precisely because this is the only thing that ever creates
-	// it, and refusing to start would be the worse outcome.
-	if err := os.Remove(d.cfg.Socket); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("thnd: clearing the stale socket at %s: %w", d.cfg.Socket, err)
+	if err := clearStaleSocket(d.cfg.Socket); err != nil {
+		return err
 	}
 
 	ln, err := net.Listen("unix", d.cfg.Socket)
@@ -400,6 +415,58 @@ func (d *Daemon) serve(ctx context.Context) error {
 		}
 		go d.handle(conn)
 	}
+}
+
+// clearStaleSocket prepares the socket path for listening.
+//
+// A socket left behind by an unclean exit would otherwise make Listen fail with
+// "address already in use" for a file that nobody is listening on. That case is
+// worth handling, but it is not the only case, and the code this replaced —
+// removing the path unconditionally — could not tell the two apart.
+//
+// Unconditional removal trades a rare start-up failure for a worse one. A
+// second daemon silently takes the path; the first keeps running on an unlinked
+// socket that no client can reach; the operator sees exactly one daemon in ps
+// and cannot connect to it. Probing first is the only way to tell a stale
+// socket from a live one, so this fails closed on a live socket.
+//
+// Two things are refused outright rather than deleted:
+//
+//   - A live socket, because somebody is serving on it.
+//   - Anything that is not a socket at all. The path comes from configuration,
+//     and a regular file sitting there is somebody's data. Removing it is not
+//     this daemon's decision to make.
+//
+// The check and the removal are not atomic. A daemon starting in exactly that
+// window can still be displaced, which is why the answer is logged rather than
+// assumed: the displaced daemon is visible as "already listening" in its own
+// output.
+func clearStaleSocket(path string) error {
+	info, err := os.Lstat(path)
+	switch {
+	case os.IsNotExist(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("thnd: inspecting %s: %w", path, err)
+	}
+
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("thnd: %s exists and is not a socket (mode %s); "+
+			"refusing to remove it. Point paths.socket somewhere else, or remove it yourself",
+			path, info.Mode())
+	}
+
+	conn, err := net.DialTimeout("unix", path, socketProbeTimeout)
+	if err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("thnd: another daemon is already listening on %s; "+
+			"refusing to start", path)
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("thnd: clearing the stale socket at %s: %w", path, err)
+	}
+	return nil
 }
 
 // handle answers one connection.

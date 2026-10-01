@@ -160,6 +160,59 @@ func TestNarrowLANPrefixWarns(t *testing.T) {
 	}
 }
 
+// An IPv6 LAN prefix panicked this layer.
+//
+// The narrow-prefix rule read prefix.Bits() and passed it to a helper that
+// computed 1 << (32 - bits). Every IPv6 LAN prefix has Bits() above 32, so the
+// shift count went negative and the process died — `thn validate` on a
+// perfectly valid fd00::/64 configuration took the CLI down with it.
+//
+// The rule was written for IPv4 and applied to both families; /64 is the
+// ordinary IPv6 LAN size and is not remotely too narrow.
+func TestIPv6LANPrefixDoesNotPanicAndIsNotCalledNarrow(t *testing.T) {
+	// fd00::/8 is unique-local, so a LAN prefix in it is unremarkable in
+	// every respect. 2001:db8::/32 is the documentation range: it warns about
+	// being public, which is correct and unrelated to size, so it is asserted
+	// separately below.
+	for _, prefix := range []string{"fd00::1/64", "fd00::1/48", "fd00::1/127"} {
+		cfg := valid()
+		cfg.Network.LANPrefix = prefix
+
+		r := Static(cfg)
+
+		if !r.Valid {
+			t.Errorf("prefix %q should be valid, got %v", prefix, r.Errors())
+		}
+		for _, f := range r.Warnings() {
+			if f.Field == "network.lan_prefix" {
+				t.Errorf("prefix %q must not be reported as too narrow: %s", prefix, f.Message)
+			}
+		}
+	}
+}
+
+// A public IPv6 prefix warns, and it must warn for the right reason.
+func TestPublicIPv6LANPrefixWarnsAboutBeingPublic(t *testing.T) {
+	cfg := valid()
+	cfg.Network.LANPrefix = "2001:db8::1/64"
+
+	r := Static(cfg)
+
+	if !r.Valid {
+		t.Errorf("a documentation-range prefix is legal, got %v", r.Errors())
+	}
+
+	var warned bool
+	for _, f := range r.Warnings() {
+		if f.Field == "network.lan_prefix" && strings.Contains(f.Message, "public") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("a public IPv6 prefix should warn about being public, got %v", r.Warnings())
+	}
+}
+
 func TestGatewayInsideLANIsError(t *testing.T) {
 	// A default route pointing back into the LAN is a routing loop.
 	cfg := valid()

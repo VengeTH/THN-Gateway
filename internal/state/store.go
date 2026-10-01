@@ -229,6 +229,16 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// The driver creates the database with the process umask, which is 0644
+	// on a default install. This function has always documented the file as
+	// 0600 because it records the gateway's topology and its entire control
+	// history, so the mode is now set rather than asserted.
+	if err := os.Chmod(path, 0o600); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("restricting %s: %w", path, err)
+	}
+
 	return s, nil
 }
 
