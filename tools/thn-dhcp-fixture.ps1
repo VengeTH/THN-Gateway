@@ -20,7 +20,11 @@ gateway:
 
 network:
   wan: enp0s31f6
-  lan: ""
+  # The LAN is identified here deliberately. `thn validate` folds in netconfig
+  # coherence as well as DHCP, so a fixture that left the LAN unset would be
+  # rejected for an unrelated forwarding/NAT coherence error on every row,
+  # and the DHCP column would stop meaning anything.
+  lan: enp1s0
   lan_prefix: $Lan
   dns:
     - 1.1.1.1
@@ -29,7 +33,10 @@ network:
 
 nat:
   enabled: true
-  interfaces: []
+  # LAN only. validation.Static refuses to masquerade traffic originating on
+  # the WAN, because that is a routing loop.
+  interfaces:
+    - enp1s0
 
 firewall:
   enabled: true
@@ -57,7 +64,7 @@ dhcp:
   authoritative: true
   lease_time: 12h
   lease_max: 0
-  domain: lan
+  domain: lan.home
   ranges:
     - start: $Start
       end: $End
@@ -65,7 +72,9 @@ dhcp:
 
 dns:
   enabled: true
-  upstream: []
+  local_domain: lan.home
+  upstream:
+    - 1.1.1.1
   local_records: []
 
 services:

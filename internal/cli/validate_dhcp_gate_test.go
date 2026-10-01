@@ -93,6 +93,13 @@ var dhcpGateMatrix = []dhcpGateCase{
 
 // dhcpGateConfig builds a configuration document for one row.
 //
+// The document is COMPLETE apart from the pool: WAN identified, LAN
+// identified, NAT scoped to the LAN. That matters because the gate validates
+// every subsystem, not just DHCP. An earlier version of this fixture left the
+// LAN unidentified, and every row of the matrix then failed for an unrelated
+// netconfig coherence error rather than for its pool — which is the gate
+// working, but it made the matrix assert the wrong thing.
+//
 // It goes through config.Defaults rather than a literal document so the matrix
 // tracks the shipped defaults, and it writes and reloads the file so the CLI
 // sees the same normalised document an operator would.
@@ -104,16 +111,29 @@ func dhcpGateConfig(t *testing.T, c dhcpGateCase) (config.Config, string) {
 	cfg.Gateway.Generation = 1
 
 	cfg.Network.WAN = "enp0s31f6"
-	cfg.Network.LAN = ""
+	cfg.Network.LAN = "enp1s0"
 	cfg.Network.LANPrefix = c.lan
 	cfg.Network.MTU = 1500
 
+	cfg.NAT.Enabled = true
+	// LAN only: masquerading from the WAN is a routing loop and the static
+	// layer refuses to name the WAN here.
+	cfg.NAT.Interfaces = []string{"enp1s0"}
+
+	cfg.Firewall.Enabled = true
+	cfg.Firewall.Backend = "nftables"
+	cfg.Firewall.DefaultInboundPolicy = "drop"
+
 	cfg.DHCP.Enabled = true
 	cfg.DHCP.Authoritative = true
-	cfg.DHCP.Domain = "lan"
+	cfg.DHCP.Domain = "lan.home"
 	cfg.DHCP.Ranges = []config.DHCPRangeConfig{
 		{Start: c.start, End: c.end},
 	}
+
+	cfg.DNS.Enabled = true
+	cfg.DNS.LocalDomain = "lan.home"
+	cfg.DNS.Upstream = []string{"1.1.1.1"}
 
 	return loadTopology(t, cfg)
 }
@@ -209,13 +229,27 @@ func TestValidateDoesNotSilentlyBypassDHCP(t *testing.T) {
 
 	for _, p := range pools {
 		t.Run(p[0]+"-"+p[1], func(t *testing.T) {
+			// A complete document apart from the pool. Leaving the LAN
+			// unidentified would make the gate reject every row for an
+			// unrelated netconfig coherence error, and the test would pass
+			// for entirely the wrong reason.
 			cfg := config.Defaults()
+			cfg.Network.WAN = "enp0s31f6"
+			cfg.Network.LAN = "enp1s0"
 			cfg.Network.LANPrefix = "192.168.1.1/24"
 			cfg.Network.MTU = 1500
+			cfg.NAT.Enabled = true
+			cfg.NAT.Interfaces = []string{"enp1s0"}
+			cfg.Firewall.Enabled = true
+			cfg.Firewall.Backend = "nftables"
+			cfg.Firewall.DefaultInboundPolicy = "drop"
 			cfg.DHCP.Enabled = true
 			cfg.DHCP.Authoritative = true
-			cfg.DHCP.Domain = "lan"
+			cfg.DHCP.Domain = "lan.home"
 			cfg.DHCP.Ranges = []config.DHCPRangeConfig{{Start: p[0], End: p[1]}}
+			cfg.DNS.Enabled = true
+			cfg.DNS.LocalDomain = "lan.home"
+			cfg.DNS.Upstream = []string{"1.1.1.1"}
 
 			loaded, path := loadTopology(t, cfg)
 

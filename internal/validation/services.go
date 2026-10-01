@@ -3,61 +3,96 @@
 // # Why this file exists
 //
 // internal/validation is documented as "the only place validation rules live",
-// and `thn validate` is the documented CI gate. DHCP validation does not live
-// here: it lives in internal/dhcp, which owns the range arithmetic and the
-// pool policy, and which `thn dhcp validate` has always called directly.
+// and `thn validate` is the documented CI gate. Four subsystems validate
+// themselves somewhere other than here: internal/dhcp, internal/dns,
+// internal/firewall/policy and internal/netconfig. Each owns its own rules,
+// and each is reached only by its own command — `thn dhcp validate`,
+// `thn firewall validate`, `thn net validate`.
 //
 // That ownership is correct and is not being moved. What was missing was any
-// path from `thn validate` to it, which meant a configuration document with a
-// pool that runs off the end of the LAN passed the CI gate with exit 0. The
-// gate reported that the document was fine, because the gate had never asked
-// the component that knows.
+// path from `thn validate` to them, which meant a document with a pool that
+// runs off the end of the LAN, a ruleset that cannot be reached, or a NAT
+// rule pointing at an interface that does not exist all passed the CI gate
+// with exit 0. The gate reported the document was fine, because the gate had
+// never asked the components that know.
 //
-// So this file carries findings in. It copies nothing. internal/dhcp still
-// decides what a valid pool is; this only reshapes what it already decided so
-// that `thn validate` and `thn dhcp validate` cannot disagree about a pool,
-// and both can only disagree by forgetting to call dhcp.Validate.
+// So this file carries findings in. It copies nothing. Each subsystem still
+// decides what is valid; this only reshapes what it already decided so that
+// `thn validate` and the per-subsystem commands cannot disagree, and they can
+// only disagree by forgetting to call the subsystem validator.
+//
+// # What is deliberately NOT folded in
+//
+// internal/qos is not here. qos.Validate takes an Availability describing what
+// the host kernel supports, which is a host observation. Calling it from the
+// static layer would mean passing an Availability this package invented, and
+// an invented "nothing available" turns every enabled shaping config into an
+// error. `thn validate` must stay deterministic and host-free to be a CI
+// gate, so QoS keeps its own command and says so rather than guessing.
 
 package validation
 
-import "github.com/venth/thn-gateway/internal/dhcp"
+import (
+	"github.com/venth/thn-gateway/internal/dhcp"
+	"github.com/venth/thn-gateway/internal/dns"
+	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/netconfig"
+)
 
-// DHCPFieldPrefix namespaces a DHCP finding in the combined result.
+// Subsystem field prefixes.
 //
-// Every other subsystem in a combined finding is already namespaced —
-// network.lan_prefix, firewall.backend, nat.interfaces[0] — so a bare
-// "ranges[0]" would be ambiguous against dns or firewall findings. The
-// unprefixed path is still reachable: `thn dhcp validate` prints
-// "ranges[0].end", and the prefixed form contains it as a substring, so a CI
-// log grep for either matches.
-const DHCPFieldPrefix = "dhcp."
+// Every folded subsystem's findings are namespaced so that a reader — and a CI
+// log grep — can tell which component produced a finding. Every other field in
+// a combined result is already namespaced this way (network.lan_prefix,
+// firewall.backend, nat.interfaces[0]), so this makes DHCP's bare "ranges[0]"
+// consistent with the rest rather than inventing a second convention.
+//
+// The prefix is prepended, never substituted: "ranges[0].end" becomes
+// "dhcp.ranges[0].end", which still contains the original as a substring, so a
+// grep for either form matches.
+const (
+	DHCPFieldPrefix     = "dhcp."
+	DNSFieldPrefix      = "dns."
+	FirewallFieldPrefix = "firewall."
+	NetFieldPrefix      = "net."
+)
 
-// FromDHCP projects a DHCP validation result into this package's model.
+// subsystemFinding is the shape every subsystem validator's finding shares.
 //
-// Severity is carried across one-for-one and the field path is preserved
-// apart from the namespace prefix, so "ranges[0].end" becomes
-// "dhcp.ranges[0].end" and nothing is flattened into a generic message. A
-// caller that needs the unprefixed path calls internal/dhcp directly, which
-// is what `thn dhcp validate` does.
+// All four subsystems declare these same fields and use the same three
+// severity strings. Modelling that once, rather than four times with four
+// slightly different projections, is what keeps them from drifting: a change
+// to how findings are carried has one place to change.
+type subsystemFinding struct {
+	field    string
+	severity string
+	message  string
+	hint     string
+}
+
+// projectResult turns a subsystem's findings into this package's model.
 //
-// The result is finalised, so it is internally coherent on its own and can be
-// printed or serialised without being merged first.
-func FromDHCP(r dhcp.Result) Result {
+// Nothing is flattened. The message and hint are carried across verbatim and
+// the field path is preserved behind the prefix, because an operator told
+// "dhcp.ranges[0].end" knows exactly which line to edit and an operator told
+// "invalid configuration" does not.
+func projectResult(prefix string, in []subsystemFinding) Result {
 	out := Result{
-		Findings: make([]Finding, 0, len(r.Findings)),
+		Findings: make([]Finding, 0, len(in)),
 		Layers:   []Layer{LayerStatic},
 	}
 
-	for _, f := range r.Findings {
+	for _, f := range in {
 		out.Findings = append(out.Findings, Finding{
-			// DHCP is checked against the document alone. No host
-			// observation changes whether a pool is inside the LAN, so
-			// these findings are static even under `thn validate --live`.
+			// Each subsystem checks the document against itself. No host
+			// observation changes whether a pool escapes the LAN or a
+			// masquerade rule names a missing interface, so these are
+			// static even under `thn validate --live`.
 			Layer:    LayerStatic,
-			Field:    DHCPFieldPrefix + f.Field,
-			Severity: fromDHCPSeverity(f.Severity),
-			Message:  f.Message,
-			Hint:     f.Hint,
+			Field:    prefix + f.field,
+			Severity: severityOf(f.severity),
+			Message:  f.message,
+			Hint:     f.hint,
 		})
 	}
 
@@ -65,29 +100,84 @@ func FromDHCP(r dhcp.Result) Result {
 	return out
 }
 
-// fromDHCPSeverity maps a DHCP severity onto this package's.
+// severityOf maps the shared severity vocabulary onto this package's.
 //
-// The mapping is total, and the fallback is deliberately an error rather than
-// a drop: silently discarding a finding this package does not recognise would
-// turn a refusal into a passing document, which is the failure mode this whole
-// change exists to prevent. Failing closed is the right direction for an
-// unknown value.
+// The four subsystems all use the strings "error", "warning" and "info", so
+// one mapping serves all of them and there is a single place where a value
+// can be mishandled.
 //
-// Every constant the DHCP package defines is mapped explicitly, including
-// SeverityInfo. Mapping it via the fallback would be a quiet way to turn
-// every informational DHCP note into an error and fail every document that
-// has a domain name but no interface yet.
-func fromDHCPSeverity(s dhcp.Severity) Severity {
+// Every value is enumerated explicitly and the fallback is an error rather
+// than a drop. An earlier version of this file mapped error and warning by
+// type and let info fall through to the fail-closed default; every
+// configuration with a single-label domain and no configured interface then
+// failed the gate with two phantom errors. Fail-closed is right for a value
+// nobody recognises and wrong for one merely unlisted, so the enumeration must
+// stay exhaustive.
+func severityOf(s string) Severity {
 	switch s {
-	case dhcp.SeverityError:
+	case "error":
 		return SeverityError
-	case dhcp.SeverityWarning:
+	case "warning":
 		return SeverityWarning
-	case dhcp.SeverityInfo:
+	case "info":
 		return SeverityInfo
 	default:
 		return SeverityError
 	}
+}
+
+// FromDHCP projects a DHCP validation result into this package's model.
+//
+// The result is finalised, so it is internally coherent on its own and can be
+// printed or serialised without being merged first.
+func FromDHCP(r dhcp.Result) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(DHCPFieldPrefix, in)
+}
+
+// FromDNS projects a DNS validation result into this package's model.
+func FromDNS(r dns.Result) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(DNSFieldPrefix, in)
+}
+
+// FromFirewallPolicy projects a firewall policy result into this package's
+// model.
+func FromFirewallPolicy(r fwpolicy.Result) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(FirewallFieldPrefix, in)
+}
+
+// FromNetconfig projects a netconfig result, including its cross-subsystem
+// coherence issues, into this package's model.
+//
+// Coherence issues are included because they are the failure worth surfacing:
+// a policy can be internally valid in each of routing, NAT and forwarding and
+// still be wrong in combination. They are reported as errors, which is what
+// they mean.
+func FromNetconfig(r netconfig.Result, issues []netconfig.CoherenceIssue) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings)+len(issues))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	for _, c := range issues {
+		in = append(in, subsystemFinding{
+			field:    "coherence." + c.Subsystems,
+			severity: "error",
+			message:  c.Message,
+			hint:     "the subsystems are each individually valid but disagree with each other",
+		})
+	}
+	return projectResult(NetFieldPrefix, in)
 }
 
 // Merge folds another result's findings into this one and recounts.

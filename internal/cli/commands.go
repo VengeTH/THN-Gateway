@@ -13,7 +13,10 @@ import (
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/dhcp"
 	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/dns"
 	"github.com/venth/thn-gateway/internal/firewall"
+	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
 	"github.com/venth/thn-gateway/internal/schema"
@@ -435,18 +438,27 @@ func runValidate(env *Env, args []string) ExitCode {
 
 	result := validation.Combined(cfg, obs, d)
 
-	// DHCP is validated by internal/dhcp, which owns the range arithmetic and
-	// the pool policy, and which `thn dhcp validate` calls directly. Folding
-	// that same call's output in here is what keeps the two commands from
-	// drifting apart: they derive the policy the same way and run the same
-	// function on it.
+	// Fold in the subsystems that validate themselves elsewhere.
 	//
-	// Without this, `thn validate` reported "no findings" and exited 0 for a
-	// configuration whose pool ran off the end of the LAN. The gate had never
-	// asked the component that knows. Copying the checks in instead would
-	// create a second implementation that could drift from the first, which
-	// is the duplication internal/dhcp exists to prevent.
-	result = result.Merge(dhcpValidationFor(cfg))
+	// DHCP, DNS, the firewall policy and netconfig each own their rules and
+	// each is reached by its own command. Before this, `thn validate`
+	// reported "no findings" and exited 0 for a document whose pool ran off
+	// the end of the LAN, whose ruleset could not be reached, or whose NAT
+	// rule named an interface that does not exist. The gate had never asked
+	// the components that know.
+	//
+	// Every one of these calls the subsystem's own Validate on the policy
+	// that subsystem's own command builds from the same document, so the two
+	// cannot drift. Copying the checks in instead would create a second
+	// implementation, which is the duplication these packages exist to
+	// prevent.
+	//
+	// QoS is absent deliberately: qos.Validate needs a host Availability, and
+	// inventing one here would turn every enabled shaping config into an
+	// error. See `thn qos validate`.
+	for _, sub := range subsystemValidations(cfg) {
+		result = result.Merge(sub)
+	}
 
 	if env.IsJSON {
 		if err := env.printJSON(map[string]any{
@@ -469,30 +481,59 @@ func runValidate(env *Env, args []string) ExitCode {
 	return ExitProblems
 }
 
-// dhcpValidationFor runs the production DHCP validator over a configuration.
+// subsystemValidations runs each foldable subsystem's own validator over one
+// configuration document.
 //
-// It returns a validation result rather than an error so that `thn validate`
-// reports everything wrong with a document in one pass. A pool bound the CLI
-// cannot parse becomes a finding at dhcp.ranges rather than an early exit:
-// stopping at the first malformed address would hide the four that follow it.
+// Each entry derives its policy with the same translator its own command uses
+// and calls the same Validate function, so `thn validate` and
+// `thn dhcp validate` cannot reach different conclusions about the same file.
 //
-// This is the only place `thn validate` learns about DHCP, and it calls the
-// same internal/dhcp function `thn dhcp validate` calls.
-func dhcpValidationFor(cfg config.Config) validation.Result {
-	policy, err := dhcpPolicyFromConfig(cfg)
-	if err != nil {
-		return validation.Result{
-			Findings: []validation.Finding{{
-				Layer:    validation.LayerStatic,
-				Field:    "dhcp.ranges",
-				Severity: validation.SeverityError,
-				Message:  err.Error(),
-				Hint:     "write each pool bound as an address, for example 10.77.0.100",
-			}},
-			Layers: []validation.Layer{validation.LayerStatic},
-		}
+// A policy the CLI cannot derive becomes a finding rather than an early
+// return: `thn validate` must report everything wrong with a document in one
+// pass, and stopping at the first unparseable address would hide the four that
+// follow it.
+func subsystemValidations(cfg config.Config) []validation.Result {
+	var out []validation.Result
+
+	// DHCP.
+	if policy, err := dhcpPolicyFromConfig(cfg); err != nil {
+		out = append(out, unparseableSubsystem("dhcp.ranges", err,
+			"write each pool bound as an address, for example 10.77.0.100"))
+	} else {
+		out = append(out, validation.FromDHCP(dhcp.Validate(policy)))
 	}
-	return validation.FromDHCP(dhcp.Validate(policy))
+
+	// DNS.
+	if policy, err := dnsPolicyFromConfig(cfg); err != nil {
+		out = append(out, unparseableSubsystem("dns", err,
+			"check the upstream resolvers and local records are addresses"))
+	} else {
+		out = append(out, validation.FromDNS(dns.Validate(policy)))
+	}
+
+	// Firewall policy. The translator cannot fail: it substitutes defaults.
+	out = append(out, validation.FromFirewallPolicy(fwpolicy.Validate(policyFromConfig(cfg))))
+
+	// Netconfig, including cross-subsystem coherence between routing, NAT and
+	// forwarding. The translator cannot fail.
+	netResult, issues := netconfig.Validate(netPolicyFromConfig(cfg))
+	out = append(out, validation.FromNetconfig(netResult, issues))
+
+	return out
+}
+
+// unparseableSubsystem reports a policy that could not be derived at all.
+func unparseableSubsystem(field string, err error, hint string) validation.Result {
+	return validation.Result{
+		Findings: []validation.Finding{{
+			Layer:    validation.LayerStatic,
+			Field:    field,
+			Severity: validation.SeverityError,
+			Message:  err.Error(),
+			Hint:     hint,
+		}},
+		Layers: []validation.Layer{validation.LayerStatic},
+	}
 }
 
 // printValidation renders a validation result for a human.
