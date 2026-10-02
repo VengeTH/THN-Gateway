@@ -23,6 +23,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/venth/thn-gateway/internal/deployment"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/planner"
 	"github.com/venth/thn-gateway/internal/validation"
 )
@@ -149,22 +151,12 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 
 	// wan-present, lan-identified and plan-validated all need a host
 	// observation. observeHost is read-only and goes through internal/guard.
-	obs, _, _ := observeHost(cfg)
+	obs, _, _, device := observeHost(cfg)
 
-	in.WANPresent = obs.WANPresent
-	if !obs.WANPresent {
-		in.WANProblem = fmt.Sprintf("the configured WAN interface (%s) was not found on this host",
-			orUnset(cfg.Network.WAN))
-	}
-
-	in.LANPresent = obs.LANPresent
-	switch {
-	case !obs.LANPresent && cfg.Network.LAN == "":
-		in.LANProblem = "network.lan is not set, so no downstream interface is identified"
-	case !obs.LANPresent:
-		in.LANProblem = fmt.Sprintf("the configured LAN interface (%s) was not found on this host",
-			cfg.Network.LAN)
-	}
+	res := host.Resolve(device, roleAssignments(cfg))
+	in.WAN = roleGate(device, res, host.RoleWAN, cfg.Network.WAN)
+	in.LAN = roleGate(device, res, host.RoleLAN, cfg.Network.LAN)
+	in.Capabilities = capabilityGates(device)
 
 	in.PlanValidated = planIsRunnable(cfg, obs)
 
@@ -179,6 +171,91 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	in.RecoveryProblem = "no recorded configuration history; nothing has been rolled back from yet"
 
 	return in
+}
+
+// roleGate turns a role resolution into the value activation.Evaluate reads.
+//
+// # The shape of the explanation is the product
+//
+// The requirement in Part 13 is that an operator be told more than "interface
+// not found". The gate reason below carries all four facts a human or a future
+// UI needs: what was asked for, what was actually seen, why the chosen
+// interface is unsuitable, and what they could do about it.
+//
+// The structured form of those facts already exists as host.Problem. This
+// function only flattens one into a sentence — it does not decide anything, so
+// there is exactly one place where the decision lives.
+func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string) activation.RoleGate {
+	g := activation.RoleGate{Role: string(r), Selector: asked}
+
+	if iface, ok := res.Assigned[r]; ok {
+		g.Satisfied = true
+		g.Interface = iface.SystemName
+		g.Capability = string(host.CapRouting)
+		g.Reason = fmt.Sprintf("role %s is filled by %s (identity %s)", r, iface.SystemName, iface.ID)
+		return g
+	}
+
+	g.Reason = unresolvedRoleReason(d, res, r, asked)
+	return g
+}
+
+// unresolvedRoleReason explains, in one sentence, why a role is unfilled.
+//
+// The order of the questions is deliberate: it distinguishes "you have not
+// said" from "you said something that is not there" from "you said something
+// that cannot work", because those need three different fixes and an operator
+// who is told only the last one will keep changing the wrong thing.
+func unresolvedRoleReason(d *host.Device, res host.Resolution, r host.Role, asked string) string {
+	if d == nil || !d.Supported {
+		return fmt.Sprintf("this host could not be inspected, so no interface can fill role %s; "+
+			"run `thn discover` on the gateway itself", r)
+	}
+
+	observed := strings.Join(d.SystemNames(), ", ")
+
+	if strings.TrimSpace(asked) == "" {
+		return fmt.Sprintf("role %s is not assigned; observed interfaces are %s. "+
+			"Run `thn discover` and assign one", r, observed)
+	}
+
+	// A structured problem, when there is one, already knows the precise
+	// cause — wrong kind, already claimed, not assignable. Prefer its
+	// wording over anything reconstructed here, so the reason never drifts
+	// from the rule that produced it.
+	for _, p := range res.Problems {
+		if p.Role == r {
+			return fmt.Sprintf("%s. Observed: %s. Possible: %s",
+				p.Message, strings.Join(p.Observed, ", "), strings.Join(p.Candidates, ", "))
+		}
+	}
+
+	return fmt.Sprintf("the interface assigned to role %s (%s) was not found; "+
+		"observed interfaces are %s. Run `thn discover` and assign a different one",
+		r, asked, observed)
+}
+
+// capabilityGates projects observed host capabilities onto the gate model.
+//
+// internal/activation deliberately does not import internal/host: the package
+// that owns the safety boundary should not inherit the bugs of the package that
+// reads the machine. This projection is the seam.
+func capabilityGates(d *host.Device) []activation.CapabilityGate {
+	out := make([]activation.CapabilityGate, 0, len(host.AllCapabilities()))
+	for _, c := range host.AllCapabilities() {
+		s, ok := d.Capabilities[c]
+		if !ok {
+			continue
+		}
+		out = append(out, activation.CapabilityGate{
+			Name:       string(c),
+			Available:  s.Available,
+			Confidence: s.Confidence,
+			Reason:     s.Reason,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // planIsRunnable reports whether the planner would produce a plan with nothing
@@ -205,7 +282,7 @@ func readinessDeployment(cfg config.Config) deployment.Status {
 	}
 	// observeHost is read-only and goes through internal/guard, so this
 	// observes exactly what `thn activate` and `thn diagnostics` observe.
-	if _, snap, _ := observeHost(cfg); snap != nil && snap.Supported {
+	if _, snap, _, _ := observeHost(cfg); snap != nil && snap.Supported {
 		o.HostSupported = true
 		for _, i := range snap.Interfaces {
 			o.Interfaces = append(o.Interfaces, i.Name)

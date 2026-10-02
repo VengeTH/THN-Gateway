@@ -102,41 +102,86 @@ func TestTheCanonicalConfigurationHasNoOpenAdminRule(t *testing.T) {
 	}
 }
 
-// TestTheTwoResolverFieldsAgree pins a known ambiguity.
+// TestTheTwoResolverFieldsAgree pins the ambiguity that has been closed, and
+// pins it in both directions.
 //
 // The document has two keys that both describe upstream resolvers:
-// network.dns and dns.upstream. Only network.dns reaches the DNS policy —
-// dnsPolicyFromConfig reads cfg.Network.DNS and never looks at
-// cfg.DNS.Upstream — so dns.upstream is currently INERT. Editing it changes
-// nothing about the rendered dnsmasq configuration.
+// network.dns and dns.upstream. For a while only network.dns reached the DNS
+// policy — dnsPolicyFromConfig read cfg.Network.DNS and never looked at
+// cfg.DNS.Upstream — so editing dns.upstream changed nothing about the
+// rendered dnsmasq configuration, and said nothing either.
 //
-// The canonical document sets both to the same values, so it is correct either
-// way, but an operator who edits only dns.upstream would see no effect and no
-// warning. Deciding which key is authoritative is a design change and is
-// deliberately not made here; this test records the current behaviour so the
-// change is deliberate when it happens.
+// The resolution is now explicit and is asserted here rather than described in
+// a comment, because a comment is what let it drift in the first place:
+//
+//	dns.upstream    AUTHORITATIVE for the DNS service
+//	network.dns     the fallback, used only when dns.upstream is empty
+//	both set, equal     warning — redundant but harmless
+//	both set, different ERROR — the document contradicts itself
+//
+// The canonical document sets both to the same values, so it is correct under
+// either rule and produces no warning.
 func TestTheTwoResolverFieldsAgree(t *testing.T) {
 	cfg := mustLoadCanonical(t)
 
-	if len(cfg.Network.DNS) == 0 {
-		t.Fatal("network.dns is empty; the DNS policy takes its resolvers from here")
-	}
 	if len(cfg.DNS.Upstream) == 0 {
-		t.Error("dns.upstream is empty; it is inert but should not be misleadingly blank")
+		t.Error("dns.upstream is empty; it is the authoritative field for the DNS service")
 	}
-
-	// Today they must at least not disagree, because only one is honoured.
+	if len(cfg.Network.DNS) == 0 {
+		t.Error("network.dns is empty; it is the documented fallback")
+	}
 	if len(cfg.DNS.Upstream) != len(cfg.Network.DNS) {
-		t.Errorf("network.dns has %d entries and dns.upstream has %d; "+
-			"only network.dns is honoured, so a disagreement is silently ignored",
+		t.Fatalf("network.dns has %d entries and dns.upstream has %d; "+
+			"they disagree, which validation reports as an error",
 			len(cfg.Network.DNS), len(cfg.DNS.Upstream))
-		return
 	}
 	for i := range cfg.Network.DNS {
 		if cfg.Network.DNS[i] != cfg.DNS.Upstream[i] {
-			t.Errorf("network.dns[%d] = %q but dns.upstream[%d] = %q; only network.dns is honoured",
+			t.Errorf("network.dns[%d] = %q but dns.upstream[%d] = %q; they disagree",
 				i, cfg.Network.DNS[i], i, cfg.DNS.Upstream[i])
 		}
+	}
+}
+
+// TestDNSUpstreamIsTheAuthoritativeField is the positive half: the key that
+// used to be inert must now actually reach the rendered policy.
+//
+// If this ever inverts again, an operator edits dns.upstream, sees no effect
+// and no warning, and has no reason to suspect the field they are editing.
+// That is the exact failure this milestone closed, so it gets a test rather
+// than a paragraph.
+func TestDNSUpstreamIsTheAuthoritativeField(t *testing.T) {
+	cfg := mustLoadCanonical(t)
+
+	// Change ONLY dns.upstream. The DNS policy must follow it.
+	cfg.DNS.Upstream = []string{"9.9.9.10", "1.0.0.1"}
+	// Silence the disagreement check so this test measures the policy and not
+	// the conflict rule.
+	cfg.Network.DNS = nil
+
+	p, err := dnsPolicyFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("dnsPolicyFromConfig: %v", err)
+	}
+
+	for _, got := range p.Upstream {
+		if got.String() != "9.9.9.10" && got.String() != "1.0.0.1" {
+			t.Fatalf("the DNS policy took upstream %v, which is neither dns.upstream entry", got)
+		}
+	}
+	if len(p.Upstream) != 2 {
+		t.Fatalf("the DNS policy has %d upstreams, want 2", len(p.Upstream))
+	}
+
+	// And with dns.upstream empty, the documented fallback takes over.
+	fallback := mustLoadCanonical(t)
+	fallback.DNS.Upstream = nil
+	fp, err := dnsPolicyFromConfig(fallback)
+	if err != nil {
+		t.Fatalf("dnsPolicyFromConfig with no dns.upstream: %v", err)
+	}
+	if len(fp.Upstream) == 0 {
+		t.Error("with dns.upstream empty the policy took no resolvers; network.dns should be the fallback")
 	}
 }
 

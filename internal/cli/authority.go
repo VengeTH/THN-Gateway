@@ -189,7 +189,7 @@ func runReconcile(env *Env, args []string) ExitCode {
 		return ExitProblems
 	}
 
-	obs, _, fw := observeHost(cfg)
+	obs, _, fw, _ := observeHost(cfg)
 	d := diff.Compare(obs, desiredFor(desired.FromConfig(cfg)))
 
 	// The capability facts come from the host, which is why --local matters.

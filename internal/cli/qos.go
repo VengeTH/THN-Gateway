@@ -346,8 +346,8 @@ func runQoSAvailable(env *Env, args []string) ExitCode {
 		env.printf("\n")
 		env.printf("To check by hand on a host you are not worried about:\n")
 		env.printf("  modprobe sch_cake\n")
-		env.printf("  tc qdisc add dev eth0 root cake bandwidth 100Mbit\n")
-		env.printf("  tc qdisc del dev eth0 root\n")
+		env.printf("  tc qdisc add dev <uplink> root cake bandwidth 100Mbit\n")
+		env.printf("  tc qdisc del dev <uplink> root\n")
 		return ExitProblems
 	}
 
@@ -431,7 +431,9 @@ func runQoSStats(env *Env, args []string) ExitCode {
 	if *iface == "" {
 		env.errorf("thn qos stats: --interface is required.\n")
 		env.errorf("\n")
-		env.errorf("  thn qos stats --interface enp0s31f6\n")
+		env.errorf("  thn qos stats --interface <name>\n")
+		env.errorf("\n")
+		env.errorf("  Run `thn discover` to see this host's interfaces.\n")
 		return ExitUsage
 	}
 

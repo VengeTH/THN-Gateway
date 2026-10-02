@@ -185,9 +185,26 @@ var matrix = []matrixCase{
 	{name: "gateway with no lan prefix", lanPrefix: "", upstream: "203.0.113.1", note: "no LAN, nothing to be inside"},
 }
 
-// build turns a matrix row into a configuration document.
-func build(c matrixCase) config.Config {
+// withUplink is the compiled defaults plus the one fact a document cannot
+// derive from itself: which physical connection carries the internet.
+//
+// Every row below tests an address rule, so it needs a document that is
+// otherwise complete. The compiled defaults deliberately carry no hardware
+// name, so this is stated rather than inherited.
+func withUplink() config.Config {
 	cfg := config.Defaults()
+	cfg.Network.WAN = "eth0"
+	return cfg
+}
+
+// build turns a matrix row into a configuration document.
+//
+// The uplink is named here because every row in this matrix is about address
+// arithmetic, not about interface selection — and because the compiled
+// defaults deliberately no longer carry a hardware name. Leaving it unset
+// would make every row trip the "name your uplink" rule and test nothing.
+func build(c matrixCase) config.Config {
+	cfg := withUplink()
 	cfg.Network.LANPrefix = c.lanPrefix
 	cfg.Network.UpstreamGateway = c.upstream
 	cfg.Network.LAN = c.lan
@@ -274,7 +291,7 @@ func TestTheTwoLayersNeverDisagreeAboutValidity(t *testing.T) {
 func TestNarrowPrefixesWarnRatherThanError(t *testing.T) {
 	for _, prefix := range []string{"10.77.0.1/30", "10.77.0.1/31", "10.77.0.1/32"} {
 		t.Run(prefix, func(t *testing.T) {
-			cfg := config.Defaults()
+			cfg := withUplink()
 			cfg.Network.LANPrefix = prefix
 			_ = cfg.Normalize()
 
@@ -301,7 +318,7 @@ func TestIPv6IsNeverJudgedTooNarrow(t *testing.T) {
 		"fd00::1/48", "fd00::1/56", "fd00::1/64", "fd00::1/96", "fd00::1/112", "fd00::1/120",
 	} {
 		t.Run(prefix, func(t *testing.T) {
-			cfg := config.Defaults()
+			cfg := withUplink()
 			cfg.Network.LANPrefix = prefix
 			_ = cfg.Normalize()
 
@@ -331,7 +348,7 @@ func TestIPv6IsNeverJudgedTooNarrow(t *testing.T) {
 func TestAnEmptyLANPrefixStaysPending(t *testing.T) {
 	for _, lan := range []string{"", "enx001122334455"} {
 		t.Run("lan="+lan, func(t *testing.T) {
-			cfg := config.Defaults()
+			cfg := withUplink()
 			cfg.Network.LANPrefix = ""
 			cfg.Network.LAN = lan
 			_ = cfg.Normalize()
@@ -379,7 +396,7 @@ func TestValidationNeverPanicsOnHostileInput(t *testing.T) {
 
 	for _, prefix := range hostile {
 		t.Run(safeName(prefix), func(t *testing.T) {
-			cfg := config.Defaults()
+			cfg := withUplink()
 			cfg.Network.LANPrefix = prefix
 			cfg.Network.UpstreamGateway = prefix
 
@@ -463,7 +480,7 @@ func FuzzValidationNeverPanics(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, prefix string) {
-		cfg := config.Defaults()
+		cfg := withUplink()
 		cfg.Network.LANPrefix = prefix
 		cfg.Network.UpstreamGateway = prefix
 		_ = cfg.Normalize()

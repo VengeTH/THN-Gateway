@@ -211,7 +211,7 @@ func runHealth(env *Env, args []string) ExitCode {
 			fsValue(fs, "generation"))
 	}
 
-	obs, _, _ := observeHost(cfg)
+	obs, _, _, _ := observeHost(cfg)
 	d := diff.Compare(obs, desiredFor(desired.FromConfig(cfg)))
 	report := health.Assess(cfg.Gateway.Name, gen, d, obs, when)
 

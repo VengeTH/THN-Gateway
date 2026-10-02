@@ -61,7 +61,9 @@ type Address struct {
 
 // Interface is an observed network interface.
 type Interface struct {
-	// Name is the kernel interface name, e.g. "enp0s31f6".
+	// Name is the kernel interface name as the host reports it, e.g. "eth0" or
+	// "enp1s0". It is an OBSERVATION and is expected to change; nothing above
+	// this layer may use it as an identity.
 	Name string `json:"name"`
 	// Index is the kernel interface index.
 	Index int `json:"index"`
@@ -69,9 +71,19 @@ type Interface struct {
 	MAC string `json:"mac,omitempty"`
 	// MTU is the interface MTU.
 	MTU int `json:"mtu"`
+	// SpeedMbps is the negotiated link speed in Mbps, 0 when the driver did
+	// not report one.
+	//
+	// Zero means "not reported". It does NOT mean the link is unusable, and
+	// a planner must not treat it as a zero-capacity interface.
+	SpeedMbps int `json:"speed_mbps,omitempty"`
 	// State is the observed link state.
 	State LinkState `json:"state"`
 	// Kind classifies the interface, e.g. "ethernet", "loopback", "vlan".
+	//
+	// This is the raw kernel `linkinfo.info_kind`. It is normalised into
+	// THN's own vocabulary by the device model, because the kernel says
+	// "ether" and "wlan" where THN says "ethernet" and "wireless".
 	Kind string `json:"kind"`
 	// Flags are the kernel's interface flags, e.g. "BROADCAST,MULTICAST".
 	Flags []string `json:"flags,omitempty"`
@@ -281,14 +293,15 @@ func ParseLinks(raw []byte) ([]Interface, error) {
 	ifaces := make([]Interface, 0, len(parsed))
 	for _, r := range parsed {
 		ifaces = append(ifaces, Interface{
-			Name:  r.IfName,
-			Index: r.IfIndex,
-			MAC:   r.Address,
-			MTU:   r.MTU,
-			State: linkState(r.Operstate, r.Flags, r.LinkInfo.InfoKind),
-			Kind:  r.LinkInfo.InfoKind,
-			Flags: r.Flags,
-			Role:  RoleUnassigned,
+			Name:      r.IfName,
+			Index:     r.IfIndex,
+			MAC:       r.Address,
+			MTU:       r.MTU,
+			SpeedMbps: r.Speed,
+			State:     linkState(r.Operstate, r.Flags, r.LinkInfo.InfoKind),
+			Kind:      r.LinkInfo.InfoKind,
+			Flags:     r.Flags,
+			Role:      RoleUnassigned,
 		})
 	}
 	sort.Slice(ifaces, func(a, b int) bool { return ifaces[a].Name < ifaces[b].Name })

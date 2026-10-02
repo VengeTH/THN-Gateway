@@ -16,6 +16,7 @@ import (
 	"github.com/venth/thn-gateway/internal/dns"
 	"github.com/venth/thn-gateway/internal/firewall"
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
@@ -312,7 +313,12 @@ func loadConfig(env *Env, path string) (config.Config, error) {
 //
 // Every external command it might run goes through internal/guard, so this
 // function is incapable of changing host networking.
-func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall.FirewallState) {
+//
+// The observed device is returned as well as the diff view, because the roles
+// the operator asked for are resolved against it exactly once. Resolving them
+// in two places would mean two answers to the same question, and they would
+// drift the first time one of them gained a rule.
+func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall.FirewallState, *host.Device) {
 	obs := diff.Observed{
 		Supported: false,
 		HostName:  hostname(),
@@ -328,33 +334,39 @@ func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall
 		LAN: cfg.Network.LAN,
 	})
 
-	if wan := snap.Interface(cfg.Network.WAN); wan != nil {
-		// The WAN's addresses are observed but not recorded: THN does not
-		// manage uplink addressing, so the diff must not compare it.
-		obs.WANPresent, obs.WANName, obs.WANUp = true, wan.Name, wan.State == network.LinkUp
+	// FromSnapshot is the only place that knows how a kernel observation
+	// becomes a device model. Everything above this line consumes the model.
+	device := host.FromSnapshot(snap)
+
+	// # Roles are resolved through assignment, never by guessing.
+	//
+	// This code previously did this:
+	//
+	//	if cfg.Network.LAN != "" { look it up by name } else {
+	//	    adopt the first non-loopback interface that is not the WAN
+	//	}
+	//
+	// `snap.Interfaces` is sorted by NAME, so "first" meant whichever
+	// interface sorted first: routinely `bond0`, `docker0` or `tailscale0`
+	// on a host that has any of those. It set LANPresent = true, and
+	// readiness fed that straight into the `lan-identified` activation gate.
+	// The gate therefore reported SATISFIED on an interface nobody named,
+	// which is the exact failure the role model exists to prevent: a gateway
+	// that would apply its LAN to the wrong link and look correct doing so.
+	//
+	// Unassigned now means unassigned. `thn discover` shows the host; it
+	// does not decide for it.
+	res := host.Resolve(device, roleAssignments(cfg))
+
+	// The WAN's addresses are observed but not recorded: THN does not manage
+	// uplink addressing, so the diff must not compare it.
+	if wan, ok := roleInterface(res, host.RoleWAN); ok {
+		obs.WANPresent, obs.WANName, obs.WANUp = true, wan.SystemName, wan.LinkUp
 	}
 
-	if cfg.Network.LAN != "" {
-		if lan := snap.Interface(cfg.Network.LAN); lan != nil {
-			obs.LANPresent, obs.LANName, obs.LANUp = true, lan.Name, lan.State == network.LinkUp
-			for _, a := range lan.Addresses {
-				obs.LANAddresses = append(obs.LANAddresses, a.CIDR)
-			}
-		}
-	} else if len(snap.Interfaces) > 0 {
-		// With no LAN configured, adopt the first non-loopback interface that
-		// is not the WAN, so that a plan can at least show what the host has.
-		for i := range snap.Interfaces {
-			cand := snap.Interfaces[i]
-			if cand.Name == cfg.Network.WAN || cand.Name == "lo" {
-				continue
-			}
-			obs.LANPresent, obs.LANName, obs.LANUp = true, cand.Name, cand.State == network.LinkUp
-			for _, a := range cand.Addresses {
-				obs.LANAddresses = append(obs.LANAddresses, a.CIDR)
-			}
-			break
-		}
+	if lan, ok := roleInterface(res, host.RoleLAN); ok {
+		obs.LANPresent, obs.LANName, obs.LANUp = true, lan.SystemName, lan.LinkUp
+		obs.LANAddresses = append(obs.LANAddresses, lan.Addresses...)
 	}
 
 	if r := snap.DefaultRoute(); r != nil {
@@ -373,7 +385,48 @@ func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall
 	obs.QoSActive = qos.Status == firewall.StatusActive
 	obs.QoSAlgorithm = qos.Algorithm
 
-	return obs, snap, fw
+	return obs, snap, fw, device
+}
+
+// roleInterface returns the interface an assignment bound to a role.
+//
+// It reads the RESOLUTION rather than the device, because the resolution is
+// the single place where "this interface holds this role" was decided. Reading
+// the device directly would be a second implementation of that decision, and
+// the two would disagree the first time Resolve gained a rule.
+func roleInterface(res host.Resolution, r host.Role) (host.Interface, bool) {
+	i, ok := res.Assigned[r]
+	return i, ok
+}
+
+// roleAssignments translates configuration into role bindings.
+//
+// # Where the translation lives, and why
+//
+// It is here, in the CLI wiring layer, and not in internal/host.
+//
+// internal/host is the device model. It must be usable by a future UI, by
+// `thnd`, and by a test that has no configuration file at all — so it takes
+// selectors, not documents. The moment it imports internal/config, every one
+// of those callers inherits a dependency on the YAML layer, and the model stops
+// being testable on its own.
+//
+// This function is therefore the single seam between "what the operator wrote"
+// and "what THN asked the host for". Changing the configuration surface means
+// changing this function and nothing else.
+//
+// # Both keys are read
+//
+// network.wan and network.lan remain the advanced, explicit override: an
+// operator may name a kernel interface directly. They are read here and become
+// assignments like any other selector, so they take exactly the same path
+// through validation as everything else. That is deliberate — an override that
+// skipped the role model would be an override that skipped the checks.
+func roleAssignments(cfg config.Config) []host.Assignment {
+	return []host.Assignment{
+		{Role: host.RoleWAN, Selector: strings.TrimSpace(cfg.Network.WAN)},
+		{Role: host.RoleLAN, Selector: strings.TrimSpace(cfg.Network.LAN)},
+	}
 }
 
 // desiredFor projects the diff package's structural view from desired.State.
@@ -439,7 +492,7 @@ func runValidate(env *Env, args []string) ExitCode {
 	// with no network, no root and no daemon.
 	var obs *diff.Observed
 	if *live {
-		o, _, _ := observeHost(cfg)
+		o, _, _, _ := observeHost(cfg)
 		obs = &o
 	}
 
@@ -599,7 +652,7 @@ func runPlan(env *Env, args []string) ExitCode {
 	// not grounded in what the machine actually has is not useful. The
 	// --live flag only controls whether the observation is considered
 	// authoritative enough to report against.
-	obs, _, _ := observeHost(cfg)
+	obs, _, _, _ := observeHost(cfg)
 	d := diff.Compare(obs, desiredFor(desired.FromConfig(cfg)))
 
 	p := planner.Build(d, planner.Options{
@@ -851,7 +904,7 @@ func runStatusLocal(env *Env) ExitCode {
 		return ExitProblems
 	}
 
-	obs, _, fw := observeHost(cfg)
+	obs, _, fw, _ := observeHost(cfg)
 	d := desired.FromConfig(cfg)
 	pending := d.Pending()
 
@@ -977,7 +1030,7 @@ func runDiagnosticsLocal(env *Env) ExitCode {
 		return ExitProblems
 	}
 
-	obs, snap, fw := observeHost(cfg)
+	obs, snap, fw, _ := observeHost(cfg)
 	stat := validation.Static(cfg)
 
 	if env.IsJSON {

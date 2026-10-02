@@ -318,7 +318,7 @@ func buildScene(env *Env, args []string, when time.Time, local bool) (assistantS
 		if err != nil {
 			return assistantScene{}, ExitProblems
 		}
-		observed, _, _ := observeHost(cfg)
+		observed, _, _, _ := observeHost(cfg)
 		set := signals.Derive(observed, when)
 		if set == nil {
 			return assistantScene{}, env.fatalf(

@@ -196,16 +196,16 @@ func Evaluate(in GateInput) GateResult {
 
 	gates = append(gates, Gate{
 		Name:        "wan-present",
-		Description: "the configured WAN interface must be present on the host",
-		Satisfied:   in.WANPresent,
-		Reason:      reasonUnless(in.WANPresent, in.WANProblem),
+		Description: "an interface satisfying the desired WAN role must exist on this host",
+		Satisfied:   in.WAN.Satisfied,
+		Reason:      reasonUnless(in.WAN.Satisfied, in.WAN.Reason),
 	})
 
 	gates = append(gates, Gate{
 		Name:        "lan-identified",
-		Description: "the LAN interface must be identified and attached",
-		Satisfied:   in.LANPresent,
-		Reason:      reasonUnless(in.LANPresent, in.LANProblem),
+		Description: "an interface satisfying the desired LAN role must be identified and attached",
+		Satisfied:   in.LAN.Satisfied,
+		Reason:      reasonUnless(in.LAN.Satisfied, in.LAN.Reason),
 	})
 
 	gates = append(gates, Gate{
@@ -233,6 +233,51 @@ func Evaluate(in GateInput) GateResult {
 	return res
 }
 
+// RoleGate records how one logical role was satisfied on this host.
+//
+// # Why this replaced a boolean
+//
+// The gate used to read a bare `WANPresent bool`, which the CLI computed as
+// "does an interface exist whose kernel name equals the string in
+// network.wan". That is not the question the gate asks. The question is
+// whether a suitable uplink exists. Expressing it as name equality meant:
+//
+//   - the gate could only ever be satisfied by a document that already named a
+//     kernel interface, so the product could not be configured the way an
+//     operator thinks about it;
+//   - it said nothing about WHICH interface satisfied it, or why, so a
+//     readiness report could not be acted on;
+//   - and it had no way to express "the right interface exists but this host
+//     cannot route", which is a different problem with a different fix.
+//
+// RoleGate can express all three. It is a value, not a flag, because a gate an
+// operator cannot read the detail of is a gate they cannot act on.
+type RoleGate struct {
+	// Role is the logical role this gate is about: "wan", "lan".
+	Role string `json:"role"`
+
+	// Satisfied reports whether a suitable interface fills the role.
+	Satisfied bool `json:"satisfied"`
+
+	// Interface is the kernel name that satisfied it, when one did.
+	//
+	// It is recorded, never required. An operator may legitimately change
+	// the NIC and the gate must still pass; the name is here to explain the
+	// verdict, not to define it.
+	Interface string `json:"interface,omitempty"`
+
+	// Selector is what the configuration asked for: a stable identity, a
+	// kernel name, or empty when the role was filled by assignment.
+	Selector string `json:"selector,omitempty"`
+
+	// Capability is the host capability this role depends on, if any.
+	Capability string `json:"capability,omitempty"`
+
+	// Reason explains the verdict. It is required when unsatisfied, and
+	// optional but valuable when satisfied.
+	Reason string `json:"reason,omitempty"`
+}
+
 // GateInput carries the observed facts the gates evaluate.
 type GateInput struct {
 	// PlanValidated reports whether a validated plan exists.
@@ -241,20 +286,57 @@ type GateInput struct {
 	ConfigValid bool
 	// ConfigProblem explains an invalid configuration.
 	ConfigProblem string
-	// WANPresent reports whether the WAN interface was observed.
-	WANPresent bool
-	// WANProblem explains a missing WAN interface.
-	WANProblem string
-	// LANPresent reports whether the LAN interface was observed.
-	LANPresent bool
-	// LANProblem explains a missing LAN interface.
-	LANProblem string
+
+	// WAN is how the desired WAN role was satisfied on the observed host.
+	WAN RoleGate
+
+	// LAN is how the desired LAN role was satisfied on the observed host.
+	LAN RoleGate
+
+	// Capabilities is what the host was observed to be able to do.
+	//
+	// The gates do not currently require any particular capability, and
+	// that is deliberate: a capability derived from the platform rather than
+	// from a probe must not be able to enable anything. The set is carried
+	// so that a future gate CAN require one, and so that the readiness
+	// report can show the operator the full picture rather than two booleans.
+	Capabilities []CapabilityGate
+
 	// RecoveryOK reports whether recovery is possible.
 	RecoveryOK bool
 	// RecoveryProblem explains an unrecoverable situation.
 	RecoveryProblem string
 	// PresenceConfirmed reports whether an operator confirmed being present.
 	PresenceConfirmed bool
+}
+
+// CapabilityGate is one observed host capability, as the gates see it.
+//
+// It is a separate type from the host package's own so that internal/activation
+// — the package that owns the safety boundary — depends on nothing but itself.
+// A safety package that imports the discovery package inherits its bugs; this
+// one imports nothing.
+type CapabilityGate struct {
+	// Name is the capability: "routing", "nat", "dhcp", and so on.
+	Name string `json:"name"`
+	// Available reports whether the host can perform it.
+	Available bool `json:"available"`
+	// Confidence is "observed", "inferred" or "unknown".
+	Confidence string `json:"confidence,omitempty"`
+	// Reason explains the verdict.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Satisfied reports whether a capability is available AND was actually
+// observed, not inferred.
+//
+// This is the distinction the design turns on. A capability concluded from the
+// platform — "Linux can NAT" — is not evidence that this machine can, and a
+// gate must never be satisfied by an inference. Until a probe exists, nothing
+// reaches AVAILABLE through this method, and that is the correct answer
+// rather than a gap to be papered over.
+func (c CapabilityGate) Satisfied() bool {
+	return c.Available && c.Confidence == "observed"
 }
 
 // reasonUnless returns "" when cond holds, otherwise reason.

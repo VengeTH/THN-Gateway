@@ -21,6 +21,14 @@ type ipLinkJSON struct {
 	Address   string         `json:"address"`
 	Flags     []string       `json:"flags"`
 	LinkInfo  ipLinkInfoJSON `json:"linkinfo"`
+	// Speed is the negotiated link speed in Mbps.
+	//
+	// `ip` emits it only when a driver reports one. A field that THN
+	// declared with the wrong Go type would fail the whole document, so it
+	// is declared as the plain number the kernel emits. Absent means the
+	// driver does not report a speed — which is NOT the same as a speed of
+	// zero, and is carried through as 0 meaning "not reported".
+	Speed int `json:"speed"`
 }
 
 type ipLinkInfoJSON struct {

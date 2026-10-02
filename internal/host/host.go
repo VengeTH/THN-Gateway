@@ -156,6 +156,22 @@ const (
 	IdentityEphemeral IdentityKind = "ephemeral"
 )
 
+// Kind constants are THN's own link-kind vocabulary.
+//
+// They are not the kernel's. The kernel says "ether" and "wlan"; these say
+// "ethernet" and "wireless". NormaliseKind bridges the two at the discovery
+// edge so that nothing above it has to know what `ip` calls things.
+const (
+	KindEthernet = "ethernet"
+	KindLoopback = "loopback"
+	KindWireless = "wireless"
+	KindBridge   = "bridge"
+	KindVLAN     = "vlan"
+	KindBond     = "bond"
+	KindTunnel   = "tunnel"
+	KindDummy    = "dummy"
+)
+
 // Interface is one observed network interface.
 type Interface struct {
 	// ID is the stable identity this package refers to an interface by.
@@ -174,9 +190,17 @@ type Interface struct {
 	// Index is the kernel interface index.
 	Index int `json:"index"`
 
-	// Kind is the link kind as reported by the kernel: "ethernet",
-	// "loopback", and so on. Empty means the kernel did not say.
+	// Kind classifies the interface, e.g. "ethernet", "loopback", "vlan".
+	// It is THN's vocabulary, not the kernel's: see the Kind constants above.
 	Kind string `json:"kind,omitempty"`
+
+	// RawKind is the kernel's own linkinfo.info_kind, preserved verbatim.
+	//
+	// It exists so that the normalisation is auditable and reversible, not
+	// because anything needs it. An operator reading a diagnostic that says
+	// "wlan" and an interface that reports "wireless" should be able to see
+	// that they are the same thing rather than wondering which is wrong.
+	RawKind string `json:"raw_kind,omitempty"`
 
 	// MAC is the hardware address. Sensitive: the CLI does not print it
 	// unless asked.
@@ -307,13 +331,39 @@ func (d *Device) InterfaceForRole(r Role) (Interface, bool) {
 }
 
 // SystemNames returns the observed kernel names, for diagnostics and for the
-// error model that has to name what was actually seen.
+// the error model that has to name what was actually seen.
 func (d *Device) SystemNames() []string {
 	out := make([]string, 0, len(d.Interfaces))
 	for _, i := range d.Interfaces {
 		out = append(out, i.SystemName)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// RoleAssignments returns the assignments an operator would write down to
+// reproduce the roles currently on this device.
+//
+// It is the inverse of Resolve: it turns an observed device back into the
+// selectors that would reproduce it. `thn discover --assignments` prints it,
+// so an operator does not have to transcribe kernel names by hand and get
+// them subtly wrong.
+//
+// Selectors are emitted in a stable form. Where a stable identity exists it is
+// preferred, because a name stops working when a NIC moves slots.
+func (d *Device) RoleAssignments() []Assignment {
+	out := make([]Assignment, 0, len(d.Interfaces))
+	for _, i := range d.Interfaces {
+		if i.Role == RoleUnassigned || i.Role == "" {
+			continue
+		}
+		sel := i.SystemName
+		if i.IDKind == IdentityHardware {
+			sel = i.ID
+		}
+		out = append(out, Assignment{Role: i.Role, Selector: sel})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Role < out[b].Role })
 	return out
 }
 

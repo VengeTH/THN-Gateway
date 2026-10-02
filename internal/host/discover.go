@@ -82,23 +82,65 @@ func interfacesFrom(in []network.Interface) []Interface {
 		}
 
 		id, kind := InterfaceID(i.Kind, i.MAC, i.Index)
+		linkKind := NormaliseKind(i.Kind)
 		out = append(out, Interface{
 			ID:         id,
 			IDKind:     kind,
 			SystemName: i.Name,
 			Index:      i.Index,
-			Kind:       i.Kind,
+			Kind:       linkKind,
+			RawKind:    i.Kind,
 			MAC:        i.MAC,
 			State:      i.State,
 			LinkUp:     i.State == network.LinkUp,
 			MTU:        i.MTU,
+			SpeedMbps:  i.SpeedMbps,
 			Addresses:  addrs,
 			// Roles are assigned by configuration. Nothing here infers one.
 			Role:       RoleUnassigned,
-			Assignable: i.Kind != "loopback",
+			Assignable: linkKind != KindLoopback,
 		})
 	}
 	return out
+}
+
+// # The kernel's vocabulary is not THN's
+//
+// `ip -j -d link show` reports info_kind "ether" for a wired NIC and "wlan"
+// for a wireless one. THN's renderer says "Ethernet", and its wireless
+// capability check asks for "wireless".
+//
+// That mismatch was invisible: every test fixture was written in THN's
+// vocabulary, because the fixtures were built from the model rather than
+// captured from a host. On a real machine `thn discover` printed "Ether" and
+// reported wireless-ap NOT AVAILABLE with a Wi-Fi card fitted and working.
+//
+// The correction happens HERE, at the edge, in one function. Everywhere above
+// this line THN speaks one vocabulary, and the kernel's is preserved in
+// RawKind for the case where the distinction matters.
+func NormaliseKind(raw string) string {
+	switch raw {
+	case "":
+		return ""
+	case "ether", "ethernet":
+		return KindEthernet
+	case "loopback":
+		return KindLoopback
+	case "wlan", "wireless":
+		return KindWireless
+	case "bridge":
+		return KindBridge
+	case "vlan":
+		return KindVLAN
+	case "bond", "team":
+		return KindBond
+	case "tun", "tap", "tunnel":
+		return KindTunnel
+	case "dummy":
+		return KindDummy
+	default:
+		return raw
+	}
 }
 
 // forwardingFrom reads the kernel's forwarding setting out of the snapshot.

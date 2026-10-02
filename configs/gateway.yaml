@@ -21,28 +21,41 @@ gateway:
   generation: 1
 
 network:
-  # The uplink. On the Dell this is the onboard NIC; on a laptop it will not
-  # exist, which is why `thn plan` reports it as pending rather than failing.
-  wan: enp0s31f6
+  # The uplink — the connection carrying the internet.
+  #
+  # This accepts EITHER form, and the stable ID is the one to prefer:
+  #
+  #   hw:0123456789abcdef   a stable identity. Survives the NIC moving slots,
+  #                          and survives predictable naming being turned off.
+  #   eth0                  a kernel interface name. Fine, and what `ip link`
+  #                          prints, but it changes when hardware moves.
+  #
+  # `uplink0` and `downlink0` below are PLACEHOLDERS. They are not kernel
+  # interface names on any machine, and they are deliberately not: a document
+  # that shipped somebody's real NIC name asserts a fact about their hardware
+  # to every machine that installs THN.
+  #
+  # Replace them. `thn discover` shows what this host actually has and
+  # `thn discover --emit` prints a ready-to-paste fragment using stable
+  # identities. A placeholder left in place fails the lan-identified and
+  # wan-present readiness gates loudly, which is the correct outcome.
+  wan: uplink0
 
-  # The downstream interface, carrying the gateway's own address on the LAN
-  # that serves the switch.
+  # The downstream interface — the network the gateway's own devices sit on.
   #
-  # It was deliberately empty while THN was developed remotely, because no
-  # downstream NIC was attached. That is no longer the shape of a deployable
-  # gateway: NAT and LAN-to-WAN forwarding are enabled below, and with no LAN
-  # interface both are incoherent — `thn validate` reports that as an error,
-  # correctly.
+  # Same two accepted forms as `wan` above.
   #
-  # SET THIS to the real interface name before deploying. `thn network inspect`
-  # lists what this host actually has. A wrong name is caught: the lan-identified
-  # readiness gate fails and the plan stays pending, so it cannot silently
-  # produce a gateway that serves nobody.
-  lan: enp1s0
+  # Leave it empty while the hardware is absent: THN reports an unattached LAN
+  # as pending, and will not pick an interface for you.
+  lan: downlink0
 
   # The address THN would place on the LAN interface.
   lan_prefix: 10.77.0.1/24
 
+  # Resolvers for THIS HOST. The DNS service's own upstream list is
+  # `dns.upstream` below, which is authoritative for it; this is the fallback
+  # used only when that is empty. Setting both to the same values is fine and
+  # warned about; setting them to DIFFERENT values is an error.
   dns:
     - 1.1.1.1
     - 9.9.9.9
@@ -62,9 +75,10 @@ nat:
   # implicit so the rendered masquerade rule can be reviewed against a named
   # interface.
   interfaces:
-    - enp1s0
+    - downlink0
 
-  # Source NAT, stated explicitly.
+  # Source NAT, stated explicitly. `masquerade.outbound` below is required
+  # whenever this is enabled — see the note there.
   masquerade:
     enabled: true
 
@@ -102,7 +116,7 @@ firewall:
   #
   # ADD YOUR MANAGEMENT PATH HERE BEFORE DEPLOYING.
   #
-  # If you administer the Dell over Tailscale or from anywhere outside the LAN,
+  # If you administer this device over a VPN or from anywhere outside the LAN,
   # its range must be listed too or the firewall will refuse your own session
   # and the device will need physical access to recover. Verify the rendered
   # rule with `thn firewall render` before loading anything.

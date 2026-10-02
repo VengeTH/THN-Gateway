@@ -27,13 +27,18 @@ import (
 )
 
 // satisfiedInput is a GateInput with every satisfiable gate satisfied.
+//
+// The role gates are satisfied through RoleGate, not through a boolean: the
+// point of the change was that a gate can say WHICH interface filled the role,
+// and a test input that cannot express that cannot check that it does.
 func satisfiedInput() GateInput {
 	return GateInput{
-		PlanValidated:     true,
-		ConfigValid:       true,
-		WANPresent:        true,
-		LANPresent:        true,
-		RecoveryOK:        true,
+		PlanValidated: true,
+		ConfigValid:   true,
+		WAN:           RoleGate{Role: "wan", Satisfied: true, Interface: "uplink0", Reason: "role wan is filled by uplink0"},
+		LAN:           RoleGate{Role: "lan", Satisfied: true, Interface: "downlink0", Reason: "role lan is filled by downlink0"},
+		RecoveryOK:    true,
+
 		PresenceConfirmed: true,
 	}
 }
@@ -57,8 +62,8 @@ var allGates = []gateCase{
 	{"apply-path-available", ""},
 	{"plan-validated", "PlanValidated"},
 	{"config-valid", "ConfigValid"},
-	{"wan-present", "WANPresent"},
-	{"lan-identified", "LANPresent"},
+	{"wan-present", "WAN"},
+	{"lan-identified", "LAN"},
 	{"recoverable", "RecoveryOK"},
 	{"physical-presence", "PresenceConfirmed"},
 }
@@ -70,10 +75,10 @@ func unsatisfiable(in GateInput, field string) GateInput {
 		in.PlanValidated = false
 	case "ConfigValid":
 		in.ConfigValid = false
-	case "WANPresent":
-		in.WANPresent = false
-	case "LANPresent":
-		in.LANPresent = false
+	case "WAN":
+		in.WAN = RoleGate{Role: "wan", Reason: "role wan is not assigned"}
+	case "LAN":
+		in.LAN = RoleGate{Role: "lan", Reason: "role lan is not assigned"}
 	case "RecoveryOK":
 		in.RecoveryOK = false
 	case "PresenceConfirmed":
@@ -214,9 +219,17 @@ func TestGateReasonsAreDistinct(t *testing.T) {
 		// PlanValidated is left false so every gate blocks. It carries no
 		// Problem field of its own, so its reason is the fixed explanatory
 		// string rather than caller text.
-		ConfigProblem:     "dhcp.ranges[0].end is outside the LAN prefix",
-		WANProblem:        "enp0s31f6 was not found on this host",
-		LANProblem:        "network.lan is empty",
+		ConfigProblem: "dhcp.ranges[0].end is outside the LAN prefix",
+		WAN: RoleGate{
+			Role:     "wan",
+			Selector: "hw:0011223344aabbcc",
+			Reason:   "no observed interface matches the uplink selector; observed: eno1, eno2",
+		},
+		LAN: RoleGate{
+			Role:     "lan",
+			Selector: "hw:ffeeddccbbaa9988",
+			Reason:   "role lan is not assigned; observed: eno1, eno2",
+		},
 		RecoveryProblem:   "the prior configuration cannot be reconstructed",
 		PresenceConfirmed: false,
 	})
@@ -288,13 +301,13 @@ func TestGateProblemTextReachesTheReason(t *testing.T) {
 // ignored.
 func TestEvaluateIsDeterministic(t *testing.T) {
 	in := GateInput{
-		PlanValidated:     true,
-		ConfigValid:       false,
-		ConfigProblem:     "dhcp.ranges[0].end is outside the LAN",
-		WANPresent:        false,
-		WANProblem:        "enp0s31f6 was not found",
-		LANPresent:        true,
-		RecoveryOK:        true,
+		PlanValidated: true,
+		ConfigValid:   false,
+		ConfigProblem: "dhcp.ranges[0].end is outside the LAN",
+		WAN:           RoleGate{Role: "wan", Selector: "hw:0011223344aabbcc", Reason: "the uplink selector matched no observed interface"},
+		LAN:           RoleGate{Role: "lan", Satisfied: true, Interface: "eno2", Reason: "role lan is filled by eno2"},
+		RecoveryOK:    true,
+
 		PresenceConfirmed: true,
 	}
 

@@ -564,7 +564,8 @@ func TestGateActivationGatesAreNeverAllSatisfied(t *testing.T) {
 	result := activation.Evaluate(activation.GateInput{
 		PlanValidated: true,
 		ConfigValid:   true,
-		WANPresent:    true,
+		WAN:           activation.RoleGate{Role: "wan", Satisfied: true, Interface: "uplink0"},
+		LAN:           activation.RoleGate{Role: "lan", Satisfied: true, Interface: "downlink0"},
 		// Everything else at its best possible value.
 	})
 

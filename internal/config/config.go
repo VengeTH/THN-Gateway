@@ -107,12 +107,19 @@ type GatewayConfig struct {
 
 // NetworkConfig describes intended interface roles.
 type NetworkConfig struct {
-	// WAN is the uplink interface name, e.g. "enp0s31f6".
+	// WAN is the uplink: the interface carrying the internet connection.
+	//
+	// It accepts either a kernel interface name (the advanced, explicit
+	// form) or a stable interface identity produced by `thn discover`. The
+	// second is preferred, because it survives the NIC moving slots.
 	WAN string `yaml:"wan"`
 
-	// LAN is the downstream interface name, e.g. "enx001122334455".
-	// Empty means "not yet identified", which is the expected state while
-	// THN is being developed against hardware that is not present.
+	// LAN is the downstream interface: the network the operator's own
+	// devices sit on. Same two accepted forms as WAN.
+	//
+	// Empty means "not yet identified". That is the expected state while THN
+	// is developed against hardware that is not present, and THN will NOT
+	// pick one for you: an unassigned LAN stays unassigned.
 	LAN string `yaml:"lan"`
 
 	// LANPrefix is the address to place on the LAN interface.
@@ -465,8 +472,27 @@ func Defaults() Config {
 			Generation: 1,
 		},
 		Network: NetworkConfig{
-			WAN:       "enp0s31f6",
-			LAN:       "",
+			// WAN is EMPTY on purpose.
+			//
+			// It used to default to "enp0s31f6" — a kernel interface name
+			// copied from the development machine. Shipping that as a
+			// default meant every host THN was installed on, and every
+			// configuration derived from Defaults(), silently asserted that
+			// it owned a NIC by that name. On any other machine the
+			// assertion was false; the only outcomes were a validation
+			// error naming a NIC that never existed, or — worse, when a
+			// document omitted network.wan entirely — a default that
+			// happened to match some unrelated interface.
+			//
+			// An empty WAN is the honest default: nobody has told THN which
+			// connection is the internet one yet. `thn discover` is how that
+			// gets answered.
+			WAN: "",
+			LAN: "",
+			// 10.77.0.1/24 is a documentation-friendly example LAN, not a
+			// property of any hardware. It is overridable and every operator
+			// changes it; it is kept because a default document with no
+			// addresses in it cannot express what a gateway is for.
 			LANPrefix: "10.77.0.1/24",
 			DNS:       []string{"1.1.1.1", "9.9.9.9"},
 			MTU:       1500,
@@ -762,7 +788,8 @@ func (c Config) Validate() ValidationResult {
 
 	if c.Network.WAN == "" {
 		v.Add("network.wan", SeverityError,
-			"must name the uplink interface, e.g. \"enp0s31f6\"")
+			"must name the uplink; run `thn discover` to see this host's interfaces, "+
+				"then set network.wan to a stable ID or a kernel interface name")
 	}
 	if c.Network.LAN != "" && c.Network.LAN == c.Network.WAN {
 		v.Add("network.lan", SeverityError,

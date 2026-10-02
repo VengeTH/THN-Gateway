@@ -25,10 +25,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/network"
+	"github.com/venth/thn-gateway/internal/profile"
 )
 
 // runDiscover implements `thn discover`.
@@ -36,11 +39,14 @@ func runDiscover(env *Env, args []string) ExitCode {
 	fs := newFlagSet()
 	fs.Bool("mac", false)
 	fs.Bool("json", false)
+	fs.Bool("emit", false)
+	fs.String("config", "")
 
 	if _, err := fs.Parse(args); err != nil {
 		return env.fatalf("thn discover: %v\n", err)
 	}
 	showMAC := *fs.bools["mac"]
+	emit := *fs.bools["emit"]
 
 	snap, err := network.NewInspector().Inspect(cmdContext())
 	if err != nil && snap == nil {
@@ -50,15 +56,36 @@ func runDiscover(env *Env, args []string) ExitCode {
 
 	d := host.FromSnapshot(snap)
 
+	// Resolve whatever roles the current document already assigns, so that
+	// `thn discover` can answer "what does this machine look like RIGHT NOW"
+	// rather than only "what hardware exists". Resolution is read-only and
+	// assigns nothing: an unassigned interface stays unassigned.
+	assign := []host.Assignment{}
+	if cfg, cerr := loadConfigIfPresent(env, *fs.strings["config"]); cerr == nil {
+		assign = roleAssignments(cfg)
+	}
+	res := host.Resolve(d, assign)
+
+	// Write the resolved roles back onto the device so the renderer, the
+	// assignment emitter and the JSON all read one model rather than three
+	// that can disagree.
+	applyResolutionTo(d, res)
+
+	reps := evaluateProfiles(d, res)
+
 	if env.IsJSON {
-		if err := env.printJSON(discoveryJSON(d, showMAC)); err != nil {
+		if err := env.printJSON(discoveryJSON(d, showMAC, res, reps)); err != nil {
 			env.errorf("thn discover: %v\n", err)
 			return ExitProblems
 		}
 		return ExitOK
 	}
 
-	printDiscovery(env, d, showMAC)
+	printDiscovery(env, d, showMAC, res, reps)
+
+	if emit {
+		env.printf("\n%s", RenderAssignments(d))
+	}
 
 	if !d.Supported {
 		// Reporting nothing successfully would be the wrong answer: the
@@ -68,8 +95,49 @@ func runDiscover(env *Env, args []string) ExitCode {
 	return ExitOK
 }
 
+// applyResolutionTo writes resolved roles onto the device's interfaces.
+func applyResolutionTo(d *host.Device, res host.Resolution) {
+	for n := range d.Interfaces {
+		d.Interfaces[n].Role = host.RoleUnassigned
+	}
+	for _, a := range res.Assigned {
+		for n := range d.Interfaces {
+			if d.Interfaces[n].ID == a.ID {
+				d.Interfaces[n].Role = a.Role
+			}
+		}
+	}
+}
+
+// evaluateProfiles reports every profile's verdict against this host.
+func evaluateProfiles(d *host.Device, res host.Resolution) []profile.Report {
+	out := make([]profile.Report, 0, len(profile.All()))
+	for _, p := range profile.All() {
+		def, err := profile.Lookup(string(p))
+		if err != nil {
+			continue
+		}
+		out = append(out, profile.Evaluate(d, res, def))
+	}
+	return out
+}
+
+// loadConfigIfPresent loads a configuration if one exists, and tolerates its
+// absence.
+//
+// Discovery must work on a machine that has never been configured. Failing
+// because /etc/thn/config.yaml is missing would make the one command that
+// helps an operator configure it the one command that will not run.
+func loadConfigIfPresent(env *Env, explicit string) (config.Config, error) {
+	path := env.resolveConfigPath(explicit)
+	if _, statErr := os.Stat(path); statErr != nil {
+		return config.Config{}, statErr
+	}
+	return loadConfig(env, path)
+}
+
 // discoveryJSON renders the device for a machine consumer.
-func discoveryJSON(d *host.Device, showMAC bool) map[string]any {
+func discoveryJSON(d *host.Device, showMAC bool, res host.Resolution, reps []profile.Report) map[string]any {
 	ifaces := make([]map[string]any, 0, len(d.Interfaces))
 	for _, i := range d.Interfaces {
 		entry := map[string]any{
@@ -104,6 +172,25 @@ func discoveryJSON(d *host.Device, showMAC bool) map[string]any {
 		}
 	}
 
+	assignments := make([]map[string]any, 0, len(res.Assigned))
+	for r, i := range res.Assigned {
+		assignments = append(assignments, map[string]any{
+			"role":          string(r),
+			"selector":      i.ID,
+			"system_name":   i.SystemName,
+			"identity_kind": string(i.IDKind),
+		})
+	}
+
+	profileReports := make([]map[string]any, 0, len(reps))
+	for _, rep := range reps {
+		profileReports = append(profileReports, map[string]any{
+			"profile":   string(rep.Profile),
+			"satisfied": rep.Satisfied,
+			"findings":  rep.Findings,
+		})
+	}
+
 	return map[string]any{
 		"hostname":           d.Hostname,
 		"os":                 d.OS,
@@ -116,6 +203,9 @@ func discoveryJSON(d *host.Device, showMAC bool) map[string]any {
 		"diagnostics":        d.Diagnostics,
 		"network_untouched":  true,
 		"roles_available":    roleNames(),
+		"roles_assigned":     assignments,
+		"role_problems":      res.Problems,
+		"profiles":           profileReports,
 		"statement":          "Current network remains untouched.",
 	}
 }
@@ -131,8 +221,84 @@ func roleNames() []string {
 }
 
 // printDiscovery renders the device for a human.
-func printDiscovery(env *Env, d *host.Device, showMAC bool) {
+//
+// The three sections come from three models — the device, the role
+// resolution, and the profile evaluations — and are printed together because
+// an operator asking "what is this machine?" needs all three at once: what it
+// has, what it has been told to do, and what it could be told to do.
+func printDiscovery(env *Env, d *host.Device, showMAC bool, res host.Resolution, reps []profile.Report) {
 	env.printf("%s", RenderDiscovery(d, showMAC))
+
+	if len(res.Problems) > 0 {
+		env.printf("\nUnresolved assignments\n")
+		env.printf("──────────────────────\n")
+		for _, s := range host.Suggestions(res) {
+			env.printf("  - %s\n", s)
+		}
+		env.printf("\n  Nothing was changed. Assign an interface with `thn` or\n")
+		env.printf("  edit the configuration, then run `thn validate`.\n")
+	}
+
+	env.printf("%s", RenderProfiles(reps))
+}
+
+// RenderAssignments renders a ready-to-paste configuration fragment binding
+// the roles currently observed on this host.
+//
+// It emits STABLE IDENTITIES, not kernel names, wherever one exists. That is
+// the whole value of the exercise: the configuration an operator writes on a
+// laptop still works on the gateway after a NIC moves slots or predictable
+// naming is turned off.
+//
+// Loopback is omitted because it can never hold a role, and a block naming it
+// would be a block that fails validation on the next machine.
+func RenderAssignments(d *host.Device) string {
+	var b strings.Builder
+	assigned := d.RoleAssignments()
+	if len(assigned) == 0 {
+		return ""
+	}
+
+	b.WriteString("Configuration fragment\n")
+	b.WriteString("────────────────────\n")
+	b.WriteString("  # Stable identities survive the NIC moving slots or being renamed.\n")
+	b.WriteString("  network:\n")
+	for _, a := range assigned {
+		// No column padding: this fragment is meant to be copied into YAML,
+		// and "wan :" is valid YAML but reads like a mistake to a human.
+		fmt.Fprintf(&b, "    %s: %s\n", string(a.Role), a.Selector)
+	}
+	b.WriteString("\n  # Nothing above was applied. Review it, then copy it into your\n")
+	b.WriteString("  # configuration and run `thn validate`.\n")
+	return b.String()
+}
+
+// RenderProfiles renders what each profile would need from this host.
+//
+// It is here rather than in internal/profile so that a future UI and this CLI
+// render the same facts, and so the rendering can be asserted in a test
+// without executing anything.
+func RenderProfiles(reps []profile.Report) string {
+	var b strings.Builder
+	b.WriteString("\nProfiles\n")
+	b.WriteString("───────\n")
+	for _, rep := range reps {
+		def, err := profile.Lookup(string(rep.Profile))
+		if err != nil {
+			continue
+		}
+		word := "AVAILABLE"
+		if !rep.Satisfied {
+			word = "NOT AVAILABLE"
+		}
+		fmt.Fprintf(&b, "  %-14s %-14s %s\n", rep.Profile, word, def.Title)
+		if !rep.Satisfied {
+			for _, f := range rep.Blocked() {
+				fmt.Fprintf(&b, "      - %s\n", f.Message)
+			}
+		}
+	}
+	return b.String()
 }
 
 // RenderDiscovery renders a device as the operator sees it.

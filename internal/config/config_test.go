@@ -9,16 +9,83 @@ import (
 	"time"
 )
 
-func TestDefaultsAreValid(t *testing.T) {
+// namedDefaults is the compiled defaults plus the one thing a document cannot
+// derive: which physical connection is the uplink.
+//
+// Most tests here are about a rule unrelated to interface selection — a LAN
+// prefix, a DHCP range, a firewall backend. Building them on raw Defaults()
+// would make each of them depend on a rule it is not testing, and would have
+// hidden the fact that removing the hardware default was a behaviour change.
+func namedDefaults() Config {
 	cfg := Defaults()
-	v := cfg.Validate()
+	cfg.Network.WAN = "eth0"
+	return cfg
+}
 
-	if v.HasErrors() {
-		t.Errorf("compiled defaults must be valid, got:")
+// TestDefaultsNameNoInterface is the device-independence rule, in the one
+// place it is easiest to break.
+//
+// Defaults() used to set network.wan to "enp0s31f6" — a kernel interface
+// name copied from the development machine. Every configuration derived from
+// those defaults therefore asserted that the host owned a NIC by that name,
+// which was false on every machine but one.
+//
+// Nothing in THN may reintroduce a hardware name into the compiled defaults.
+// The assertion is over the whole document, not just the WAN, because the next
+// person to add one would add it somewhere else.
+func TestDefaultsNameNoInterface(t *testing.T) {
+	cfg := Defaults()
+
+	hardwareNames := []string{"enp0s31f6", "enp1s0", "eth0", "eth1", "wlp2s0", "wlan0"}
+	fields := map[string]string{
+		"network.wan":             cfg.Network.WAN,
+		"network.lan":             cfg.Network.LAN,
+		"nat.masquerade.outbound": cfg.NAT.Masquerade.Outbound,
+		"qos.interface":           cfg.QoS.Interface,
+	}
+	for field, value := range fields {
+		for _, name := range hardwareNames {
+			if strings.Contains(value, name) {
+				t.Errorf("compiled default %s = %q names the hardware interface %q",
+					field, value, name)
+			}
+		}
+	}
+}
+
+// TestDefaultsAreValidOnceAnUplinkIsNamed states the contract honestly.
+//
+// The compiled defaults are NOT a complete configuration, and cannot be: the
+// one thing they cannot supply is which physical connection is the internet
+// one. That is a fact about the machine, not about the document, and a
+// document cannot guess it.
+//
+// So the defaults must be valid once the operator has answered that question,
+// and must otherwise report exactly that one thing as missing — not a
+// scattering of unrelated errors that hide it.
+func TestDefaultsAreValidOnceAnUplinkIsNamed(t *testing.T) {
+	cfg := Defaults()
+	cfg.Network.WAN = "eth0" // any selector the operator might legitimately choose
+	if v := cfg.Validate(); v.HasErrors() {
+		t.Errorf("defaults plus an uplink must be valid, got:")
 		for _, f := range v.Findings {
 			if f.Severity == SeverityError {
 				t.Errorf("  %s", f)
 			}
+		}
+	}
+
+	// And with no uplink, the operator is told precisely that, and only that.
+	empty := Defaults().Validate()
+	if !hasField(empty, "network.wan", SeverityError) {
+		t.Error("a document that names no uplink must be told to name one")
+	}
+	for _, f := range empty.Findings {
+		if f.Severity != SeverityError {
+			continue
+		}
+		if f.Field != "network.wan" {
+			t.Errorf("unexpected extra error on %s: %s", f.Field, f.Message)
 		}
 	}
 }
@@ -206,6 +273,7 @@ func TestValidateRejectsBadLANPrefix(t *testing.T) {
 
 func TestValidateRejectsLANEqualToWAN(t *testing.T) {
 	cfg := Defaults()
+	cfg.Network.WAN = "eth0"
 	cfg.Network.LAN = cfg.Network.WAN
 	v := cfg.Validate()
 	if !hasField(v, "network.lan", SeverityError) {
@@ -381,7 +449,7 @@ func TestEmptyLANPrefixIsReportedNotSilent(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := Defaults()
+			cfg := namedDefaults()
 			c.cfg(&cfg)
 			cfg.Network.LANPrefix = ""
 
@@ -400,7 +468,7 @@ func TestEmptyLANPrefixIsReportedNotSilent(t *testing.T) {
 // The shipped document clears nothing, but a document that clears both the LAN
 // and its address is a real state: absent, not broken.
 func TestAnEmptyLANPrefixDoesNotBlockAUsableConfig(t *testing.T) {
-	cfg := Defaults()
+	cfg := namedDefaults()
 	cfg.Network.LAN = ""
 	cfg.Network.LANPrefix = ""
 	if err := cfg.Normalize(); err != nil {
@@ -419,7 +487,7 @@ func TestAnEmptyLANPrefixDoesNotBlockAUsableConfig(t *testing.T) {
 // from tools that want a masked network would reject the one correct value.
 func TestLANPrefixAcceptsAGatewayAddressWithHostBits(t *testing.T) {
 	for _, prefix := range []string{"10.77.0.1/24", "192.168.1.1/16", "172.16.0.1/20"} {
-		cfg := Defaults()
+		cfg := namedDefaults()
 		cfg.Network.LANPrefix = prefix
 
 		if v := cfg.Validate(); v.HasErrors() {
@@ -432,7 +500,7 @@ func TestLANPrefixAcceptsAGatewayAddressWithHostBits(t *testing.T) {
 // it warns in internal/validation; this layer must not turn it into an error,
 // and must not stay silent about it either.
 func TestAPublicLANPrefixWarnsButDoesNotError(t *testing.T) {
-	cfg := Defaults()
+	cfg := namedDefaults()
 	cfg.Network.LANPrefix = "203.0.113.1/24"
 
 	v := cfg.Validate()
@@ -444,7 +512,7 @@ func TestAPublicLANPrefixWarnsButDoesNotError(t *testing.T) {
 
 // IPv6 is parsed by the same field, so it must be exercised rather than assumed.
 func TestIPv6LANPrefixesAreAccepted(t *testing.T) {
-	cfg := Defaults()
+	cfg := namedDefaults()
 	cfg.Network.LANPrefix = "fd00::1/64"
 
 	v := cfg.Validate()
@@ -500,7 +568,7 @@ func TestUpstreamGatewayInsideTheLANIsRejected(t *testing.T) {
 }
 
 func TestUpstreamGatewayOutsideTheLANIsAccepted(t *testing.T) {
-	cfg := Defaults()
+	cfg := namedDefaults()
 	cfg.Network.LANPrefix = "10.77.0.1/24"
 	cfg.Network.UpstreamGateway = "203.0.113.1"
 

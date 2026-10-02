@@ -69,8 +69,8 @@ var fields = []Field{
 	{Key: "gateway.name", Type: TypeString, Description: "Logical gateway name", Default: "thn-gateway", Required: true},
 	{Key: "gateway.generation", Type: TypeInt, Description: "Configuration generation counter", Default: "1", Required: true},
 
-	{Key: "network.wan", Type: TypeInterface, Description: "Uplink interface name", Default: "enp0s31f6", Required: true, Mutating: true},
-	{Key: "network.lan", Type: TypeInterface, Description: "Downstream interface name", Mutating: true},
+	{Key: "network.wan", Type: TypeInterface, Description: "Uplink: a stable interface ID or a kernel interface name (see `thn discover`)", Required: true, Mutating: true},
+	{Key: "network.lan", Type: TypeInterface, Description: "Downstream: a stable interface ID or a kernel interface name (see `thn discover`)", Mutating: true},
 	{Key: "network.lan_prefix", Type: TypeCIDR, Description: "Address to place on the LAN interface", Default: "10.77.0.1/24", Mutating: true},
 	{Key: "network.dns", Type: TypeList, Description: "Resolvers to configure", Default: "1.1.1.1,9.9.9.9"},
 	{Key: "network.mtu", Type: TypeInt, Description: "MTU for gateway interfaces", Default: "1500", Mutating: true},
@@ -79,7 +79,7 @@ var fields = []Field{
 	{Key: "nat.enabled", Type: TypeBool, Description: "Masquerade traffic from the LAN", Default: "true", Mutating: true},
 	{Key: "nat.interfaces", Type: TypeList, Description: "Interfaces to masquerade from", Mutating: true},
 	{Key: "nat.masquerade.enabled", Type: TypeBool, Description: "Source-NAT outbound traffic", Default: "true", Mutating: true},
-	{Key: "nat.masquerade.outbound", Type: TypeInterface, Description: "Interface masqueraded traffic leaves by, or the role \"wan\"", Mutating: true},
+	{Key: "nat.masquerade.outbound", Type: TypeInterface, Description: "Interface masqueraded traffic leaves by — the logical role `wan`, or a kernel interface name. Required when masquerading is enabled: leaving it empty rewrites traffic leaving every interface, including the LAN", Mutating: true},
 
 	{Key: "firewall.enabled", Type: TypeBool, Description: "Filter unsolicited inbound traffic", Default: "true", Mutating: true},
 	{Key: "firewall.backend", Type: TypeEnum, Enum: []string{"nftables"}, Description: "Firewall implementation", Default: "nftables"},
