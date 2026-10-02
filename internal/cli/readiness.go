@@ -34,6 +34,7 @@ import (
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/venth/thn-gateway/internal/state"
 	"github.com/venth/thn-gateway/internal/validation"
 )
 
@@ -153,9 +154,23 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	// observation. observeHost is read-only and goes through internal/guard.
 	obs, _, _, device := observeHost(cfg)
 
-	res := host.Resolve(device, roleAssignments(cfg))
-	in.WAN = roleGate(device, res, host.RoleWAN, cfg.Network.WAN)
-	in.LAN = roleGate(device, res, host.RoleLAN, cfg.Network.LAN)
+	// # Which bindings apply
+	//
+	// Two statements can name a role's hardware: the configuration document
+	// (network.wan / network.lan) and the operator's assignment store. They
+	// are different statements, not two copies of one, and mergeBindings
+	// defines the precedence in a single place: the document wins where both
+	// speak, and a disagreement is reported rather than resolved.
+	//
+	// Before this milestone the store did not exist and only the document was
+	// consulted. That is not a behaviour anyone can observe on a machine with
+	// no assignments, which is why it is worth a comment.
+	_, stored := storedAssignments(cfg)
+	bindings, _, _ := mergeBindings(cfg, stored)
+
+	res := host.Resolve(device, bindings)
+	in.WAN = roleGate(device, res, host.RoleWAN, bindingSelector(cfg, stored, host.RoleWAN))
+	in.LAN = roleGate(device, res, host.RoleLAN, bindingSelector(cfg, stored, host.RoleLAN))
 	in.Capabilities = capabilityGates(device)
 
 	in.PlanValidated = planIsRunnable(cfg, obs)
@@ -171,6 +186,39 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	in.RecoveryProblem = "no recorded configuration history; nothing has been rolled back from yet"
 
 	return in
+}
+
+// storedAssignments returns the operator's bindings and the path they came
+// from.
+//
+// The path is returned so a caller can tell "the store is empty" from "there
+// is no store", which are different situations for an operator: the first
+// means nothing has been assigned, the second means THN has never run.
+func storedAssignments(cfg config.Config) (string, []state.InterfaceAssignment) {
+	path := resolveStorePath(cfg, "")
+	return path, loadBindings(path)
+}
+
+// bindingSelector reports what a role is being resolved against, in the form
+// an operator wrote it.
+//
+// It exists so the gate reason quotes the SELECTOR the operator used — a
+// stable identity or a kernel name — rather than a re-derived one. An
+// operator who wrote `hw:…` should be told about `hw:…`.
+func bindingSelector(cfg config.Config, stored []state.InterfaceAssignment, r host.Role) string {
+	declared := map[host.Role]string{
+		host.RoleWAN: cfg.Network.WAN,
+		host.RoleLAN: cfg.Network.LAN,
+	}
+	if d := strings.TrimSpace(declared[r]); d != "" {
+		return d
+	}
+	for _, s := range stored {
+		if s.Role == string(r) {
+			return s.Selector
+		}
+	}
+	return ""
 }
 
 // roleGate turns a role resolution into the value activation.Evaluate reads.

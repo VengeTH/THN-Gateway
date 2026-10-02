@@ -120,6 +120,52 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_act_ts ON activations (ts DESC)`,
 		},
 	},
+
+	{
+		Version: 2,
+		Name:    "interface assignments",
+		Statements: []string{
+			// # What an operator declared an interface to be
+			//
+			// This is ASSIGNED state: "this hardware identity performs this
+			// logical role". It is deliberately NOT an observation and NOT a
+			// configuration revision — it is the third concept, the one the
+			// architecture separates on purpose:
+			//
+			//	observed   what Linux currently has
+			//	assigned   what the administrator said it is for
+			//	desired    what the configuration document wants
+			//
+			// The selector is normally a STABLE IDENTITY (hw:…), not a
+			// kernel name. A kernel name is accepted as the advanced form
+			// and stored as given, because deleting an assignment when a NIC
+			// is renamed is worse than an operator having to re-state it.
+			//
+			// role is the PRIMARY KEY, which makes single-valued roles a
+			// storage-level guarantee rather than a convention. Re-assigning
+			// a role therefore REPLACES it explicitly, and cannot accumulate
+			// into the ambiguous two-interfaces-for-one-role state that
+			// internal/host.Resolve refuses to resolve.
+			//
+			// There is deliberately no row for "no assignment". An absent
+			// role means unassigned, and inventing a row to say so would make
+			// unassigning a write rather than a delete.
+			`CREATE TABLE IF NOT EXISTS interface_assignments (
+				role        TEXT PRIMARY KEY,
+				selector    TEXT NOT NULL,
+				id_kind     TEXT NOT NULL DEFAULT '',
+				note        TEXT NOT NULL DEFAULT '',
+				assigned_at TEXT NOT NULL,
+				assigned_by TEXT NOT NULL DEFAULT ''
+			)`,
+
+			// An index on the selector so that "which role does this
+			// hardware hold?" is a lookup rather than a table scan, and so
+			// that the one-interface-two-roles conflict is detectable
+			// without loading every row.
+			`CREATE INDEX IF NOT EXISTS idx_assign_sel ON interface_assignments (selector)`,
+		},
+	},
 }
 
 // SchemaVersion returns the highest version this build knows how to produce.

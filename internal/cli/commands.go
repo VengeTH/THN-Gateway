@@ -197,6 +197,12 @@ var commands = map[string]Command{
 		Summary: "report this machine's interfaces, roles and capabilities",
 		Run:     runDiscover,
 	},
+	"interface": {
+		Name:    "interface",
+		Tier:    TierPure,
+		Summary: "list interfaces and bind them to logical roles (records intent only)",
+		Run:     runInterface,
+	},
 	"appliance": {
 		Name:    "appliance",
 		Tier:    TierPure,
