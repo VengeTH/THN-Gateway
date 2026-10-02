@@ -302,28 +302,46 @@ func capabilitiesFor(d *Device, snap *network.Snapshot) map[Capability]Capabilit
 	wlanClients, wlanAPs := wirelessByMode(d)
 
 	set(CapWirelessClient, len(wlanClients) > 0, "observed",
-		wirelessReason("client", wlanClients, "no wireless interface was observed in client mode"))
+		wirelessReason("client", wlanClients,
+			"no wireless interface was observed operating as a client (mode managed/station)"))
 	set(CapWirelessAP, len(wlanAPs) > 0, "observed",
-		wirelessReason("access-point", wlanAPs, "no wireless interface was observed in access-point mode"))
+		wirelessReason("access-point", wlanAPs,
+			"no wireless interface was observed operating as an access point (mode AP)"))
 	return caps
 }
 
 // wirelessByMode separates observed wireless interfaces by operating mode.
 //
-// The rule is conservative in the direction that matters. An interface whose
-// mode the kernel did not report is counted as a CLIENT, because that is what
-// a wireless interface is by default and because a client that is merely
-// unconfirmed must not be promoted into an access point.
+// # Why the mode is required rather than assumed
+//
+// The first version counted ANY wireless interface as a client, because a
+// wireless interface is a client by default. On a real gateway that produced
+// the opposite error: a managed-mode adapter was reported as neither, and an
+// adapter in AP mode would have been reported as both.
+//
+// A radio can be a station, an access point, a monitor, or a mesh point. They
+// are different capabilities on identical hardware, and only the observed
+// mode distinguishes them. So:
+//
+//	managed / station    → client
+//	AP / master          → access point
+//	monitor              → neither
+//	mesh, adhoc          → neither
+//	unknown / unreported → NEITHER
+//
+// An unreported mode is not a client. Claiming it would be exactly the
+// "report a capability because the hardware could do it" the capability
+// model exists to prevent, and it would satisfy a hard gate on a guess.
 func wirelessByMode(d *Device) (clients, aps []string) {
 	for _, i := range d.Interfaces {
 		if i.Kind != KindWireless {
 			continue
 		}
 		switch i.WirelessMode {
-		case "ap", "master", "__ap":
-			aps = append(aps, i.SystemName)
-		default:
+		case network.WirelessModeClient:
 			clients = append(clients, i.SystemName)
+		case network.WirelessModeAP:
+			aps = append(aps, i.SystemName)
 		}
 	}
 	sort.Strings(clients)

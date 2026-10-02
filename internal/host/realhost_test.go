@@ -116,8 +116,8 @@ func TestWirelessIsRepresentedCorrectly(t *testing.T) {
 	if !wlan.Physical {
 		t.Error("a wireless adapter was not reported as physical")
 	}
-	if wlan.WirelessMode != "managed" {
-		t.Errorf("wireless mode = %q, want managed", wlan.WirelessMode)
+	if wlan.WirelessMode != network.WirelessModeClient {
+		t.Errorf("wireless mode = %q, want %q", wlan.WirelessMode, network.WirelessModeClient)
 	}
 	if wlan.SpeedMbps != 433 {
 		t.Errorf("speed = %d, want the observed 433", wlan.SpeedMbps)

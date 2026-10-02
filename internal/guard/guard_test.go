@@ -28,11 +28,47 @@ func TestPermittedReadOnlyInvocations(t *testing.T) {
 		{"tc", []string{"qdisc", "show"}},
 		{"tc", []string{"-j", "class", "show", "dev", "enp0s31f6"}},
 		{"sysctl", []string{"-n", "net.ipv4.ip_forward"}},
+		{"iw", []string{"dev"}},
+		{"iw", []string{"phy"}},
 	}
 
 	for _, c := range cases {
 		if err := Check(c.name, c.args...); err != nil {
 			t.Errorf("Check(%q, %v) = %v, want nil", c.name, c.args, err)
+		}
+	}
+}
+
+// TestIWCannotChangeAWirelessMode is why `iw` is on the allowlist at all.
+//
+// `iw` was added because `ip -d link` cannot see wireless on a current
+// mac80211 driver. Adding a binary to a safety boundary is only acceptable if
+// the grammar cannot reach a mutation, and `iw` can change a radio's mode,
+// channel and transmit power.
+//
+// Every mutating form carries an operand, and the policy permits zero. The
+// budget therefore rejects them before the verb is even resolved — which is
+// asserted here rather than assumed.
+func TestIWCannotChangeAWirelessMode(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"iw", []string{"dev", "wlp2s0", "set", "monitor"}},
+		{"iw", []string{"dev", "wlp2s0", "set", "freq", "2412"}},
+		{"iw", []string{"dev", "wlp2s0", "set", "ssid", "x"}},
+		{"iw", []string{"dev", "wlp2s0", "set"}},
+		{"iw", []string{"phy", "phy0", "set", "txpower", "fixed", "2000"}},
+		{"iw", []string{"phy", "phy0", "set", "country", "US"}},
+		{"iw", []string{"regulatory", "set", "US"}},
+		{"iw", []string{"regulatory", "set", "US"}},
+		{"iw", []string{"dev", "wlp2s0", "connect", "ssid"}},
+		{"iw", []string{"dev", "wlp2s0", "disconnect"}},
+	}
+
+	for _, c := range cases {
+		if err := Check(c.name, c.args...); err == nil {
+			t.Errorf("Check(%q, %v) = nil; it must be denied", c.name, c.args)
 		}
 	}
 }

@@ -289,8 +289,12 @@ func TestWirelessModeIsReadFromTheKernel(t *testing.T) {
 	if wlan.Kind != "wlan" {
 		t.Fatalf("wlp2s0 kind = %q, want wlan", wlan.Kind)
 	}
-	if wlan.WirelessMode != "managed" {
-		t.Errorf("wireless mode = %q, want managed", wlan.WirelessMode)
+	// The kernel says "managed". THN says "client". That translation happens at
+	// this boundary, once, so that both wireless sources — this one and nl80211
+	// via iw — hand the model the same word.
+	if wlan.WirelessMode != WirelessModeClient {
+		t.Errorf("wireless mode = %q, want %q (the kernel's \"managed\", normalised)",
+			wlan.WirelessMode, WirelessModeClient)
 	}
 	if !wlan.Physical {
 		t.Error("a wireless adapter was not reported as physical")

@@ -105,6 +105,37 @@ var allowlist = map[string]policy{
 		verbFlag: "-n",
 		argSlots: 1,
 	},
+
+	// iw: nl80211 wireless inspection, dumps only.
+	//
+	// This entry exists because of a measured failure. `ip -d link` sources
+	// its wireless block from the Wireless Extensions ioctls (SIOCGIWNAME),
+	// and current mac80211 drivers — iwlwifi, ath9k, ath11k, mt7921 and the
+	// rest — do not implement Wireless Extensions at all. On a laptop with
+	// iwlwifi, `ip -j -d link show` therefore emits NO wireless object, and
+	// a Wi-Fi adapter is indistinguishable from a wired NIC. THN cannot see
+	// a wireless interface on a current distribution without this.
+	//
+	// nl80211 has no netlink tool in the base system, so `iw` is the
+	// authoritative read-only source.
+	//
+	// argSlots is 0 on purpose. Bare `iw dev` and `iw phy` are dumps that
+	// change nothing. Every mutating form carries at least one operand:
+	// `iw dev wlan0 set monitor`, `iw phy phy0 set txpower fixed 2000`,
+	// `iw dev wlan0 set freq 2412`. All are denied by the operand budget
+	// before the verb is even considered. Widening this is a deliberate act
+	// someone must make in review, never a side effect of adding a caller.
+	//
+	// "link" is deliberately NOT listed even though `iw link` is a read-only
+	// dump. The word is a mutating verb for `tc link`, and TestNoMutatingEntryInAllowlist
+	// refuses any allowlist verb that also appears in the mutating list. That
+	// assertion is worth more than the convenience of one extra dump: an
+	// allowlist entry that reads as dangerous in one context should not be
+	// here on the strength of being harmless in another.
+	"iw": {
+		verbs:    []string{"dev", "phy"},
+		argSlots: 0,
+	},
 }
 
 // Check validates an invocation against the allowlist without executing it.

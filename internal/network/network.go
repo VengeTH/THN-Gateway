@@ -219,10 +219,15 @@ type Inspector interface {
 }
 
 // NewInspector returns an Inspector for the current platform.
-func NewInspector() Inspector { return &inspector{} }
+func NewInspector() Inspector { return &inspector{info: newHostInfo(context.Background())} }
 
 // inspector reads host state through guard-approved commands.
-type inspector struct{}
+//
+// info supplies the facts `ip` is not authoritative about — wireless
+// classification and link speed. It is a field so tests can inject a source
+// and exercise the enrichment without a Linux host; production uses the live
+// one.
+type inspector struct{ info HostInfo }
 
 // Inspect gathers a snapshot.
 //
@@ -269,6 +274,13 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 	snap.Sysctl = readSysctls(ctx)
 
 	attachAddresses(snap)
+
+	// Last, and deliberately so: fold in the facts `ip` is not authoritative
+	// about. Running it after attachAddresses means every source describes
+	// the same instant, and running it after ParseLinks means the
+	// enrichment operates on a complete link list.
+	enrichLinks(ctx, snap.Interfaces, i.info, &snap.Diagnostics)
+
 	return snap, nil
 }
 
@@ -442,15 +454,24 @@ func hasWireless(raw json.RawMessage) bool {
 // A decode failure costs this one field and nothing else, because the object
 // was decoded as RawMessage precisely so that this could not take the rest of
 // the host down with it.
+//
+// The result is NORMALISED into THN's vocabulary, so that both wireless
+// sources — this one and nl80211 — hand the model the same words. It did not
+// used to, which meant the two sources disagreed: this path said "managed"
+// while nl80211 said "client", and a rule written against one silently
+// stopped matching the other.
 func wirelessModeOf(raw json.RawMessage) string {
 	var w ipWirelessJSON
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return ""
 	}
 	if w.Iftype != "" {
-		return w.Iftype
+		return NormaliseWirelessMode(w.Iftype)
 	}
-	return w.Mode
+	if w.Mode != "" {
+		return NormaliseWirelessMode(w.Mode)
+	}
+	return ""
 }
 
 // linkState maps a kernel operstate onto THN's link state.

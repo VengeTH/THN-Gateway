@@ -157,7 +157,11 @@ func obs(name string, index int, mac, kind string, state network.LinkState, mbps
 		Role:      network.RoleUnassigned,
 	}
 	if kind == "wlan" {
-		i.WirelessMode = "managed"
+		// The NORMALISED mode, not the kernel's spelling. internal/network
+		// is the boundary that translates "managed" into "client"; a fixture
+		// that speaks the kernel's word would be testing a value the model
+		// never actually carries.
+		i.WirelessMode = network.WirelessModeClient
 	}
 	return i
 }
@@ -402,6 +406,100 @@ func TestUnsupportedPlatformIsReportedNotEmpty(t *testing.T) {
 	}
 }
 
+// TestWirelessCapabilitiesRequireAnObservedMode is the M3.1 anti-overclaim
+// rule, as a table.
+//
+// One radio can be a station, an access point, a monitor or a mesh point.
+// Those are different capabilities on identical hardware, and the ONLY thing
+// that distinguishes them is the mode the kernel reported.
+//
+// The row that matters most is `unknown`. The previous rule counted an
+// unreported mode as a client, on the reasoning that a wireless interface is
+// a client by default. That is an assumption about hardware, and it is
+// exactly what the confidence model exists to prevent: an unreported mode
+// must produce NO capability, not a probable one.
+func TestWirelessCapabilitiesRequireAnObservedMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       string
+		wantClient bool
+		wantAP     bool
+	}{
+		{"managed station is a client", network.WirelessModeClient, true, false},
+		{"access point is not a client", network.WirelessModeAP, false, true},
+		{"monitor is neither", network.WirelessModeMonitor, false, false},
+		{"mesh is neither", network.WirelessModeMesh, false, false},
+		{"adhoc is neither", network.WirelessModeAdhoc, false, false},
+		{"unreported mode is neither", "unknown", false, false},
+		{"absent mode is neither", "", false, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			snap := hostA()
+			for i := range snap.Interfaces {
+				if snap.Interfaces[i].Kind == "wlan" {
+					snap.Interfaces[i].WirelessMode = c.mode
+				}
+			}
+			d := FromSnapshot(snap)
+
+			client, _ := d.Can(CapWirelessClient)
+			ap, _ := d.Can(CapWirelessAP)
+
+			if client.Available != c.wantClient {
+				t.Errorf("wireless-client available = %v, want %v (reason: %s)",
+					client.Available, c.wantClient, client.Reason)
+			}
+			if ap.Available != c.wantAP {
+				t.Errorf("wireless-ap available = %v, want %v (reason: %s)",
+					ap.Available, c.wantAP, ap.Reason)
+			}
+
+			// Whatever the verdict, a reason is required. "Not available"
+			// without saying why is a dead end for an operator.
+			if client.Reason == "" || ap.Reason == "" {
+				t.Error("a wireless capability was reported with no reason")
+			}
+
+			// And confidence stays "observed" either way: THN did observe
+			// the mode, and observed that it was the wrong one.
+			if client.Confidence != "observed" || ap.Confidence != "observed" {
+				t.Errorf("wireless confidence = %s / %s, want observed / observed",
+					client.Confidence, ap.Confidence)
+			}
+		})
+	}
+}
+
+// TestANonWirelessInterfaceHasNoWirelessCapabilityWhateverItsName is Case B
+// at the model level.
+//
+// An Ethernet port called `wlp99s0` must not acquire a wireless capability.
+// It is the guard against fixing the original defect by pattern matching.
+func TestANonWirelessInterfaceHasNoWirelessCapabilityWhateverItsName(t *testing.T) {
+	snap := &network.Snapshot{
+		CapturedAt: time.Now(),
+		Platform:   "linux",
+		Supported:  true,
+		Interfaces: []network.Interface{
+			obs("wlp99s0", 2, "de:ad:be:ef:00:01", "ether", network.LinkUp, 1000),
+			obs("lo", 1, "", "loopback", network.LinkUp, 0),
+		},
+	}
+
+	d := FromSnapshot(snap)
+
+	if d.Has(CapWirelessClient) || d.Has(CapWirelessAP) {
+		t.Error("an Ethernet interface named wlp99s0 was given a wireless capability")
+	}
+	for _, i := range d.Interfaces {
+		if i.Kind == KindWireless {
+			t.Errorf("%s was classified wireless on naming alone", i.SystemName)
+		}
+	}
+}
+
 // TestCapabilityClaimsCarryConfidence is the anti-overclaim rule.
 //
 // A capability derived from the platform rather than a probe must say so, so a
@@ -455,7 +553,7 @@ func TestCapabilityClaimsCarryConfidence(t *testing.T) {
 	if ap.Available {
 		t.Error("wireless-ap is available on a host whose only radio is a client")
 	}
-	if !strings.Contains(ap.Reason, "access-point mode") {
+	if !strings.Contains(ap.Reason, "access point") {
 		t.Errorf("the wireless-ap reason does not say what was looked for: %q", ap.Reason)
 	}
 	// VLAN follows from an observed VLAN interface, and none exists here.
