@@ -30,6 +30,23 @@ package cli
 // They call the real production function. A test that reimplemented the
 // matching would agree with whatever the implementation did, including the
 // bug it was written to catch.
+//
+// # Interface names are OBSERVED, never assumed
+//
+// An earlier version of this file configured `network.wan: enp0s31f6` and
+// `network.lan: enp1s0` and called the live observeHost.
+//
+// Those are one developer's NIC names. The suite passed on their machine and
+// on every Windows machine — where the inspector is unsupported and the tests
+// skip — and then failed on the first real gateway, because that gateway does
+// not have an `enp1s0`.
+//
+// A test that names the hardware it runs on is a test that can only ever pass
+// on that hardware. Worse, it is the same defect this milestone exists to
+// remove, committed into the test suite where it looked like evidence.
+//
+// So every live assertion below derives its interfaces from the observation
+// itself. The machine names nothing; the test asks what is there.
 
 import (
 	"strings"
@@ -40,6 +57,41 @@ import (
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/network"
 )
+
+// observedAssignable returns the names of interfaces on THIS host that could
+// hold a role, in a stable order.
+//
+// It is the replacement for hardcoding. On a gateway it returns whatever that
+// gateway actually has — two NICs, one NIC, four NICs, none — and the tests
+// below are written to be meaningful in every case rather than to assume one.
+func observedAssignable(t *testing.T) (snap *network.Snapshot, names []string) {
+	t.Helper()
+
+	snap, err := network.NewInspector().Inspect(cmdContext())
+	if err != nil {
+		t.Skipf("could not inspect this host: %v", err)
+	}
+	if !snap.Supported {
+		t.Skip("this host cannot be inspected; the live role paths are unreachable here")
+	}
+
+	d := host.FromSnapshot(snap)
+	for _, i := range d.RoleCandidates() {
+		names = append(names, i.SystemName)
+	}
+	return snap, names
+}
+
+// requireAssignable returns at least n assignable interfaces, or skips.
+func requireAssignable(t *testing.T, n int) []string {
+	t.Helper()
+	_, names := observedAssignable(t)
+	if len(names) < n {
+		t.Skipf("this host has %d assignable interface(s); %d are needed to exercise this path",
+			len(names), n)
+	}
+	return names
+}
 
 // guessyHost is the shape that made the bug reachable: several interfaces,
 // none of which an operator would call "the LAN", and a WAN that is not
@@ -63,73 +115,140 @@ func guessyHost() *network.Snapshot {
 
 // TestAnUnassignedLANIsNeverGuessed is the core regression guard.
 //
-// Note the host deliberately includes `enp1s0`: a real, plausible LAN. The
-// old code would have bound `docker0` (first after `lo` alphabetically among
-// non-WAN names) and reported the gateway ready. THN must do neither.
+// Note the DETERMINISTIC half first: `guessyHost` contains a real, plausible
+// LAN (`enp1s0`) that is NOT the first interface in sorted order — `docker0`
+// sorts before it. The old code would have bound `docker0` and reported the
+// gateway ready. That is checked without touching a real machine, so the
+// regression cannot reappear merely because no one ran this on a laptop.
+//
+// The live half then confirms the same thing on whatever host it runs on.
 func TestAnUnassignedLANIsNeverGuessed(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Network.WAN = "enp0s31f6"
-	cfg.Network.LAN = "" // the operator has not said which NIC is the LAN
+	t.Run("deterministic fixture", func(t *testing.T) {
+		d := host.FromSnapshot(guessyHost())
 
-	obs, snap, _, device := observeHost(cfg)
+		res := host.Resolve(d, []host.Assignment{
+			{Role: host.RoleWAN, Selector: "enp0s31f6"},
+			// LAN deliberately left unassigned.
+		})
 
-	if snap == nil || !snap.Supported {
-		t.Skip("this host cannot be inspected; the guess path is unreachable here")
-	}
-
-	if obs.LANPresent {
-		t.Fatalf("LAN was reported present without being assigned; it was bound to %q. "+
-			"The first-match fallback has been reintroduced.", obs.LANName)
-	}
-	if obs.LANName != "" {
-		t.Errorf("LANName = %q, want empty: nothing was assigned", obs.LANName)
-	}
-
-	// And the device model must agree, because the readiness gate reads it.
-	d := host.FromSnapshot(snap)
-	for _, i := range d.Interfaces {
-		if i.Role == host.RoleLAN {
-			t.Errorf("interface %s was given the LAN role by discovery", i.SystemName)
+		if _, assigned := res.Assigned[host.RoleLAN]; assigned {
+			t.Fatal("an unassigned LAN role was filled anyway")
 		}
-	}
-	_ = device
+		for _, i := range d.Interfaces {
+			if i.Role == host.RoleLAN {
+				t.Fatalf("discovery assigned role lan to %s", i.SystemName)
+			}
+		}
+	})
+
+	t.Run("live host", func(t *testing.T) {
+		names := requireAssignable(t, 1)
+		cfg := config.Defaults()
+		cfg.Network.WAN = names[0]
+		cfg.Network.LAN = "" // the operator has not said which NIC is the LAN
+
+		obs, snap, _, _ := observeHost(cfg)
+		if snap == nil || !snap.Supported {
+			t.Skip("this host cannot be inspected")
+		}
+
+		if obs.LANPresent {
+			t.Fatalf("LAN was reported present without being assigned; it was bound to %q. "+
+				"The first-match fallback has been reintroduced.", obs.LANName)
+		}
+		if obs.LANName != "" {
+			t.Errorf("LANName = %q, want empty: nothing was assigned", obs.LANName)
+		}
+		if !obs.WANPresent {
+			t.Fatalf("the configured uplink %s was not found on this host", names[0])
+		}
+
+		// And the device model must agree, because the readiness gate reads it.
+		d := host.FromSnapshot(snap)
+		for _, i := range d.Interfaces {
+			if i.Role == host.RoleLAN {
+				t.Errorf("interface %s was given the LAN role by discovery", i.SystemName)
+			}
+		}
+	})
 }
 
 // TestTheWANIsResolvedByAssignmentNotByPosition checks the sibling path.
 //
-// `network.wan` IS configured here, so it must resolve — but to the interface
-// that was ASKED FOR, even though it is not the first one in the sorted list.
+// `network.wan` IS configured, so it must resolve — but to the interface that
+// was ASKED FOR, not to whichever one sorts first.
+//
+// Two assignable interfaces are taken from the observation, so this is
+// meaningful on a two-NIC gateway, a one-NIC VM (skipped) and a four-NIC
+// server alike.
 func TestTheWANIsResolvedByAssignmentNotByPosition(t *testing.T) {
-	cfg := config.Defaults()
-	cfg.Network.WAN = "enp0s31f6"
-	cfg.Network.LAN = "enp1s0"
+	t.Run("deterministic fixture", func(t *testing.T) {
+		d := host.FromSnapshot(guessyHost())
 
-	obs, snap, _, _ := observeHost(cfg)
-	if snap == nil || !snap.Supported {
-		t.Skip("this host cannot be inspected")
-	}
+		// Deliberately assign the WAN to the interface that is NOT first in
+		// sorted order. Anything positional would get this wrong.
+		res := host.Resolve(d, []host.Assignment{
+			{Role: host.RoleWAN, Selector: "enp0s31f6"},
+			{Role: host.RoleLAN, Selector: "enp1s0"},
+		})
 
-	if !obs.WANPresent {
-		t.Fatal("a configured, existing uplink was not found")
-	}
-	if obs.WANName != "enp0s31f6" {
-		t.Errorf("WAN resolved to %q, want the configured enp0s31f6", obs.WANName)
-	}
-	if !obs.LANPresent {
-		t.Fatal("a configured, existing LAN was not found")
-	}
-	if obs.LANName != "enp1s0" {
-		t.Errorf("LAN resolved to %q, want the configured enp1s0", obs.LANName)
-	}
+		if !res.OK() {
+			t.Fatalf("the fixture did not resolve: %+v", res.Problems)
+		}
+		if got := res.Assigned[host.RoleWAN].SystemName; got != "enp0s31f6" {
+			t.Errorf("WAN resolved to %q, want the asked-for enp0s31f6", got)
+		}
+		if got := res.Assigned[host.RoleLAN].SystemName; got != "enp1s0" {
+			t.Errorf("LAN resolved to %q, want the asked-for enp1s0", got)
+		}
+	})
+
+	t.Run("live host", func(t *testing.T) {
+		names := requireAssignable(t, 2)
+		cfg := config.Defaults()
+		cfg.Network.WAN = names[0]
+		cfg.Network.LAN = names[1]
+
+		obs, snap, _, _ := observeHost(cfg)
+		if snap == nil || !snap.Supported {
+			t.Skip("this host cannot be inspected")
+		}
+
+		if !obs.WANPresent {
+			t.Fatalf("a configured, existing uplink (%s) was not found", names[0])
+		}
+		if obs.WANName != names[0] {
+			t.Errorf("WAN resolved to %q, want the configured %s", obs.WANName, names[0])
+		}
+		if !obs.LANPresent {
+			t.Fatalf("a configured, existing LAN (%s) was not found", names[1])
+		}
+		if obs.LANName != names[1] {
+			t.Errorf("LAN resolved to %q, want the configured %s", obs.LANName, names[1])
+		}
+		if obs.WANName == obs.LANName {
+			t.Errorf("WAN and LAN both resolved to %s", obs.WANName)
+		}
+	})
 }
 
 // TestAMissingInterfaceIsReportedRatherThanSubstituted proves the negative
 // path: a selector that matches nothing must leave the role unfilled, and the
-// readiness reason must name what WAS observed.
+// readiness reason must be actionable rather than merely accurate.
+//
+// "Accurate" is the weaker requirement and it was the only one originally
+// asserted here. The message said what was wrong but not what to do, so an
+// operator reading it could not tell whether THN was broken or their
+// configuration was. Both facts are required now: what went wrong, what was
+// actually seen, what could take the role, and that `thn discover` is how to
+// look — without implying that discovery will choose for them.
 func TestAMissingInterfaceIsReportedRatherThanSubstituted(t *testing.T) {
+	const missing = "thn-test-no-such-interface"
+
+	names := requireAssignable(t, 1)
 	cfg := config.Defaults()
-	cfg.Network.WAN = "enp0s31f6"
-	cfg.Network.LAN = "thisnicdoesnotexist"
+	cfg.Network.WAN = names[0]
+	cfg.Network.LAN = missing
 
 	obs, snap, _, _ := observeHost(cfg)
 	if snap == nil || !snap.Supported {
@@ -148,11 +267,31 @@ func TestAMissingInterfaceIsReportedRatherThanSubstituted(t *testing.T) {
 	}
 	lan := roleGate(d, res, host.RoleLAN, cfg.Network.LAN)
 
-	// Part 13: the reason must be actionable, not "interface not found".
-	for _, want := range []string{string(host.RoleLAN), "enp0s31f6", "discover"} {
+	// What the operator needs in order to act.
+	for _, want := range []string{
+		string(host.RoleLAN), // which role is broken
+		missing,              // what they asked for
+		"Observed",           // what is actually there
+		"discover",           // how to look at it
+	} {
 		if !strings.Contains(strings.ToLower(lan.Reason), strings.ToLower(want)) {
 			t.Errorf("the reason does not mention %q, so an operator cannot act on it:\n%s",
 				want, lan.Reason)
+		}
+	}
+
+	// And the observed list must be real: this host's actual interfaces.
+	if !strings.Contains(lan.Reason, names[0]) {
+		t.Errorf("the reason does not list this host's real interface %s:\n%s", names[0], lan.Reason)
+	}
+
+	// Discovery must not be presented as something that resolves this on its
+	// own. THN does not choose roles, and a message implying otherwise would
+	// be a lie about the product.
+	lowered := strings.ToLower(lan.Reason)
+	for _, forbidden := range []string{"automatically", "will choose", "auto-assign"} {
+		if strings.Contains(lowered, forbidden) {
+			t.Errorf("the reason implies discovery assigns roles (%q):\n%s", forbidden, lan.Reason)
 		}
 	}
 }
@@ -187,6 +326,93 @@ func TestAnUnassignedRoleIsDistinguishedFromAMissingOne(t *testing.T) {
 	// what the operator has to change.
 	if !strings.Contains(missing.Reason, "nope0") {
 		t.Errorf("a missing selector is not named in the reason:\n%s", missing.Reason)
+	}
+}
+
+// TestEveryUnresolvedRoleReasonIsActionable pins the operator-facing contract
+// on a fixture, so it holds on every platform rather than only on whichever
+// host someone happened to run it on.
+//
+// The rule is: a reason must say what was WRONG, what was SEEN, and what to
+// DO — and it must never claim THN will resolve the role itself. An accurate
+// diagnostic that leaves an operator with nothing to act on is a support
+// ticket, not a fix.
+func TestEveryUnresolvedRoleReasonIsActionable(t *testing.T) {
+	d := host.FromSnapshot(guessyHost())
+
+	cases := []struct {
+		name    string
+		assign  []host.Assignment
+		role    host.Role
+		asked   string
+		mustSay []string
+		mustNot []string
+	}{
+		{
+			name:   "nothing assigned",
+			assign: nil,
+			role:   host.RoleLAN,
+			asked:  "",
+			mustSay: []string{
+				"role lan", "not assigned", "docker0", "discover",
+			},
+			mustNot: []string{"automatically", "will choose"},
+		},
+		{
+			name:   "a selector that matches nothing",
+			assign: []host.Assignment{{Role: host.RoleLAN, Selector: "thn-test-no-such-interface"}},
+			role:   host.RoleLAN,
+			asked:  "thn-test-no-such-interface",
+			mustSay: []string{
+				"role lan", "thn-test-no-such-interface",
+				"Observed", "discover",
+			},
+			mustNot: []string{"automatically", "will choose"},
+		},
+		{
+			name:    "a selector that can never hold a role",
+			assign:  []host.Assignment{{Role: host.RoleWAN, Selector: "lo"}},
+			role:    host.RoleWAN,
+			asked:   "lo",
+			mustSay: []string{"role wan", "loopback", "discover"},
+			mustNot: []string{"automatically"},
+		},
+		{
+			name: "one interface claimed by two roles",
+			assign: []host.Assignment{
+				{Role: host.RoleWAN, Selector: "enp0s31f6"},
+				{Role: host.RoleLAN, Selector: "enp0s31f6"},
+			},
+			role:    host.RoleLAN,
+			asked:   "enp0s31f6",
+			mustSay: []string{"discover"},
+			mustNot: []string{"automatically"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := roleGate(d, host.Resolve(d, c.assign), c.role, c.asked)
+
+			if g.Satisfied {
+				t.Fatalf("role %s reported satisfied", c.role)
+			}
+			if g.Reason == "" {
+				t.Fatal("an unresolved gate produced no reason")
+			}
+			lowered := strings.ToLower(g.Reason)
+			for _, want := range c.mustSay {
+				if !strings.Contains(lowered, strings.ToLower(want)) {
+					t.Errorf("the reason does not mention %q:\n%s", want, g.Reason)
+				}
+			}
+			for _, forbidden := range c.mustNot {
+				if strings.Contains(lowered, strings.ToLower(forbidden)) {
+					t.Errorf("the reason implies discovery resolves roles itself (%q):\n%s",
+						forbidden, g.Reason)
+				}
+			}
+		})
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/deployment"
+	"github.com/venth/thn-gateway/internal/network"
 )
 
 // This file is the gate phase for phases 1 to 3.
@@ -41,8 +42,30 @@ func TestGateFirstCommandsAllExist(t *testing.T) {
 }
 
 // `thn network inspect` is the read-only view of the host. It must be pure, and
-// it must be inspectable on its own — a command named `network` that cannot
-// answer `network inspect` is a command whose name lies.
+// it must be honest about whether it managed to read anything.
+//
+// # What this used to assert, and why it failed on a real gateway
+//
+// It asserted `code == ExitOK` is a FAILURE — "exited zero on a host it
+// cannot read". That was written when the suite only ever ran on a Windows
+// developer machine, where `platform_other.go` reports `supported = false` and
+// inspect legitimately exits non-zero.
+//
+// The assertion therefore encoded the ACCIDENT of the authoring platform as a
+// product requirement. On the first real Linux host the inspector works,
+// exits zero, and the test failed for being right.
+//
+// Nothing about the behaviour it guarded was wrong. What was wrong is that it
+// only described half the contract, and the half it described happened to be
+// the half no gateway ever exercises.
+//
+// The contract is symmetric, and both halves are now asserted:
+//
+//	host readable    → exit 0, and a real Interfaces report
+//	host unreadable  → exit non-zero, and the reason stated
+//
+// The readable half is NEW. It was never checked before, and it is the half
+// that matters on the machine THN is deployed to.
 func TestGateNetworkInspectExistsAndIsPure(t *testing.T) {
 	cmd, ok := commands["network"]
 	if !ok {
@@ -54,15 +77,34 @@ func TestGateNetworkInspectExistsAndIsPure(t *testing.T) {
 
 	env, out, errOut := newTestEnv("inspect")
 	code := runNetwork(env, []string{"inspect"})
-	if code == ExitOK {
-		t.Errorf("`thn network inspect` exited zero on a host it cannot read:\n%s", errOut.String())
+	combined := out.String() + errOut.String()
+
+	// Decide, independently, which half of the contract applies here. Using
+	// the same inspector the command uses is safe precisely because that
+	// inspector is read-only; hardcoding a platform would reintroduce the
+	// very assumption this test just had removed.
+	snap, err := network.NewInspector().Inspect(cmdContext())
+	if err != nil {
+		t.Fatalf("could not determine whether this host is inspectable: %v", err)
 	}
 
-	// The report goes to stdout — it is a report, not an error — so both
-	// streams are checked. One of the two must say what happened.
-	combined := out.String() + errOut.String()
-	if !strings.Contains(combined, "cannot inspect") &&
-		!strings.Contains(combined, "Interfaces") {
+	if snap.Supported {
+		if code != ExitOK {
+			t.Errorf("`thn network inspect` exited %d on a host it CAN read:\n%s", code, combined)
+		}
+		if !strings.Contains(combined, "Interfaces") {
+			t.Errorf("inspect reported success without reading any interfaces:\n%s", combined)
+		}
+		if len(snap.Interfaces) == 0 {
+			t.Log("note: this host reported itself supported but found no interfaces")
+		}
+		return
+	}
+
+	if code == ExitOK {
+		t.Errorf("`thn network inspect` exited zero on a host it cannot read:\n%s", combined)
+	}
+	if !strings.Contains(combined, "cannot inspect") {
 		t.Errorf("inspect neither read the host nor said why it could not:\n%s", combined)
 	}
 }

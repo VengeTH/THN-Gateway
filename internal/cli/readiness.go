@@ -223,11 +223,40 @@ func unresolvedRoleReason(d *host.Device, res host.Resolution, r host.Role, aske
 	// cause — wrong kind, already claimed, not assignable. Prefer its
 	// wording over anything reconstructed here, so the reason never drifts
 	// from the rule that produced it.
+	//
+	// # The next action is appended, not swallowed
+	//
+	// This branch used to return the problem's message alone. That message
+	// states the FAULT accurately and stops there:
+	//
+	//	no observed interface matches "eth9" for role lan
+	//
+	// which is a correct description of a condition the operator cannot see
+	// the inside of. It names no observed interface, offers no next step, and
+	// reads like a THN malfunction rather than a thing to go and look at.
+	//
+	// The fall-through below DID carry the guidance, which made the early
+	// return a silent regression: the structured-problem path is the COMMON
+	// one, so almost every real diagnostic lost its next action while the
+	// uncommon one kept it.
+	//
+	// Discovery is named as the way to SEE the options, never as something
+	// that will choose for you. THN does not decide which NIC is the uplink,
+	// and a message implying otherwise would be a lie about the product.
 	for _, p := range res.Problems {
-		if p.Role == r {
-			return fmt.Sprintf("%s. Observed: %s. Possible: %s",
-				p.Message, strings.Join(p.Observed, ", "), strings.Join(p.Candidates, ", "))
+		if p.Role != r {
+			continue
 		}
+		var b strings.Builder
+		b.WriteString(p.Message)
+		if len(p.Observed) > 0 {
+			fmt.Fprintf(&b, ". Observed: %s", strings.Join(p.Observed, ", "))
+		}
+		if len(p.Candidates) > 0 {
+			fmt.Fprintf(&b, ". Possible: %s", strings.Join(p.Candidates, ", "))
+		}
+		fmt.Fprintf(&b, ". Run `thn discover` to see this host's interfaces, then assign role %s", r)
+		return b.String()
 	}
 
 	return fmt.Sprintf("the interface assigned to role %s (%s) was not found; "+
