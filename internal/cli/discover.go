@@ -48,13 +48,16 @@ func runDiscover(env *Env, args []string) ExitCode {
 	showMAC := *fs.bools["mac"]
 	emit := *fs.bools["emit"]
 
-	snap, err := network.NewInspector().Inspect(cmdContext())
-	if err != nil && snap == nil {
+	// Observation goes through the same seam `thn readiness` uses. If the two
+	// commands each assembled a snapshot themselves they would eventually
+	// disagree, and the disagreement would show up as `discover` naming a
+	// different interface than `readiness` gated on — on the one machine
+	// where that matters most.
+	_, d, err := host.NewDiscovery().Observe(cmdContext())
+	if err != nil {
 		env.errorf("thn discover: %v\n", err)
 		return ExitProblems
 	}
-
-	d := host.FromSnapshot(snap)
 
 	// Resolve whatever roles the current document already assigns, so that
 	// `thn discover` can answer "what does this machine look like RIGHT NOW"
@@ -145,11 +148,23 @@ func discoveryJSON(d *host.Device, showMAC bool, res host.Resolution, reps []pro
 			"id_kind":     string(i.IDKind),
 			"system_name": i.SystemName,
 			"kind":        i.Kind,
+			"raw_kind":    i.RawKind,
 			"state":       string(i.State),
 			"link_up":     i.LinkUp,
+			"admin_up":    i.AdminUp,
+			"physical":    i.Physical,
+			"virtual":     i.Virtual,
 			"mtu":         i.MTU,
 			"assignable":  i.Assignable,
 			"role":        string(i.Role),
+			"ipv4":        i.IPv4(),
+			"ipv6":        i.IPv6(),
+		}
+		if i.Master != "" {
+			entry["master"] = i.Master
+		}
+		if i.WirelessMode != "" {
+			entry["wireless_mode"] = i.WirelessMode
 		}
 		if i.SpeedMbps > 0 {
 			entry["speed_mbps"] = i.SpeedMbps
@@ -205,9 +220,23 @@ func discoveryJSON(d *host.Device, showMAC bool, res host.Resolution, reps []pro
 		"roles_available":    roleNames(),
 		"roles_assigned":     assignments,
 		"role_problems":      res.Problems,
+		"role_candidates":    roleCandidateNames(d),
 		"profiles":           profileReports,
 		"statement":          "Current network remains untouched.",
 	}
+}
+
+// roleCandidateNames lists the interfaces an operator MAY choose from.
+//
+// It is a list, not a decision. Rendering it is the whole difference between
+// asking "which connection goes to the internet?" and answering it for them.
+func roleCandidateNames(d *host.Device) []string {
+	cands := d.RoleCandidates()
+	out := make([]string, 0, len(cands))
+	for _, i := range cands {
+		out = append(out, i.SystemName)
+	}
+	return out
 }
 
 // roleNames lists assignable roles for a consumer.
@@ -330,24 +359,46 @@ func RenderDiscovery(d *host.Device, showMAC bool) string {
 		w("   System:  %s\n", i.SystemName)
 		w("   ID:      %s (%s)\n", i.ID, i.IDKind)
 		w("   Link:    %s\n", linkLabel(i))
+		w("   Admin:   %s\n", adminLabel(i))
+		w("   Hardware: %s\n", hardwareLabel(i))
 		w("   Speed:   %s\n", speedLabel(i.SpeedMbps))
 		w("   MTU:     %d\n", i.MTU)
 		if showMAC && i.MAC != "" {
 			w("   MAC:     %s\n", i.MAC)
 		}
+		if i.WirelessMode != "" {
+			w("   Wireless: %s\n", i.WirelessMode)
+		}
+		if i.Master != "" {
+			w("   Master:  %s\n", i.Master)
+		}
 		if i.Role != "" && i.Role != host.RoleUnassigned {
 			w("   Role:    %s\n", i.Role)
 		}
 		if !i.Assignable {
-			w("   Assign:  no — %s cannot hold a role\n", i.Kind)
+			w("   Assign:  no — %s\n", unassignableReason(i.Kind))
 		}
-		if len(i.Addresses) > 0 {
-			w("   Addrs:   %s\n", strings.Join(i.Addresses, ", "))
+		if v4 := i.IPv4(); len(v4) > 0 {
+			w("   IPv4:    %s\n", strings.Join(v4, ", "))
+		}
+		if v6 := i.IPv6(); len(v6) > 0 {
+			w("   IPv6:    %s\n", strings.Join(v6, ", "))
 		}
 		w("\n")
 	}
 
-	w("Capabilities\n")
+	w("Role candidates\n")
+	w("───────────────\n")
+	cands := d.RoleCandidates()
+	if len(cands) == 0 {
+		w("  none — this host has no interface that can hold a role\n")
+	}
+	for _, i := range cands {
+		w("  %-16s %-10s %s\n", i.SystemName, describeKind(i.Kind), speedLabel(i.SpeedMbps))
+	}
+	w("\n  These are options, not choices. Nothing is assigned.\n")
+
+	w("\nCapabilities\n")
 	w("─────────────\n")
 	for _, c := range host.AllCapabilities() {
 		s, ok := d.Capabilities[c]
@@ -429,5 +480,51 @@ func speedLabel(mbps int) string {
 		return fmt.Sprintf("%d Gbps", mbps/1000)
 	default:
 		return fmt.Sprintf("%d Mbps", mbps)
+	}
+}
+
+// adminLabel renders the administrative state separately from carrier.
+//
+// The two are different facts and collapsing them loses the interesting one: a
+// cable that is unplugged looks identical to an interface that was never
+// brought up, unless both are reported.
+func adminLabel(i host.Interface) string {
+	if i.AdminUp {
+		if i.LinkUp {
+			return "up, carrier present"
+		}
+		return "up, no carrier"
+	}
+	return "down"
+}
+
+// hardwareLabel says whether the link is real hardware, and says WHY when it
+// is not. "virtual" on its own leaves an operator guessing which of a dozen
+// virtual link types they are looking at.
+func hardwareLabel(i host.Interface) string {
+	if i.Physical {
+		return "yes (physical interface)"
+	}
+	if i.Master != "" {
+		return fmt.Sprintf("no (virtual %s, enslaved to %s)", i.Kind, i.Master)
+	}
+	if i.Kind == "" {
+		return "not determined"
+	}
+	return fmt.Sprintf("no (virtual %s)", i.Kind)
+}
+
+// unassignableReason explains a refusal in terms the operator can act on.
+func unassignableReason(kind string) string {
+	switch kind {
+	case host.KindLoopback:
+		return "loopback cannot hold a role"
+	case host.KindVeth:
+		return "a container endpoint disappears when the container stops, " +
+			"so a gateway role bound to it would silently expire"
+	case host.KindDummy:
+		return "a dummy interface has no peer and never will"
+	default:
+		return kind + " cannot hold a role"
 	}
 }

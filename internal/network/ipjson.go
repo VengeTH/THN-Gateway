@@ -1,5 +1,7 @@
 package network
 
+import "encoding/json"
+
 // ipLinkJSON mirrors the subset of `ip -j -d link show` output that THN uses.
 //
 // Decoding into a struct rather than a map gives a clear error instead of a nil
@@ -29,6 +31,46 @@ type ipLinkJSON struct {
 	// driver does not report a speed — which is NOT the same as a speed of
 	// zero, and is carried through as 0 meaning "not reported".
 	Speed int `json:"speed"`
+
+	// LinkType is the kernel's `link_type`: "ether", "loopback", "ppp".
+	//
+	// Together with linkinfo.info_kind it is what lets THN tell a real NIC
+	// from a virtual one WITHOUT looking at the interface name. `ip` reports
+	// "ether" for onboard, USB and virtual-ethernet alike; the absence of any
+	// virtual info_kind is what distinguishes the physical case.
+	LinkType string `json:"link_type"`
+
+	// Master names the bond or bridge this interface is enslaved to, empty
+	// otherwise.
+	//
+	// A NIC inside a bond is still physical hardware. Recording this keeps
+	// the distinction available without having to classify it a second way.
+	Master string `json:"master"`
+
+	// Wireless is present ONLY on wireless interfaces, and the kernel emits
+	// it because `ip` was given `-d`.
+	//
+	// It is declared as RawMessage rather than a typed struct on purpose. A
+	// shape change inside this object — a new key, a field changing type —
+	// cannot then fail the decode of the whole document and make THN report
+	// a gateway with no interfaces. wirelessMode re-decodes it separately,
+	// and that decode failing costs one field rather than the host.
+	Wireless json.RawMessage `json:"wireless"`
+}
+
+// ipWirelessJSON is the subset of the `wireless` object THN reads.
+//
+// iftype is what decides wireless-client versus wireless-ap: a NIC in
+// "managed" mode is a client, in "ap" mode it is an access point. That
+// distinction is the difference between a capability being available and
+// merely present, so it is worth decoding even though it is one field.
+//
+// SSID is deliberately NOT collected. The network name identifies where a
+// person is, it changes without the hardware changing, and no routing or
+// firewall decision THN makes depends on it.
+type ipWirelessJSON struct {
+	Iftype string `json:"iftype"`
+	Mode   string `json:"mode"`
 }
 
 type ipLinkInfoJSON struct {

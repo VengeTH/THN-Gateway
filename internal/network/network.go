@@ -79,12 +79,36 @@ type Interface struct {
 	SpeedMbps int `json:"speed_mbps,omitempty"`
 	// State is the observed link state.
 	State LinkState `json:"state"`
-	// Kind classifies the interface, e.g. "ethernet", "loopback", "vlan".
+	// Kind classifies the interface, e.g. "ether", "wlan", "loopback", "vlan".
 	//
-	// This is the raw kernel `linkinfo.info_kind`. It is normalised into
-	// THN's own vocabulary by the device model, because the kernel says
-	// "ether" and "wlan" where THN says "ethernet" and "wireless".
+	// This is the KERNEL's vocabulary, normalised only as far as `classify`
+	// needs to. internal/host translates it into THN's own vocabulary, because
+	// the kernel says "ether" and "wlan" where THN says "ethernet" and
+	// "wireless".
 	Kind string `json:"kind"`
+	// LinkType is the kernel's link_type, e.g. "ether", "loopback", "ppp".
+	LinkType string `json:"link_type,omitempty"`
+	// Physical reports whether this link is real hardware.
+	//
+	// It is an observation derived from what the kernel reports — no virtual
+	// link kind and an Ethernet link type — and never from the name. It is
+	// the field that keeps a Docker bridge, a Tailscale tunnel or a container
+	// veth from ever being offered to an operator as a gateway port.
+	Physical bool `json:"physical"`
+	// AdminUp reports the administrative state: whether the interface has
+	// been brought up. Distinct from State, which also reflects carrier.
+	AdminUp bool `json:"admin_up"`
+	// Carrier reports whether a physical carrier is present.
+	Carrier bool `json:"carrier"`
+	// Master names the bond or bridge this interface is enslaved to.
+	Master string `json:"master,omitempty"`
+	// WirelessMode is the wireless operating mode: "managed" for a client,
+	// "ap" for an access point, "monitor" for a capture interface.
+	//
+	// Empty on every non-wireless interface. It is the difference between a
+	// wireless NIC that can be a CLIENT and one that can be an ACCESS POINT,
+	// which are different capabilities on the same hardware.
+	WirelessMode string `json:"wireless_mode,omitempty"`
 	// Flags are the kernel's interface flags, e.g. "BROADCAST,MULTICAST".
 	Flags []string `json:"flags,omitempty"`
 	// Addresses are the addresses assigned to this interface.
@@ -292,20 +316,141 @@ func ParseLinks(raw []byte) ([]Interface, error) {
 
 	ifaces := make([]Interface, 0, len(parsed))
 	for _, r := range parsed {
+		kind, physical, wlanMode := classify(r)
 		ifaces = append(ifaces, Interface{
-			Name:      r.IfName,
-			Index:     r.IfIndex,
-			MAC:       r.Address,
-			MTU:       r.MTU,
-			SpeedMbps: r.Speed,
-			State:     linkState(r.Operstate, r.Flags, r.LinkInfo.InfoKind),
-			Kind:      r.LinkInfo.InfoKind,
-			Flags:     r.Flags,
-			Role:      RoleUnassigned,
+			Name:         r.IfName,
+			Index:        r.IfIndex,
+			MAC:          r.Address,
+			MTU:          r.MTU,
+			SpeedMbps:    r.Speed,
+			State:        linkState(r.Operstate, r.Flags, kind),
+			Kind:         kind,
+			LinkType:     r.LinkType,
+			Physical:     physical,
+			AdminUp:      hasFlag(r.Flags, "UP"),
+			Carrier:      hasFlag(r.Flags, "LOWER_UP"),
+			Master:       r.Master,
+			WirelessMode: wlanMode,
+			Flags:        r.Flags,
+			Role:         RoleUnassigned,
 		})
 	}
 	sort.Slice(ifaces, func(a, b int) bool { return ifaces[a].Name < ifaces[b].Name })
 	return ifaces, nil
+}
+
+// # Classifying an interface without its name
+//
+// The kernel names interfaces for humans, and humans are not a stable
+// interface. An onboard NIC is `enp0s31f6` on one machine and `eth0` on
+// another; a USB adapter is `enx00e099001812`; a Docker bridge is `docker0`;
+// Tailscale is `tailscale0`. Every one of those names is a convention layered
+// on top of the hardware, and every one of them can change.
+//
+// So nothing here looks at the name. Classification uses only what the kernel
+// states about the link:
+//
+//   - a `wireless` object exists        → wireless, and it is physical
+//   - the LOOPBACK flag, or loopback    → loopback
+//   - linkinfo.info_kind names a kind  → that kind, and it is virtual
+//   - link_type is "ether" otherwise   → a real NIC
+//
+// The last rule is the important one and it is an absence test: an interface
+// with no virtual kind and an Ethernet link type is hardware. Docker
+// interfaces, tunnels, bridges and VLANs all declare a kind, so none of them
+// can reach it.
+//
+// A NIC enslaved into a bond or bridge still has no virtual kind of its own.
+// It reports a `master`, and it is correctly classified physical — which is
+// what it is. The bond is the virtual thing, and the bond says so.
+
+// tunnelKinds are the link kinds that are always virtual.
+//
+// They are listed rather than pattern-matched because a tunnel that THN
+// misclassifies as a NIC would be offered to an operator as an uplink.
+var tunnelKinds = map[string]bool{
+	"tun": true, "tap": true, "wireguard": true,
+	"gre": true, "ipgre": true, "ip6gre": true, "gretap": true, "erspan": true,
+	"sit": true, "ip6tnl": true, "vxlan": true, "geneve": true, "ip6vti": true,
+}
+
+// virtualKinds are non-tunnel virtual link kinds.
+//
+// "ether" is listed because that is what the kernel reports for a physical
+// NIC's info_kind, and the absence of a virtual kind is the physical signal.
+var virtualKinds = map[string]bool{
+	"vlan": true, "bridge": true, "veth": true,
+	"bond": true, "team": true, "dummy": true,
+	"macvlan": true, "ipvlan": true,
+}
+
+// classify decides what an observed link IS.
+//
+// It returns the kernel's link kind, whether the link is physical hardware,
+// and — for wireless — the operating mode.
+//
+// It deliberately returns no name and no opinion about which interface is an
+// uplink. Deciding that is a separate act performed by an operator.
+func classify(r ipLinkJSON) (kind string, physical bool, wirelessMode string) {
+	infoKind := strings.ToLower(strings.TrimSpace(r.LinkInfo.InfoKind))
+	linkType := strings.ToLower(strings.TrimSpace(r.LinkType))
+
+	// Wireless first. The kernel emits a `wireless` object for exactly the
+	// wireless links and for no others, which makes it a fact rather than a
+	// guess — and it is what distinguishes a Wi-Fi NIC from a wired one when
+	// both report link_type "ether".
+	if hasWireless(r.Wireless) {
+		return "wlan", true, wirelessModeOf(r.Wireless)
+	}
+
+	// Loopback is reported three different ways depending on the kernel and
+	// the iproute2 version, so all three are accepted.
+	if hasFlag(r.Flags, "LOOPBACK") || infoKind == "loopback" || linkType == "loopback" {
+		return "loopback", false, ""
+	}
+
+	if virtualKinds[infoKind] || tunnelKinds[infoKind] {
+		return infoKind, false, ""
+	}
+
+	// No virtual kind, and the link carries Ethernet. That is hardware.
+	if linkType == "ether" || infoKind == "ether" {
+		return "ether", true, ""
+	}
+
+	// Anything else — ppp, "none", a kind this build has never seen — is
+	// treated as virtual. The default is the cautious one: offering an
+	// unknown link type to an operator as a gateway port is the failure that
+	// matters; declining to is a limitation they can work around.
+	if infoKind == "" {
+		return "unknown", false, ""
+	}
+	return infoKind, false, ""
+}
+
+// hasWireless reports whether the `wireless` object was present.
+//
+// `null` counts as absent: some iproute2 versions emit the key with a null
+// value rather than omitting it.
+func hasWireless(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null"
+}
+
+// wirelessModeOf extracts the operating mode from the `wireless` object.
+//
+// A decode failure costs this one field and nothing else, because the object
+// was decoded as RawMessage precisely so that this could not take the rest of
+// the host down with it.
+func wirelessModeOf(raw json.RawMessage) string {
+	var w ipWirelessJSON
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return ""
+	}
+	if w.Iftype != "" {
+		return w.Iftype
+	}
+	return w.Mode
 }
 
 // linkState maps a kernel operstate onto THN's link state.

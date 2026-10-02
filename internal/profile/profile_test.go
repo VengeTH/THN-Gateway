@@ -1,5 +1,4 @@
 package profile
-package profile
 
 // Profiles describe intent, never hardware.
 //
@@ -184,21 +183,27 @@ func TestTheGatewayProfileRunsOnEveryCompatibleHost(t *testing.T) {
 		wantWhy string
 	}{
 		{
-			name:   "host A: two NICs",
-			snap:   hostA(),
-			assign: func() []host.Assignment { return []host.Assignment{{Role: host.RoleWAN, Selector: "enp0s31f6"}, {Role: host.RoleLAN, Selector: "enp1s0"}} },
+			name: "host A: two NICs",
+			snap: hostA(),
+			assign: func() []host.Assignment {
+				return []host.Assignment{{Role: host.RoleWAN, Selector: "enp0s31f6"}, {Role: host.RoleLAN, Selector: "enp1s0"}}
+			},
 			wantOK: true,
 		},
 		{
-			name:   "host B: four NICs",
-			snap:   hostB(),
-			assign: func() []host.Assignment { return []host.Assignment{{Role: host.RoleWAN, Selector: "eno1"}, {Role: host.RoleLAN, Selector: "eno2"}} },
+			name: "host B: four NICs",
+			snap: hostB(),
+			assign: func() []host.Assignment {
+				return []host.Assignment{{Role: host.RoleWAN, Selector: "eno1"}, {Role: host.RoleLAN, Selector: "eno2"}}
+			},
 			wantOK: true,
 		},
 		{
-			name:   "host D: different names",
-			snap:   hostD(),
-			assign: func() []host.Assignment { return []host.Assignment{{Role: host.RoleWAN, Selector: "eth0"}, {Role: host.RoleLAN, Selector: "eth1"}} },
+			name: "host D: different names",
+			snap: hostD(),
+			assign: func() []host.Assignment {
+				return []host.Assignment{{Role: host.RoleWAN, Selector: "eth0"}, {Role: host.RoleLAN, Selector: "eth1"}}
+			},
 			wantOK: true,
 		},
 		{
@@ -305,24 +310,50 @@ func TestTheAccessPointProfileNeedsWireless(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	withWiFi := host.FromSnapshot(hostA())
-	withoutWiFi := host.FromSnapshot(hostC())
+	// A host whose only radio is in managed mode is a CLIENT. It cannot serve
+	// an access point, and saying otherwise would be reporting what the
+	// hardware could theoretically do rather than what was observed.
+	clientOnly := host.FromSnapshot(hostA())
+	resClient := host.Resolve(clientOnly, []host.Assignment{{Role: host.RoleLAN, Selector: "enp1s0"}})
 
-	res := host.Resolve(withoutWiFi, []host.Assignment{{Role: host.RoleLAN, Selector: "ens3"}})
-
-	if rep := Evaluate(withWiFi, host.Resolve(withWiFi, []host.Assignment{{Role: host.RoleLAN, Selector: "enp1s0"}}), ap); rep.Satisfied {
-		t.Log("host A reports wireless-ap available; the access point profile passes")
-	} else {
-		t.Errorf("a host with a wireless adapter cannot run the access point profile: %+v", rep.Findings)
+	if rep := Evaluate(clientOnly, resClient, ap); rep.Satisfied {
+		t.Error("a host with only a CLIENT-mode radio was accepted as an access point")
 	}
 
-	rep := Evaluate(withoutWiFi, res, ap)
+	// A radio in AP mode can.
+	apMode := host.FromSnapshot(hostAP())
+	resAP := host.Resolve(apMode, []host.Assignment{{Role: host.RoleLAN, Selector: "enp1s0"}})
+
+	if rep := Evaluate(apMode, resAP, ap); !rep.Satisfied {
+		t.Errorf("a host with an AP-mode radio cannot run the access point profile: %+v", rep.Findings)
+	}
+
+	// And a host with no radio at all fails for a different, stated reason.
+	none := host.FromSnapshot(hostC())
+	resNone := host.Resolve(none, []host.Assignment{{Role: host.RoleLAN, Selector: "ens3"}})
+	rep := Evaluate(none, resNone, ap)
 	if rep.Satisfied {
 		t.Error("a host with no wireless adapter was accepted as an access point")
 	}
 	if len(rep.Blocked()) == 0 {
 		t.Fatal("no blocking finding for a host with no wireless adapter")
 	}
+}
+
+// hostAP is hostA with its radio in access-point mode rather than managed mode.
+//
+// It is the same hardware as hostA. The only difference is the operating mode
+// the kernel reported, and it is enough to change a capability verdict — which
+// is the point: the model distinguishes two capabilities on one radio by
+// observation rather than by assumption.
+func hostAP() *network.Snapshot {
+	snap := hostA()
+	for i := range snap.Interfaces {
+		if snap.Interfaces[i].Kind == "wlan" {
+			snap.Interfaces[i].WirelessMode = "ap"
+		}
+	}
+	return snap
 }
 
 // TestLookupRefusesToGuess is the anti-silent-substitution rule.

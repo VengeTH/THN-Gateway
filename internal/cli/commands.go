@@ -318,14 +318,20 @@ func loadConfig(env *Env, path string) (config.Config, error) {
 // the operator asked for are resolved against it exactly once. Resolving them
 // in two places would mean two answers to the same question, and they would
 // drift the first time one of them gained a rule.
+//
+// Observation goes through host.NewDiscovery rather than calling the inspector
+// directly. That is what makes `thn readiness`, `thn discover` and `thn plan`
+// see the SAME machine in the SAME shape: one translation, one place that
+// decides what a link is, and no command with a private idea of what an
+// interface means.
 func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall.FirewallState, *host.Device) {
 	obs := diff.Observed{
 		Supported: false,
 		HostName:  hostname(),
 	}
 
-	snap, err := network.NewInspector().Inspect(cmdContext())
-	if err == nil && snap != nil {
+	snap, device, _ := host.NewDiscovery().Observe(cmdContext())
+	if snap != nil {
 		obs.Supported = snap.Supported
 	}
 
@@ -333,10 +339,6 @@ func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall
 		WAN: cfg.Network.WAN,
 		LAN: cfg.Network.LAN,
 	})
-
-	// FromSnapshot is the only place that knows how a kernel observation
-	// becomes a device model. Everything above this line consumes the model.
-	device := host.FromSnapshot(snap)
 
 	// # Roles are resolved through assignment, never by guessing.
 	//

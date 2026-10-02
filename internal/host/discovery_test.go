@@ -134,8 +134,19 @@ func hostE() *network.Snapshot {
 }
 
 // obs builds one observed interface.
+//
+// A wireless interface is given "managed" mode, because that is what a Wi-Fi
+// adapter in a laptop actually is. It used to matter that the fixtures did NOT
+// distinguish the two: the old capability rule reported wireless-ap as
+// available whenever any radio was present, and every fixture agreed with it
+// because every fixture had a radio.
+//
+// That was the overclaim this milestone removed. A managed radio is a CLIENT.
+// Reporting it as an access point would be reporting what the hardware could
+// theoretically do rather than what was observed, and an access-point profile
+// would then be selected on a laptop that cannot serve one.
 func obs(name string, index int, mac, kind string, state network.LinkState, mbps int) network.Interface {
-	return network.Interface{
+	i := network.Interface{
 		Name:      name,
 		Index:     index,
 		MAC:       mac,
@@ -145,6 +156,10 @@ func obs(name string, index int, mac, kind string, state network.LinkState, mbps
 		State:     state,
 		Role:      network.RoleUnassigned,
 	}
+	if kind == "wlan" {
+		i.WirelessMode = "managed"
+	}
+	return i
 }
 
 // gatewayAssignments is the desired binding every host is checked against.
@@ -419,9 +434,29 @@ func TestCapabilityClaimsCarryConfidence(t *testing.T) {
 		t.Error("forwarding reports available with net.ipv4.ip_forward=0")
 	}
 
-	// Wireless capability follows from an observed wireless interface.
-	if !d.Has(CapWirelessAP) {
-		t.Error("a wireless interface was observed but wireless-ap is unavailable")
+	// Wireless CLIENT follows from an observed radio in managed mode. That is
+	// a real observation and it is reported as one.
+	if !d.Has(CapWirelessClient) {
+		t.Error("a managed wireless interface was observed but wireless-client is unavailable")
+	}
+	client, _ := d.Can(CapWirelessClient)
+	if client.Confidence != "observed" {
+		t.Errorf("wireless-client confidence = %q, want observed", client.Confidence)
+	}
+
+	// Wireless AP does NOT. The same radio, in managed mode, is a client.
+	// This is the assertion that used to be the other way round: presence of
+	// a radio was reported as access-point capability, which is exactly
+	// "report it because Linux/the hardware could theoretically do it".
+	if d.Has(CapWirelessAP) {
+		t.Error("a CLIENT-mode radio was reported as access-point capable")
+	}
+	ap, _ := d.Can(CapWirelessAP)
+	if ap.Available {
+		t.Error("wireless-ap is available on a host whose only radio is a client")
+	}
+	if !strings.Contains(ap.Reason, "access-point mode") {
+		t.Errorf("the wireless-ap reason does not say what was looked for: %q", ap.Reason)
 	}
 	// VLAN follows from an observed VLAN interface, and none exists here.
 	if d.Has(CapVLAN) {

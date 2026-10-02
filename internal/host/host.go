@@ -55,6 +55,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -170,6 +171,7 @@ const (
 	KindBond     = "bond"
 	KindTunnel   = "tunnel"
 	KindDummy    = "dummy"
+	KindVeth     = "veth"
 )
 
 // Interface is one observed network interface.
@@ -202,6 +204,43 @@ type Interface struct {
 	// that they are the same thing rather than wondering which is wrong.
 	RawKind string `json:"raw_kind,omitempty"`
 
+	// Physical reports whether this link is real hardware.
+	//
+	// It is an OBSERVATION, decided at the discovery edge from what the
+	// kernel states about the link — never from the name. It is the field
+	// that stops a Docker bridge, a Tailscale tunnel, a WireGuard link or a
+	// container veth from being offered to an operator as a gateway port,
+	// which is the mistake that matters: a gateway that decides its uplink is
+	// `docker0` looks correct while routing nothing.
+	Physical bool `json:"physical"`
+
+	// Virtual is the complement of Physical, named because it is what an
+	// operator reads. It is not stored separately in the observation layer;
+	// here it is explicit because the two are used in opposite directions.
+	Virtual bool `json:"virtual"`
+
+	// AdminUp reports the administrative state: whether the link has been
+	// brought up. Distinct from LinkUp, which also reflects carrier, and a
+	// link can be administratively up with no cable plugged into it.
+	AdminUp bool `json:"admin_up"`
+
+	// Master names the bond or bridge this interface is enslaved to, empty
+	// when it is not enslaved.
+	//
+	// A NIC inside a bond is still physical. Recording the relationship
+	// separately is what lets the model say "this is real hardware, and it
+	// currently belongs to something else" without conflating the two.
+	Master string `json:"master,omitempty"`
+
+	// WirelessMode is the wireless operating mode as observed: "managed" for
+	// a client, "ap" for an access point, "monitor" for a capture interface.
+	//
+	// Empty on every non-wireless interface. It is the difference between a
+	// wireless NIC that can act as a CLIENT and one acting as an ACCESS
+	// POINT — two different capabilities on identical hardware, and the only
+	// way to tell them apart without asking the operator.
+	WirelessMode string `json:"wireless_mode,omitempty"`
+
 	// MAC is the hardware address. Sensitive: the CLI does not print it
 	// unless asked.
 	MAC string `json:"mac,omitempty"`
@@ -223,7 +262,7 @@ type Interface struct {
 	// MTU is the interface MTU.
 	MTU int `json:"mtu"`
 
-	// Addresses are the addresses assigned to this interface.
+	// Addresses are the addresses assigned to this interface, in CIDR form.
 	Addresses []string `json:"addresses,omitempty"`
 
 	// Role is the logical role this interface has been ASSIGNED.
@@ -341,6 +380,69 @@ func (d *Device) SystemNames() []string {
 	return out
 }
 
+// IPv4 returns the IPv4 addresses assigned to this interface.
+//
+// It is computed rather than stored so that the observation and this view
+// cannot disagree. An address counts as IPv4 only if it parses as one; text
+// that does not parse is reported as belonging to neither family, rather than
+// being guessed into one.
+func (i Interface) IPv4() []string { return i.addressesOf(true) }
+
+// IPv6 returns the IPv6 addresses assigned to this interface.
+func (i Interface) IPv6() []string { return i.addressesOf(false) }
+
+func (i Interface) addressesOf(wantV4 bool) []string {
+	var out []string
+	for _, c := range i.Addresses {
+		prefix, err := netip.ParsePrefix(c)
+		if err != nil {
+			continue
+		}
+		if prefix.Addr().Is4() == wantV4 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// RoleCandidates returns the interfaces that could hold a role.
+//
+// It answers the question an operator actually has — "which of these can I
+// choose from?" — without answering the question they did not ask, which is
+// "which one should I choose". The distinction is the whole point: the
+// candidate list is offered, the choice is made.
+//
+// Interfaces that are currently down are included. An operator plugging in an
+// uplink after configuring is the normal sequence, and excluding down links
+// would make the list wrong exactly when it is most needed.
+func (d *Device) RoleCandidates() []Interface {
+	out := make([]Interface, 0, len(d.Interfaces))
+	for _, i := range d.Interfaces {
+		if i.Assignable {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// RoleCandidatesFor returns the assignable interfaces of a given kind.
+//
+// It exists so the error model can offer a useful next step — "assign one of
+// these two Ethernet ports" — rather than every link on the machine.
+func (d *Device) RoleCandidatesFor(kinds ...string) []Interface {
+	want := map[string]bool{}
+	for _, k := range kinds {
+		want[k] = true
+	}
+	var out []Interface
+	for _, i := range d.RoleCandidates() {
+		if want[i.Kind] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // RoleAssignments returns the assignments an operator would write down to
 // reproduce the roles currently on this device.
 //
@@ -374,6 +476,22 @@ func (d *Device) RoleAssignments() []Assignment {
 // ephemeral, and callers that must not survive a rename should refuse to act
 // rather than treat the ephemeral ID as if it were stable.
 //
+// # Why the link kind is part of the digest
+//
+// A MAC address identifies a DEVICE, not an interface. On a machine with a
+// bond, `bond0` and its port `enp2s0` report the SAME hardware address — the
+// bond takes its active port's address.
+//
+// The first version of this function digested the address alone, so those two
+// distinct links received the same identity. Everything downstream then had an
+// ambiguity it could not see: a role assigned by identity would match whichever
+// of the two Resolve happened to reach first, and `InterfaceByID` could
+// return a bond when asked for a NIC.
+//
+// Including the kind separates them, and costs nothing that matters: a rename
+// changes the name, not the kind, so the identity is exactly as rename-stable
+// as it was before.
+//
 // # The hardware address is hashed, not embedded
 //
 // An earlier version returned "mac:" + the address. That was stable and it
@@ -388,23 +506,53 @@ func (d *Device) RoleAssignments() []Assignment {
 // cost is real and is why the renderer prints the system name alongside it —
 // and, when the operator asks, the address behind --mac.
 func InterfaceID(kind, mac string, index int) (string, IdentityKind) {
-	if mac != "" {
-		sum := sha256.Sum256([]byte(strings.ToLower(mac)))
+	if mac = usableHardwareAddress(mac); mac != "" {
+		sum := sha256.Sum256([]byte(NormaliseKind(kind) + "\x00" + strings.ToLower(mac)))
 		return "hw:" + hex.EncodeToString(sum[:])[:16], IdentityHardware
 	}
-	// No hardware address: loopback, bridges, tunnels, some virtual links.
-	// There is genuinely nothing stable here. Saying so is the point.
-	return fmt.Sprintf("ephemeral:%s:%d", orUnknown(kind), index), IdentityEphemeral
+	// No usable hardware address: loopback, bridges, tunnels, some virtual
+	// links. There is genuinely nothing stable here. Saying so is the point.
+	return fmt.Sprintf("ephemeral:%s:%d", orUnknown(NormaliseKind(kind)), index), IdentityEphemeral
 }
 
-// IDFor returns the stable identifier for a hardware address.
+// usableHardwareAddress rejects addresses that identify nothing.
+//
+// The all-zero address is what the kernel reports for loopback and for a
+// great many virtual links. Treating it as a hardware identity would give
+// every one of them the SAME stable ID — so a configuration naming it would
+// match whichever happened to be encountered first. It is the absence of an
+// address, not an address.
+func usableHardwareAddress(mac string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(mac))
+	if trimmed == "" {
+		return ""
+	}
+	if strings.Trim(trimmed, "0:") == "" {
+		return ""
+	}
+	return trimmed
+}
+
+// IDFor returns the stable identifier for a wired interface with this hardware
+// address.
 //
 // It is the same computation InterfaceID performs, exposed so that a caller
 // can BUILD the selector a configuration will contain without duplicating the
 // digest. A test or a UI that guessed the format would break the moment the
 // digest changed.
+//
+// It assumes an ethernet interface, which is the overwhelmingly common case
+// and the one every existing document uses. For any other kind, use
+// IDForKind — guessing the kind would produce a selector that silently never
+// matches.
 func IDFor(mac string) string {
-	id, _ := InterfaceID("", mac, 0)
+	id, _ := InterfaceID(KindEthernet, mac, 0)
+	return id
+}
+
+// IDForKind returns the stable identifier for an interface of a given kind.
+func IDForKind(kind, mac string) string {
+	id, _ := InterfaceID(kind, mac, 0)
 	return id
 }
 func orUnknown(s string) string {

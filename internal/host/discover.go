@@ -55,7 +55,7 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 	}
 
 	d.Supported = true
-	d.Interfaces = interfacesFrom(snap.Interfaces)
+	d.Interfaces = interfacesFrom(snap.Interfaces, snap.Addresses)
 	sort.Slice(d.Interfaces, func(a, b int) bool {
 		return d.Interfaces[a].SystemName < d.Interfaces[b].SystemName
 	})
@@ -72,36 +72,85 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 }
 
 // interfacesFrom converts observed interfaces, assigning no roles.
-func interfacesFrom(in []network.Interface) []Interface {
+//
+// Addresses come from the snapshot's FLAT list rather than from the copies
+// internal/network hangs on each interface. The inspector populates both, but
+// a snapshot built by anything else populates only one, and silently producing
+// a device with no addresses is a far worse failure than the extra loop.
+func interfacesFrom(in []network.Interface, flat []network.Address) []Interface {
+	byName := make(map[string][]string, len(in))
+	for _, a := range flat {
+		byName[a.Interface] = append(byName[a.Interface], a.CIDR)
+	}
+
 	out := make([]Interface, 0, len(in))
 
 	for _, i := range in {
+		// The nested copies win when present; the flat list is the fallback.
 		addrs := make([]string, 0, len(i.Addresses))
 		for _, a := range i.Addresses {
 			addrs = append(addrs, a.CIDR)
 		}
+		if len(addrs) == 0 {
+			addrs = byName[i.Name]
+		}
 
-		id, kind := InterfaceID(i.Kind, i.MAC, i.Index)
 		linkKind := NormaliseKind(i.Kind)
+		id, kind := InterfaceID(linkKind, i.MAC, i.Index)
 		out = append(out, Interface{
-			ID:         id,
-			IDKind:     kind,
-			SystemName: i.Name,
-			Index:      i.Index,
-			Kind:       linkKind,
-			RawKind:    i.Kind,
-			MAC:        i.MAC,
-			State:      i.State,
-			LinkUp:     i.State == network.LinkUp,
-			MTU:        i.MTU,
-			SpeedMbps:  i.SpeedMbps,
-			Addresses:  addrs,
+			ID:           id,
+			IDKind:       kind,
+			SystemName:   i.Name,
+			Index:        i.Index,
+			Kind:         linkKind,
+			RawKind:      i.Kind,
+			Physical:     i.Physical,
+			Virtual:      !i.Physical,
+			AdminUp:      i.AdminUp,
+			LinkUp:       i.State == network.LinkUp,
+			Master:       i.Master,
+			WirelessMode: i.WirelessMode,
+			MAC:          i.MAC,
+			State:        i.State,
+			MTU:          i.MTU,
+			SpeedMbps:    i.SpeedMbps,
+			Addresses:    addrs,
 			// Roles are assigned by configuration. Nothing here infers one.
 			Role:       RoleUnassigned,
-			Assignable: linkKind != KindLoopback,
+			Assignable: assignable(linkKind),
 		})
 	}
 	return out
+}
+
+// assignable reports whether an interface could reasonably hold a role.
+//
+// # The exclusions, and why each one
+//
+// This used to exclude loopback and nothing else. Two more kinds are now
+// excluded, and neither exclusion is about the link being "not a real port" —
+// it is about the link not outliving a decision.
+//
+//	veth    A container's endpoint. It exists while a container runs and
+//	        disappears when it stops. Binding a gateway's LAN to one would
+//	        work perfectly until the container was restarted, and then fail
+//	        in a way nobody would connect to the original configuration.
+//	dummy   Exists to be a placeholder. It has no peer and never will.
+//
+// Deliberately NOT excluded: bridges, bonds, VLANs and tunnels. An operator
+// may legitimately want the LAN on a bridge, and THN is in no position to
+// decide that a bridge is a lesser citizen. Those are judged by what the
+// operator assigns, and by profile evaluation — not by a hard-coded list.
+//
+// An interface that is currently DOWN is still assignable. Plugging the cable
+// in after configuring is the normal order of operations.
+func assignable(kind string) bool {
+	switch kind {
+	case KindLoopback, KindVeth, KindDummy:
+		return false
+	default:
+		return true
+	}
 }
 
 // # The kernel's vocabulary is not THN's
@@ -222,19 +271,71 @@ func capabilitiesFor(d *Device, snap *network.Snapshot) map[Capability]Capabilit
 	set(CapFirewall, true, "inferred",
 		"inferred from the Linux platform; nftables availability was not probed")
 
-	// QoS: a shaped link needs an egress interface that exists and is up.
+	// QoS: shaping needs an egress interface, and a configured rate.
+	//
+	// The availability signal stays weak on purpose. Knowing that some
+	// interface exists does not mean a shaped rate is knowable: the correct
+	// rate depends on the provisioned uplink, which the negotiated link speed
+	// is not. Reporting availability here says "THN could shape here", not
+	// "THN knows how fast this link is".
 	set(CapQoS, len(d.Interfaces) > 0, "inferred",
-		"inferred: shaping needs an interface to shape on")
+		"inferred: shaping needs an interface to shape on; the correct rate "+
+			"depends on the provisioned uplink, which is not observable")
 
-	// VLAN and bridging: derived from what kinds of interface are present.
-	set(CapVLAN, hasKind(d, "vlan"), "observed", kindReason(d, "vlan", "no VLAN interface was observed"))
-	set(CapBridge, hasKind(d, "bridge"), "observed", kindReason(d, "bridge", "no bridge interface was observed"))
+	// VLAN and bridging: derived from what kinds of interface were observed.
+	//
+	// A bridge present on a developer laptop because Docker created it is
+	// still an observed bridge, and the reason says exactly that — so an
+	// operator can tell "this machine bridges" from "this machine has a NIC
+	// I could bridge on" without either being asserted in place of the other.
+	set(CapVLAN, hasKind(d, KindVLAN), "observed", kindReason(d, KindVLAN, "no VLAN interface was observed"))
+	set(CapBridge, hasKind(d, KindBridge), "observed", kindReason(d, KindBridge, "no bridge interface was observed"))
 
-	// Wireless, by kind.
-	set(CapWirelessAP, hasKind(d, "wireless"), "observed", kindReason(d, "wireless", "no wireless interface was observed"))
-	set(CapWirelessClient, hasKind(d, "wireless"), "observed", kindReason(d, "wireless", "no wireless interface was observed"))
+	// Wireless CLIENT and ACCESS POINT are separate capabilities on the same
+	// hardware, and the observed mode is what tells them apart.
+	//
+	// Reporting both from mere presence would be the overclaim this package
+	// exists to avoid: a laptop's Wi-Fi in managed mode is a client, and
+	// claiming it can be an access point because a radio is fitted would be
+	// reporting what the hardware could theoretically do rather than what was
+	// observed.
+	wlanClients, wlanAPs := wirelessByMode(d)
 
+	set(CapWirelessClient, len(wlanClients) > 0, "observed",
+		wirelessReason("client", wlanClients, "no wireless interface was observed in client mode"))
+	set(CapWirelessAP, len(wlanAPs) > 0, "observed",
+		wirelessReason("access-point", wlanAPs, "no wireless interface was observed in access-point mode"))
 	return caps
+}
+
+// wirelessByMode separates observed wireless interfaces by operating mode.
+//
+// The rule is conservative in the direction that matters. An interface whose
+// mode the kernel did not report is counted as a CLIENT, because that is what
+// a wireless interface is by default and because a client that is merely
+// unconfirmed must not be promoted into an access point.
+func wirelessByMode(d *Device) (clients, aps []string) {
+	for _, i := range d.Interfaces {
+		if i.Kind != KindWireless {
+			continue
+		}
+		switch i.WirelessMode {
+		case "ap", "master", "__ap":
+			aps = append(aps, i.SystemName)
+		default:
+			clients = append(clients, i.SystemName)
+		}
+	}
+	sort.Strings(clients)
+	sort.Strings(aps)
+	return clients, aps
+}
+
+func wirelessReason(mode string, names []string, absent string) string {
+	if len(names) == 0 {
+		return absent
+	}
+	return fmt.Sprintf("observed in %s mode on: %s", mode, strings.Join(names, ", "))
 }
 
 func hasKind(d *Device, kind string) bool {

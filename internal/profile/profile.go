@@ -1,43 +1,4 @@
 package profile
-// Package profile describes what a THN installation is FOR.
-//
-// # Why this exists
-//
-// An operator who wants a home router should not have to know what a default
-// route is before they can ask for one. They should be able to say "home
-// router", be told what that requires, and be shown whether this machine can
-// do it.
-//
-// That requires naming the intentions separately from the machinery. Until
-// this package, the only description of "what is this thing for" was the
-// shape of the configuration — a document either had a WAN and a LAN or it
-// did not, and there was no vocabulary for a DNS-only server, an access
-// point, or a bridge.
-//
-// # A profile is NOT a device
-//
-// This is the line the package exists to hold.
-//
-// A profile says "this machine should route and hand out addresses". It never
-// says which NIC, what it is called, how many there are, or who made it.
-//
-// There is deliberately no hardware-shaped profile here: no vendor field, no
-// model field, no MAC, and no entry describing one particular laptop. The
-// product was developed against a specific machine, and turning that machine
-// into a profile would make every other machine second-class — which is the
-// assumption this milestone exists to remove.
-//
-// A profile is also not a hardware profile with a friendlier name. The failure
-// mode that matters is a profile set that encodes "one NIC is the WAN", and
-// TestNoProfileDeclaresAPositionedInterface fails if any profile assumes a
-// count or a position.
-//
-// # Nothing here applies anything
-//
-// A profile is evaluated against an observation and produces structured
-// findings. It cannot change the host, and it deliberately holds no handle to
-// anything that could.
-package profile
 
 import (
 	"fmt"
@@ -182,7 +143,7 @@ var dnsOnly = Definition{
 	Requirements: []Requirement{
 		{Role: host.RoleLAN, Required: true, Capability: host.CapDNS},
 	},
-	Capabilities: []host.CapCapability(),
+	Capabilities: []host.Capability{},
 }
 
 // dhcpServer hands out addresses on one downstream network.
@@ -222,7 +183,7 @@ var bridge = Definition{
 	Requirements: []Requirement{
 		{Role: host.RoleLAN, Required: true, Capability: host.CapBridge},
 	},
-	Capabilities: []host.CapCapability(),
+	Capabilities: []host.Capability{},
 }
 
 // managedDevice asks nothing of the host.
@@ -296,7 +257,7 @@ type Finding struct {
 	Role host.Role `json:"role,omitempty"`
 
 	// Capability is the capability involved, when the finding is about one.
-	Capability host.CapCapability() `json:"-"`
+	Capability host.Capability `json:"capability,omitempty"`
 
 	// Required distinguishes a blocker from a note.
 	Required bool `json:"required"`
