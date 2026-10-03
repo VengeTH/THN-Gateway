@@ -688,15 +688,20 @@ func runPlan(env *Env, args []string) ExitCode {
 	// --live flag only controls whether the observation is considered
 	// authoritative enough to report against.
 	obs, _, _, device := observeHost(cfg)
-	res := host.Resolve(device, roleAssignments(cfg))
+	assignments := roleAssignments(cfg)
+	res := host.Resolve(device, assignments)
 	des := desired.FromConfigWithResolution(cfg, res)
 	d := diff.Compare(obs, desiredFor(des))
 
 	p := planner.Build(d, planner.Options{
-		Generation: cfg.Gateway.Generation,
-		Source:     path,
-		Live:       *live || obs.Supported,
-		Now:        time.Now(),
+		Generation:  cfg.Gateway.Generation,
+		Source:      path,
+		Live:        *live || obs.Supported,
+		Now:         time.Now(),
+		Observed:    obs,
+		Desired:     des,
+		Assignments: assignments,
+		Device:      device,
 	})
 
 	if env.IsJSON {
@@ -748,11 +753,17 @@ func printPlan(env *Env, cfg config.Config, p *planner.Plan, d diff.Result, obs 
 				}
 				env.printf("     %s [%-8s] %s\n", marker, s.Risk, s.Summary)
 				if explain {
+					env.printf("         action:  %s\n", s.Action)
 					env.printf("         current: %s\n", orNone(s.Current))
 					env.printf("         desired: %s\n", orNone(s.Desired))
 					env.printf("         why:     %s\n", s.Reason)
 					for _, c := range s.Commands {
 						env.printf("         $ %s\n", c)
+					}
+					if s.Rollback != nil && len(s.Rollback.RestoreCommands) > 0 {
+						for _, rc := range s.Rollback.RestoreCommands {
+							env.printf("         rollback: $ %s\n", rc)
+						}
 					}
 				}
 			}

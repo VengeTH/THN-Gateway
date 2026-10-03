@@ -35,7 +35,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/host"
+)
+
+// Action classifies the reconciliation operation on a resource.
+type Action string
+
+const (
+	// ActionNoop means the observed state already matches desired state.
+	ActionNoop Action = "NOOP"
+	// ActionCreate means the desired state does not exist on the host.
+	ActionCreate Action = "CREATE"
+	// ActionUpdate means the resource exists but differs from intent.
+	ActionUpdate Action = "UPDATE"
+	// ActionDelete means an explicitly managed resource should be removed.
+	ActionDelete Action = "DELETE"
+	// ActionConflict means declarations conflict.
+	ActionConflict Action = "CONFLICT"
+	// ActionBlocked means prerequisites cannot be satisfied.
+	ActionBlocked Action = "BLOCKED"
 )
 
 // Phase groups steps that must run together, in order.
@@ -71,10 +91,28 @@ func Phases() []Phase {
 // phasesTable returns a copy of the phase table.
 func phasesTable() []Phase { return Phases() }
 
+// RollbackInfo provides metadata needed to revert a step.
+type RollbackInfo struct {
+	// Target is the affected subsystem or setting.
+	Target string `json:"target"`
+	// PreviousState is the observed prior value.
+	PreviousState string `json:"previous_state,omitempty"`
+	// RestoreCommands are the shell commands that would reinstate previous state.
+	RestoreCommands []string `json:"restore_commands,omitempty"`
+	// Reversibility classifies how completely the step can be undone.
+	Reversibility string `json:"reversibility"`
+	// RequiresOperator reports whether operator intervention is needed.
+	RequiresOperator bool `json:"requires_operator"`
+}
+
 // Step is one unit of work in a plan.
 type Step struct {
 	// ID is the change ID this step resolves.
 	ID string `json:"id"`
+	// Action is the reconciliation operation (CREATE, UPDATE, DELETE, NOOP).
+	Action Action `json:"action"`
+	// Target is the resource identifier being acted on.
+	Target string `json:"target,omitempty"`
 	// Phase is the phase number this step belongs to.
 	Phase int `json:"phase"`
 	// PhaseName is the phase's name.
@@ -102,6 +140,60 @@ type Step struct {
 	Disruptive bool `json:"disruptive"`
 	// Reversible records whether the change could be undone.
 	Reversible string `json:"reversible"`
+	// Rollback carries recovery metadata for this step.
+	Rollback *RollbackInfo `json:"rollback,omitempty"`
+}
+
+// Inputs holds content-addressed digests of the inputs the plan was derived from.
+type Inputs struct {
+	// ObservedDigest is the digest of observed host state.
+	ObservedDigest string `json:"observed_digest"`
+	// DesiredDigest is the digest of desired state.
+	DesiredDigest string `json:"desired_digest"`
+	// AssignmentDigest is the digest of role assignments.
+	AssignmentDigest string `json:"assignment_digest"`
+	// ConfigDigest is the digest of configuration.
+	ConfigDigest string `json:"config_digest,omitempty"`
+}
+
+// Precondition is an explicit assertion that must hold before a plan can execute.
+type Precondition struct {
+	// ID is a stable identifier.
+	ID string `json:"id"`
+	// Description explains what is checked.
+	Description string `json:"description"`
+	// Expected describes the expected value or condition.
+	Expected string `json:"expected"`
+	// Satisfied reports whether the condition holds.
+	Satisfied bool `json:"satisfied"`
+	// Reason explains why it is not satisfied, when unsatisfied.
+	Reason string `json:"reason,omitempty"`
+}
+
+// TransactionPhaseSummary describes one stage in a dry-run transaction.
+type TransactionPhaseSummary struct {
+	Phase   string `json:"phase"`
+	Purpose string `json:"purpose"`
+	Detail  string `json:"detail"`
+}
+
+// Transaction models the dry-run execution transaction lifecycle.
+type Transaction struct {
+	DryRun  bool                      `json:"dry_run"`
+	Phases  []TransactionPhaseSummary `json:"phases"`
+	Explain string                    `json:"explain"`
+}
+
+// VerificationCheck is one post-apply health check.
+type VerificationCheck struct {
+	Target      string `json:"target"`
+	Check       string `json:"check"`
+	Expectation string `json:"expectation"`
+}
+
+// Verification aggregates all post-apply verification checks.
+type Verification struct {
+	Checks []VerificationCheck `json:"checks"`
 }
 
 // Plan is a complete, reviewable description of intended work.
@@ -117,12 +209,24 @@ type Plan struct {
 	Source string `json:"source"`
 	// Live reports whether the plan was built against an observed host.
 	Live bool `json:"live"`
+	// Inputs holds content digests of the inputs.
+	Inputs Inputs `json:"inputs"`
+	// Preconditions are the conditions that must hold before execution.
+	Preconditions []Precondition `json:"preconditions"`
 	// Steps are the actionable changes, in phase order.
 	Steps []Step `json:"steps"`
 	// Blocked lists changes that cannot proceed.
 	Blocked []diff.Change `json:"blocked,omitempty"`
 	// Pending lists changes that are not yet determined.
 	Pending []diff.Change `json:"pending,omitempty"`
+	// ManagedResources lists the resources explicitly managed by THN.
+	ManagedResources []string `json:"managed_resources,omitempty"`
+	// UnmanagedResources lists observed resources deliberately not modified by THN.
+	UnmanagedResources []string `json:"unmanaged_resources,omitempty"`
+	// Transaction describes the dry-run transaction lifecycle.
+	Transaction Transaction `json:"transaction"`
+	// Verification describes post-apply verification checks.
+	Verification Verification `json:"verification"`
 	// Simulation describes the outcome without performing it.
 	Simulation Simulation `json:"simulation"`
 	// Ready reports whether the plan is complete and internally consistent.
@@ -161,6 +265,17 @@ type Options struct {
 	Live bool
 	// Now overrides the timestamp, for deterministic tests.
 	Now time.Time
+
+	// Observed is the observed host state.
+	Observed diff.Observed
+	// Desired is the desired network state.
+	Desired desired.State
+	// Assignments are the role assignments.
+	Assignments []host.Assignment
+	// ConfigDigest is an optional explicit configuration digest.
+	ConfigDigest string
+	// Device is the observed host device.
+	Device *host.Device
 }
 
 // Build produces a plan from a diff.
@@ -175,11 +290,21 @@ func Build(d diff.Result, opts Options) *Plan {
 		now = time.Now().UTC()
 	}
 
+	obsDigest := ComputeObservedDigest(opts.Observed)
+	desDigest := ComputeDesiredDigest(opts.Desired)
+	assignDigest := ComputeAssignmentDigest(opts.Assignments)
+
 	p := &Plan{
 		GeneratedAt: now,
 		Generation:  opts.Generation,
 		Source:      opts.Source,
 		Live:        opts.Live,
+		Inputs: Inputs{
+			ObservedDigest:   obsDigest,
+			DesiredDigest:    desDigest,
+			AssignmentDigest: assignDigest,
+			ConfigDigest:     opts.ConfigDigest,
+		},
 	}
 
 	// Only drift becomes an actionable step. Pending is outstanding work and
@@ -194,15 +319,320 @@ func Build(d diff.Result, opts Options) *Plan {
 	p.Blocked = d.ByKind(diff.KindBlocked)
 	p.Pending = d.ByKind(diff.KindPending)
 
+	p.ManagedResources, p.UnmanagedResources = identifyResources(opts)
+	p.Preconditions = buildPreconditions(opts, d, p.Inputs)
+	p.Transaction = buildTransaction(p.Steps, p.Blocked, opts.Generation)
+	p.Verification = buildVerification(opts.Desired, p.Steps)
+
 	p.order()
 	p.simulate()
 	p.Ready = p.checkReady()
 
 	// The ID is derived before the summary is rendered, because the summary
-	// embeds it. Deriving it afterwards would print an empty identifier.
+	// embeds it.
 	p.ID = deriveID(p)
 	p.Summary = p.summarise()
 	return p
+}
+
+// ComputeObservedDigest computes a deterministic SHA-256 digest of observed host state.
+func ComputeObservedDigest(obs diff.Observed) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "supported=%t;host=%s;", obs.Supported, obs.HostName)
+	fmt.Fprintf(h, "wan=%t:%s:%t;", obs.WANPresent, obs.WANName, obs.WANUp)
+	fmt.Fprintf(h, "lan=%t:%s:%t;", obs.LANPresent, obs.LANName, obs.LANUp)
+	sortAddrs := append([]string(nil), obs.LANAddresses...)
+	sort.Strings(sortAddrs)
+	fmt.Fprintf(h, "lan_addrs=%s;", strings.Join(sortAddrs, ","))
+	fmt.Fprintf(h, "gw=%t:%s;", obs.HasDefaultRoute, obs.DefaultGateway)
+	fmt.Fprintf(h, "fwd=%t:%t;", obs.IPv4ForwardingKnown, obs.IPv4Forwarding)
+	fmt.Fprintf(h, "fw=%t:%d;", obs.FirewallActive, obs.FirewallRuleCount)
+	fmt.Fprintf(h, "qos=%t:%s;", obs.QoSActive, obs.QoSAlgorithm)
+	sortRes := append([]string(nil), obs.Resolvers...)
+	sort.Strings(sortRes)
+	fmt.Fprintf(h, "res=%t:%s;", obs.ResolversKnown, strings.Join(sortRes, ","))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ComputeDesiredDigest computes a deterministic SHA-256 digest of desired state.
+func ComputeDesiredDigest(des desired.State) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "gen=%d;name=%s;schema=%d;", des.Generation, des.Name, des.SchemaVersion)
+	fmt.Fprintf(h, "wan=%t:%s:%s:%d:%t;", des.WAN.Present, des.WAN.Name, des.WAN.Role, des.WAN.MTU, des.WAN.Up)
+	sortAddrs := append([]string(nil), des.LAN.Addresses...)
+	sort.Strings(sortAddrs)
+	fmt.Fprintf(h, "lan=%t:%s:%s:%d:%t:%s;", des.LAN.Present, des.LAN.Name, des.LAN.Role, des.LAN.MTU, des.LAN.Up, strings.Join(sortAddrs, ","))
+	fmt.Fprintf(h, "addr=%t:%s:%t:%t;", des.Addressing.UpstreamPresent, des.Addressing.DefaultGateway, des.Addressing.IPv4Forwarding, des.Addressing.IPv6Forwarding)
+	sortNAT := append([]string(nil), des.NAT.Interfaces...)
+	sort.Strings(sortNAT)
+	fmt.Fprintf(h, "nat=%t:%t:%s;", des.NAT.Enabled, des.NAT.Resolved, strings.Join(sortNAT, ","))
+	fmt.Fprintf(h, "fw=%t:%s:%s:%t:%t;", des.Firewall.Enabled, des.Firewall.Backend, des.Firewall.DefaultInboundPolicy, des.Firewall.AllowEstablished, des.Firewall.AllowLoopback)
+	fmt.Fprintf(h, "qos=%t:%t:%s:%s:%d:%d;", des.QoS.Enabled, des.QoS.Resolved, des.QoS.Algorithm, des.QoS.Interface, des.QoS.DownloadKbps, des.QoS.UploadKbps)
+	sortDNS := append([]string(nil), des.DNS.Servers...)
+	sort.Strings(sortDNS)
+	fmt.Fprintf(h, "dns=%t:%s;", des.DNS.Present, strings.Join(sortDNS, ","))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// ComputeAssignmentDigest computes a deterministic SHA-256 digest of role assignments.
+func ComputeAssignmentDigest(assignments []host.Assignment) string {
+	h := sha256.New()
+	sorted := append([]host.Assignment(nil), assignments...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Role != sorted[j].Role {
+			return sorted[i].Role < sorted[j].Role
+		}
+		return sorted[i].Selector < sorted[j].Selector
+	})
+	for _, a := range sorted {
+		fmt.Fprintf(h, "%s=%s;", a.Role, a.Selector)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// identifyResources categorises resources into managed vs unmanaged.
+func identifyResources(opts Options) ([]string, []string) {
+	var managed []string
+	var unmanaged []string
+
+	if opts.Desired.WAN.Present && opts.Desired.WAN.Name != "" {
+		managed = append(managed, fmt.Sprintf("interface:%s (role:wan)", opts.Desired.WAN.Name))
+	}
+	if opts.Desired.LAN.Present && opts.Desired.LAN.Name != "" {
+		managed = append(managed, fmt.Sprintf("interface:%s (role:lan)", opts.Desired.LAN.Name))
+		for _, addr := range opts.Desired.LAN.Addresses {
+			managed = append(managed, fmt.Sprintf("address:%s dev %s", addr, opts.Desired.LAN.Name))
+		}
+	}
+	if opts.Desired.Addressing.UpstreamPresent && opts.Desired.Addressing.DefaultGateway != "" {
+		managed = append(managed, fmt.Sprintf("route:default via %s", opts.Desired.Addressing.DefaultGateway))
+	}
+	if opts.Desired.Addressing.IPv4Forwarding {
+		managed = append(managed, "sysctl:net.ipv4.ip_forward")
+	}
+	if opts.Desired.Firewall.Enabled {
+		managed = append(managed, "nftables:table inet thn")
+	}
+	if opts.Desired.NAT.Enabled {
+		managed = append(managed, "nftables:nat masquerade")
+	}
+
+	if opts.Device != nil {
+		for _, iface := range opts.Device.Interfaces {
+			if iface.Role == host.RoleWAN || iface.Role == host.RoleLAN {
+				continue
+			}
+			unmanaged = append(unmanaged, fmt.Sprintf("interface:%s (kind:%s)", iface.SystemName, iface.Kind))
+		}
+	}
+
+	sort.Strings(managed)
+	sort.Strings(unmanaged)
+	return managed, unmanaged
+}
+
+// buildPreconditions constructs the explicit preconditions for a plan.
+func buildPreconditions(opts Options, d diff.Result, inputs Inputs) []Precondition {
+	var pre []Precondition
+
+	pre = append(pre, Precondition{
+		ID:          "observed-state-fresh",
+		Description: "observed host state matches plan generation state",
+		Expected:    inputs.ObservedDigest,
+		Satisfied:   true,
+	})
+
+	pre = append(pre, Precondition{
+		ID:          "desired-state-aligned",
+		Description: "desired network configuration matches plan target",
+		Expected:    inputs.DesiredDigest,
+		Satisfied:   true,
+	})
+
+	if opts.Desired.WAN.Present {
+		wanSatisfied := opts.Observed.WANPresent
+		wanReason := ""
+		if !wanSatisfied {
+			wanReason = "WAN interface is not resolved or present on host"
+		}
+		pre = append(pre, Precondition{
+			ID:          "wan-role-resolved",
+			Description: "WAN logical role is bound and interface is present",
+			Expected:    "resolved",
+			Satisfied:   wanSatisfied,
+			Reason:      wanReason,
+		})
+	}
+
+	if opts.Desired.LAN.Present {
+		lanSatisfied := opts.Observed.LANPresent
+		lanReason := ""
+		if !lanSatisfied {
+			lanReason = "LAN interface is not resolved or present on host"
+		}
+		pre = append(pre, Precondition{
+			ID:          "lan-role-resolved",
+			Description: "LAN logical role is bound and interface is present",
+			Expected:    "resolved",
+			Satisfied:   lanSatisfied,
+			Reason:      lanReason,
+		})
+	}
+
+	noBlocked := len(d.ByKind(diff.KindBlocked)) == 0
+	blockedReason := ""
+	if !noBlocked {
+		blockedReason = fmt.Sprintf("%d blocking change(s) detected", len(d.ByKind(diff.KindBlocked)))
+	}
+	pre = append(pre, Precondition{
+		ID:          "no-blocking-conflicts",
+		Description: "no blocking configuration or identity conflicts exist",
+		Expected:    "clean",
+		Satisfied:   noBlocked,
+		Reason:      blockedReason,
+	})
+
+	return pre
+}
+
+// ValidatePreconditions re-evaluates a plan's preconditions against current live observation.
+func (p *Plan) ValidatePreconditions(currentObs diff.Observed, currentDes desired.State) (bool, []Precondition) {
+	currentObsDigest := ComputeObservedDigest(currentObs)
+	currentDesDigest := ComputeDesiredDigest(currentDes)
+
+	out := make([]Precondition, len(p.Preconditions))
+	allSatisfied := true
+
+	for i, prec := range p.Preconditions {
+		out[i] = prec
+		switch prec.ID {
+		case "observed-state-fresh":
+			if currentObsDigest != p.Inputs.ObservedDigest {
+				out[i].Satisfied = false
+				out[i].Reason = fmt.Sprintf("host state changed (digest %s != expected %s); plan is stale",
+					currentObsDigest, p.Inputs.ObservedDigest)
+				allSatisfied = false
+			}
+		case "desired-state-aligned":
+			if currentDesDigest != p.Inputs.DesiredDigest {
+				out[i].Satisfied = false
+				out[i].Reason = fmt.Sprintf("desired configuration changed (digest %s != expected %s); plan is stale",
+					currentDesDigest, p.Inputs.DesiredDigest)
+				allSatisfied = false
+			}
+		case "wan-role-resolved":
+			if !currentObs.WANPresent {
+				out[i].Satisfied = false
+				out[i].Reason = "WAN interface is not present"
+				allSatisfied = false
+			}
+		case "lan-role-resolved":
+			if !currentObs.LANPresent {
+				out[i].Satisfied = false
+				out[i].Reason = "LAN interface is not present"
+				allSatisfied = false
+			}
+		default:
+			if !out[i].Satisfied {
+				allSatisfied = false
+			}
+		}
+	}
+
+	return allSatisfied, out
+}
+
+// buildTransaction constructs the dry-run transaction stage breakdown.
+func buildTransaction(steps []Step, blocked []diff.Change, gen uint64) Transaction {
+	phases := []TransactionPhaseSummary{
+		{
+			Phase:   "PREPARE",
+			Purpose: "verify preconditions, link states and state freshness",
+			Detail:  "ensure expected hardware identities, kernel modules and capabilities are available",
+		},
+		{
+			Phase:   "BACKUP",
+			Purpose: "capture current network state for rollback",
+			Detail:  "record current IP addresses, default routes, sysctl values and active firewall rules",
+		},
+		{
+			Phase:   "VALIDATE",
+			Purpose: "validate rendered command sequences against dependency graph",
+			Detail:  fmt.Sprintf("check %d operations across 4 execution phases", len(steps)),
+		},
+		{
+			Phase:   "APPLY",
+			Purpose: "describe planned configuration steps without mutating host",
+			Detail:  fmt.Sprintf("model %d operations for configuration generation %d", len(steps), gen),
+		},
+		{
+			Phase:   "HEALTH_CHECK",
+			Purpose: "describe post-apply verification checks",
+			Detail:  "verify interface carrier, address assignment, IPv4 forwarding and firewall reachability",
+		},
+		{
+			Phase:   "COMMIT",
+			Purpose: "describe final transaction persistence",
+			Detail:  fmt.Sprintf("record generation %d into state store after all checks succeed", gen),
+		},
+	}
+
+	explain := "This is a dry-run transaction plan. No operations will be executed on this host."
+	if len(blocked) > 0 {
+		explain = fmt.Sprintf("This transaction is BLOCKED: %d unresolvable issue(s) prevent execution.", len(blocked))
+	}
+
+	return Transaction{
+		DryRun:  true,
+		Phases:  phases,
+		Explain: explain,
+	}
+}
+
+// buildVerification constructs the expected post-apply verification checks.
+func buildVerification(des desired.State, steps []Step) Verification {
+	var checks []VerificationCheck
+
+	if des.LAN.Present && des.LAN.Name != "" {
+		checks = append(checks, VerificationCheck{
+			Target:      des.LAN.Name,
+			Check:       "link_carrier",
+			Expectation: "interface administrative state is UP",
+		})
+		for _, addr := range des.LAN.Addresses {
+			checks = append(checks, VerificationCheck{
+				Target:      des.LAN.Name,
+				Check:       "address_assigned",
+				Expectation: fmt.Sprintf("interface %s carries CIDR %s", des.LAN.Name, addr),
+			})
+		}
+	}
+
+	if des.Addressing.IPv4Forwarding {
+		checks = append(checks, VerificationCheck{
+			Target:      "sysctl:net.ipv4.ip_forward",
+			Check:       "kernel_forwarding",
+			Expectation: "net.ipv4.ip_forward equals 1",
+		})
+	}
+
+	if des.Firewall.Enabled {
+		checks = append(checks, VerificationCheck{
+			Target:      "nftables:table inet thn",
+			Check:       "firewall_active",
+			Expectation: "table inet thn is active with default policy " + des.Firewall.DefaultInboundPolicy,
+		})
+	}
+
+	if des.NAT.Enabled && des.NAT.Resolved {
+		checks = append(checks, VerificationCheck{
+			Target:      "nftables:masquerade",
+			Check:       "nat_masquerade",
+			Expectation: fmt.Sprintf("masquerade rule active for %s", strings.Join(des.NAT.Interfaces, ", ")),
+		})
+	}
+
+	return Verification{Checks: checks}
 }
 
 // stepFor builds a step from a drift change, or nil when the change carries
@@ -212,6 +642,8 @@ func stepFor(c diff.Change) *Step {
 
 	s := &Step{
 		ID:           c.ID,
+		Action:       actionFor(c),
+		Target:       targetFor(c),
 		Phase:        phase.Number,
 		PhaseName:    phase.Name,
 		Subsystem:    c.Subsystem,
@@ -223,12 +655,111 @@ func stepFor(c diff.Change) *Step {
 		Desired:      c.Desired,
 		RequiresRoot: true,
 		Reversible:   reversibilityFor(c),
+		Rollback:     rollbackFor(c),
 	}
 
 	s.Commands = commandsFor(c)
 	s.Disruptive = isDisruptive(c)
 
 	return s
+}
+
+// actionFor determines the reconciliation Action for a diff change.
+func actionFor(c diff.Change) Action {
+	switch c.ID {
+	case "lan-address-add", "default-route-add", "firewall-absent", "qos-absent":
+		return ActionCreate
+	case "lan-address-remove":
+		return ActionDelete
+	case "wan-link-state", "lan-link-state", "default-route-gateway", "ip-forwarding",
+		"firewall-empty", "qos-algorithm", "resolvers":
+		return ActionUpdate
+	case "wan-name-mismatch", "lan-name-mismatch":
+		return ActionConflict
+	default:
+		if c.Kind == diff.KindBlocked {
+			return ActionBlocked
+		}
+		if c.Current == "" || c.Current == "(none)" || c.Current == "(no default route)" {
+			return ActionCreate
+		}
+		return ActionUpdate
+	}
+}
+
+// targetFor identifies the target resource from a change.
+func targetFor(c diff.Change) string {
+	switch c.Subsystem {
+	case "address", "link":
+		return c.Field
+	case "route":
+		return "route:default"
+	case "sysctl":
+		return "sysctl:net.ipv4.ip_forward"
+	case "nftables":
+		return "nftables:table inet thn"
+	case "qdisc":
+		return "qdisc:" + qosDevice(c.Desired)
+	default:
+		return c.Field
+	}
+}
+
+// rollbackFor constructs recovery metadata for a change.
+func rollbackFor(c diff.Change) *RollbackInfo {
+	rb := &RollbackInfo{
+		Target:        c.Field,
+		PreviousState: c.Current,
+		Reversibility: reversibilityFor(c),
+	}
+
+	switch c.ID {
+	case "lan-address-add":
+		if c.Desired != "" && !strings.Contains(c.Desired, "(none)") {
+			rb.RestoreCommands = []string{fmt.Sprintf("ip addr del %s dev %s", c.Desired, lanNameFromChange(c))}
+		}
+	case "lan-address-remove":
+		for _, addr := range splitList(c.Current) {
+			rb.RestoreCommands = append(rb.RestoreCommands, fmt.Sprintf("ip addr add %s dev %s", addr, lanNameFromChange(c)))
+		}
+	case "wan-link-state", "lan-link-state":
+		if c.Current != "" && c.Current != "(none)" {
+			rb.RestoreCommands = []string{fmt.Sprintf("ip link set %s %s", interfaceFromField(c.Field), c.Current)}
+		}
+	case "default-route-add":
+		rb.RestoreCommands = []string{"ip route del default"}
+	case "default-route-gateway":
+		if c.Current != "" && c.Current != "(no default route)" {
+			rb.RestoreCommands = []string{fmt.Sprintf("ip route replace default via %s", c.Current)}
+		} else {
+			rb.RestoreCommands = []string{"ip route del default"}
+		}
+	case "ip-forwarding":
+		if c.Current == "disabled" || c.Current == "0" || c.Current == "false" {
+			rb.RestoreCommands = []string{"sysctl -w net.ipv4.ip_forward=0"}
+		} else {
+			rb.RestoreCommands = []string{"sysctl -w net.ipv4.ip_forward=1"}
+		}
+	case "firewall-absent", "firewall-empty":
+		rb.RestoreCommands = []string{"nft flush ruleset"}
+		rb.Reversibility = "partially-reversible"
+	case "qos-absent":
+		device := qosDevice(c.Desired)
+		if device != "" {
+			rb.RestoreCommands = []string{fmt.Sprintf("tc qdisc del dev %s root", device)}
+		}
+	case "qos-algorithm":
+		device := qosDevice(c.Desired)
+		if device != "" && c.Current != "" {
+			rb.RestoreCommands = []string{fmt.Sprintf("tc qdisc replace dev %s root %s", device, c.Current)}
+		}
+	case "resolvers":
+		if c.Current != "" && c.Current != "(none)" {
+			rb.RestoreCommands = []string{fmt.Sprintf("# restore previous resolvers %s", c.Current)}
+		}
+	}
+
+	return rb
 }
 
 // phaseFor maps a subsystem onto its phase.
@@ -279,8 +810,6 @@ func summaryFor(c diff.Change) string {
 func reversibilityFor(c diff.Change) string {
 	switch c.Risk {
 	case diff.RiskCritical:
-		// A firewall change cannot be reverted without a captured ruleset,
-		// which is precisely why it is the riskiest operation.
 		return "partially-reversible"
 	case diff.RiskHigh:
 		return "reversible"
@@ -306,8 +835,7 @@ func isDisruptive(c diff.Change) bool {
 //
 // These strings are for the operator to read and for review. They are never
 // passed to exec: every one of them is a state-changing invocation that
-// internal/guard would refuse, which is the mechanism that keeps a rendering
-// bug from becoming an execution.
+// internal/guard would refuse.
 func commandsFor(c diff.Change) []string {
 	switch c.ID {
 	case "wan-link-state", "lan-link-state":
@@ -346,14 +874,7 @@ func commandsFor(c diff.Change) []string {
 	}
 }
 
-// firewallCommands renders the nftables command set for a firewall policy.
-
 // qosCommands renders the tc command for a shaping change.
-//
-// The interface and rates are carried on the change's Desired value as
-// "algorithm on device down=N up=N". When the rates are absent the command
-// is rendered without them rather than with a placeholder, so that a plan
-// never shows a plausible-looking but wrong command.
 func qosCommands(c diff.Change) []string {
 	device := qosDevice(c.Desired)
 	if device == "" {
@@ -369,8 +890,7 @@ func qosCommands(c diff.Change) []string {
 		device, qosAlgorithm(c.Desired), down, up)}
 }
 
-// qosAlgorithm extracts the algorithm from a desired value such as
-// "cake on enp0s31f6 down=100000 up=20000".
+// qosAlgorithm extracts the algorithm from a desired value.
 func qosAlgorithm(desired string) string {
 	fields := strings.Fields(desired)
 	if len(fields) == 0 {
@@ -402,6 +922,7 @@ func qosRates(desired string) (down, up int) {
 	}
 	return down, up
 }
+
 func firewallCommands(desired string) []string {
 	policy := "drop"
 	if strings.Contains(desired, "accept") {
@@ -452,10 +973,6 @@ func splitList(s string) []string {
 }
 
 // order sorts the steps by phase, then by descending risk within a phase.
-//
-// Sorting by risk within a phase means the most dangerous item in a phase
-// appears first in the rendered plan, which is what an operator scanning for
-// "what could go wrong" wants to see.
 func (p *Plan) order() {
 	sort.SliceStable(p.Steps, func(i, j int) bool {
 		a, b := p.Steps[i], p.Steps[j]
@@ -586,8 +1103,13 @@ func (p *Plan) checkReady() bool {
 	if len(p.Blocked) > 0 {
 		return false
 	}
-	if len(p.Steps) == 0 && len(p.Pending) > 0 {
+	if len(p.Pending) > 0 {
 		return false
+	}
+	for _, prec := range p.Preconditions {
+		if !prec.Satisfied {
+			return false
+		}
 	}
 	for _, s := range p.Steps {
 		if s.Reversible == "irreversible" {
@@ -605,16 +1127,12 @@ func (p *Plan) summarise() string {
 }
 
 // deriveID computes a content-addressed plan identifier.
-//
-// Content addressing matters here: if regenerating a plan from unchanged
-// inputs produces a different ID, then comparing two plans tells you nothing,
-// and "has the configuration drifted since the last plan?" becomes
-// unanswerable.
 func deriveID(p *Plan) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "gen=%d;live=%t;", p.Generation, p.Live)
+	fmt.Fprintf(h, "obs=%s;des=%s;assign=%s;", p.Inputs.ObservedDigest, p.Inputs.DesiredDigest, p.Inputs.AssignmentDigest)
 	for _, s := range p.Steps {
-		fmt.Fprintf(h, "%s|%d|%s|%s;", s.ID, s.Phase, s.Field, s.Desired)
+		fmt.Fprintf(h, "%s|%s|%d|%s|%s;", s.ID, s.Action, s.Phase, s.Field, s.Desired)
 	}
 	for _, c := range p.Blocked {
 		fmt.Fprintf(h, "blocked:%s;", c.ID)
@@ -630,6 +1148,17 @@ func (p *Plan) StepsByPhase(n int) []Step {
 	var out []Step
 	for _, s := range p.Steps {
 		if s.Phase == n {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// StepsByAction returns the steps with a specific action.
+func (p *Plan) StepsByAction(a Action) []Step {
+	var out []Step
+	for _, s := range p.Steps {
+		if s.Action == a {
 			out = append(out, s)
 		}
 	}
