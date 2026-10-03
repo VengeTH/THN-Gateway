@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/netconfig"
 	netnft "github.com/venth/thn-gateway/internal/netconfig/nft"
 )
@@ -18,8 +19,13 @@ import (
 func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 	p := netconfig.Default()
 
-	p.Interfaces.WAN = cfg.Network.WAN
-	p.Interfaces.LAN = cfg.Network.LAN
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	wanSel := bindingSelector(cfg, stored, host.RoleWAN)
+	lanSel := bindingSelector(cfg, stored, host.RoleLAN)
+
+	p.Interfaces.WAN = wanSel
+	p.Interfaces.LAN = lanSel
 	p.Interfaces.Loopback = "lo"
 
 	p.Forwarding.IPv4Enabled = true
@@ -71,27 +77,13 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 			// A route needs an interface to leave through, so the directly
 			// connected LAN network is only a route once the LAN interface is
 			// known.
-			//
-			// It used to be added regardless, carrying an empty interface, and
-			// validation then reported that as an error — which turned "the LAN
-			// NIC has not been identified yet" into a blocking failure. That is
-			// backwards, and it contradicts what the configuration comments
-			// promise: absent hardware is pending, not broken. It also made
-			// `thn net render` refuse outright on the shipped example, which
-			// sets `lan: ""` on purpose.
-			//
-			// Omitting it is not silence. The coherence check already reports a
-			// configured forwarding rule with no LAN interface, `thn plan`
-			// reports the LAN as pending, and `p.Interfaces.LAN` stays empty —
-			// so the gap is reported in the three places that report gaps, and
-			// not by emitting a route that cannot be installed.
-			if cfg.Network.LAN != "" {
+			if lanSel != "" {
 				// The LAN network is directly connected, so it is a route with
 				// no next hop. Without it, traffic from the LAN has nowhere to
 				// go.
 				p.Routing.Routes = append(p.Routing.Routes, netconfig.Route{
 					Destination: prefix.Masked(),
-					Interface:   cfg.Network.LAN,
+					Interface:   lanSel,
 					Scope:       "link",
 					Protocol:    "thn",
 					Comment:     "the directly connected LAN network",
@@ -99,7 +91,7 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 			}
 
 			// Restrict the NAT ingress to the LAN rather than any interface.
-			p.NAT.InInterface = cfg.Network.LAN
+			p.NAT.InInterface = lanSel
 
 			// The gateway's own LAN address. Traffic addressed to it is
 			// delivered locally and must not be run through the forward
@@ -110,7 +102,7 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 	}
 
 	p.NAT.Enabled = cfg.NAT.Enabled
-	p.NAT.OutInterface = cfg.Network.WAN
+	p.NAT.OutInterface = wanSel
 
 	if !cfg.NAT.Enabled {
 		p.NAT.Mode = netconfig.NATNone
@@ -119,7 +111,7 @@ func netPolicyFromConfig(cfg config.Config) netconfig.Policy {
 	if cfg.Network.UpstreamGateway != "" {
 		if gw, err := netip.ParseAddr(cfg.Network.UpstreamGateway); err == nil {
 			p.Routing.DefaultGateway = gw
-			p.Routing.DefaultGatewayInterface = cfg.Network.WAN
+			p.Routing.DefaultGatewayInterface = wanSel
 		}
 	}
 

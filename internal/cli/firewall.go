@@ -24,8 +24,13 @@ import (
 func policyFromConfig(cfg config.Config) fwpolicy.Policy {
 	p := fwpolicy.Default()
 
-	p.Interfaces.WAN = cfg.Network.WAN
-	p.Interfaces.LAN = cfg.Network.LAN
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	wanSel := bindingSelector(cfg, stored, host.RoleWAN)
+	lanSel := bindingSelector(cfg, stored, host.RoleLAN)
+
+	p.Interfaces.WAN = wanSel
+	p.Interfaces.LAN = lanSel
 	p.AntiSpoofing.LANPrefix = cfg.Network.LANPrefix
 
 	// The configuration's inbound policy maps onto the admin source
@@ -65,21 +70,6 @@ func policyFromConfig(cfg config.Config) fwpolicy.Policy {
 	// two models cannot drift apart on this.
 	if !cfg.NAT.Enabled {
 		p.Masquerade.Enabled = false
-	}
-
-	// The masquerade rule's outbound interface.
-	//
-	// This was previously never set, which meant the rendered masquerade
-	// rule applied to EVERY interface — including the LAN. That rewrites
-	// LAN-to-LAN source addresses and presents as intermittent hardware
-	// failure rather than as the misconfiguration it is.
-	//
-	// The value may name a logical role or an interface. A role is the
-	// operator-friendly form and is resolved here against the interfaces the
-	// configuration has bound; a name is taken literally, which is what an
-	// advanced operator writing a specific interface expects.
-	if cfg.NAT.Masquerade.Enabled {
-		p.Masquerade.OutInterface = resolveOutbound(cfg)
 	}
 
 	// The masquerade rule's outbound interface.
@@ -421,17 +411,16 @@ func resolveOutbound(cfg config.Config) string {
 		return ""
 	}
 
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+
 	switch strings.ToLower(raw) {
 	case string(host.RoleWAN):
-		return cfg.Network.WAN
+		return bindingSelector(cfg, stored, host.RoleWAN)
 	case string(host.RoleLAN):
-		return cfg.Network.LAN
+		return bindingSelector(cfg, stored, host.RoleLAN)
 	case string(host.RoleMGMT), string(host.RoleGuest), string(host.RoleDMZ):
-		// These roles exist in the model but the configuration has no field
-		// binding them yet, so they cannot be resolved to a name. Returning
-		// empty is correct: validation will say the outbound is unset, which
-		// is true, rather than masquerading onto the WAN as a fallback.
-		return ""
+		return bindingSelector(cfg, stored, host.Role(strings.ToLower(raw)))
 	default:
 		return raw
 	}

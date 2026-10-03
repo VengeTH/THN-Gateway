@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/host"
 )
 
 // Role classifies an interface's purpose.
@@ -16,6 +17,14 @@ const (
 	RoleWAN Role = "wan"
 	// RoleLAN is the downstream segment THN serves.
 	RoleLAN Role = "lan"
+	// RoleMGMT is an administrative path.
+	RoleMGMT Role = "mgmt"
+	// RoleGuest is an untrusted downstream network.
+	RoleGuest Role = "guest"
+	// RoleDMZ is a semi-exposed downstream network.
+	RoleDMZ Role = "dmz"
+	// RoleUnassigned means no role has been chosen.
+	RoleUnassigned Role = "unassigned"
 )
 
 // String renders the role.
@@ -135,6 +144,12 @@ type State struct {
 // downstream — validation, diff, planning — consumes State and never Config,
 // so the resolution rules live in exactly one function.
 func FromConfig(cfg config.Config) State {
+	return FromConfigWithResolution(cfg, host.Resolution{})
+}
+
+// FromConfigWithResolution resolves configuration intent into desired state
+// using resolved role assignments from the host discovery layer.
+func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 	s := State{
 		Name:          cfg.Gateway.Name,
 		Generation:    cfg.Gateway.Generation,
@@ -143,33 +158,85 @@ func FromConfig(cfg config.Config) State {
 
 	// --- Interfaces ---
 
-	s.WAN = Interface{
-		Name:      cfg.Network.WAN,
-		Role:      RoleWAN,
-		MTU:       cfg.Network.MTU,
-		Up:        true,
-		Present:   cfg.Network.WAN != "",
-		Addresses: []string{},
-	}
-	if cfg.Network.WAN == "" {
-		s.WAN.Reason = "no WAN interface is configured"
+	if iface, ok := res.Assigned[host.RoleWAN]; ok {
+		s.WAN = Interface{
+			Name:      iface.SystemName,
+			Role:      RoleWAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   true,
+			Addresses: []string{},
+		}
+	} else if cfg.Network.WAN != "" && !strings.HasPrefix(cfg.Network.WAN, "hw:") && !strings.HasPrefix(cfg.Network.WAN, "ephemeral:") && cfg.Network.WAN != string(host.RoleWAN) {
+		s.WAN = Interface{
+			Name:      cfg.Network.WAN,
+			Role:      RoleWAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   true,
+			Addresses: []string{},
+		}
+	} else {
+		s.WAN = Interface{
+			Role:      RoleWAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   false,
+			Addresses: []string{},
+			Reason:    "no WAN interface is configured",
+		}
+		for _, p := range res.Problems {
+			if p.Role == host.RoleWAN {
+				s.WAN.Reason = p.Message
+				break
+			}
+		}
 	}
 
-	s.LAN = Interface{
-		Name:      cfg.Network.LAN,
-		Role:      RoleLAN,
-		MTU:       cfg.Network.MTU,
-		Up:        true,
-		Present:   cfg.Network.LAN != "",
-		Addresses: []string{},
-	}
-	switch {
-	case cfg.Network.LAN == "":
-		s.LAN.Reason = "no LAN interface has been identified"
-	case cfg.Network.LANPrefix == "":
-		s.LAN.Reason = "the LAN interface is identified but has no address configured"
-	default:
-		s.LAN.Addresses = []string{cfg.Network.LANPrefix}
+	if iface, ok := res.Assigned[host.RoleLAN]; ok {
+		s.LAN = Interface{
+			Name:      iface.SystemName,
+			Role:      RoleLAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   true,
+			Addresses: []string{},
+		}
+		if cfg.Network.LANPrefix != "" {
+			s.LAN.Addresses = []string{cfg.Network.LANPrefix}
+		} else {
+			s.LAN.Reason = "the LAN interface is identified but has no address configured"
+		}
+	} else if cfg.Network.LAN != "" && !strings.HasPrefix(cfg.Network.LAN, "hw:") && !strings.HasPrefix(cfg.Network.LAN, "ephemeral:") && cfg.Network.LAN != string(host.RoleLAN) {
+		s.LAN = Interface{
+			Name:      cfg.Network.LAN,
+			Role:      RoleLAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   true,
+			Addresses: []string{},
+		}
+		switch {
+		case cfg.Network.LANPrefix == "":
+			s.LAN.Reason = "the LAN interface is identified but has no address configured"
+		default:
+			s.LAN.Addresses = []string{cfg.Network.LANPrefix}
+		}
+	} else {
+		s.LAN = Interface{
+			Role:      RoleLAN,
+			MTU:       cfg.Network.MTU,
+			Up:        true,
+			Present:   false,
+			Addresses: []string{},
+			Reason:    "no LAN interface has been identified",
+		}
+		for _, p := range res.Problems {
+			if p.Role == host.RoleLAN {
+				s.LAN.Reason = p.Message
+				break
+			}
+		}
 	}
 
 	// --- Addressing ---
@@ -194,7 +261,10 @@ func FromConfig(cfg config.Config) State {
 		switch {
 		case len(s.NAT.Interfaces) > 0:
 			s.NAT.Resolved = true
-		case cfg.Network.LAN != "":
+		case s.LAN.Present && s.LAN.Name != "":
+			s.NAT.Interfaces = []string{s.LAN.Name}
+			s.NAT.Resolved = true
+		case cfg.Network.LAN != "" && !strings.HasPrefix(cfg.Network.LAN, "hw:") && !strings.HasPrefix(cfg.Network.LAN, "ephemeral:") && cfg.Network.LAN != string(host.RoleLAN):
 			s.NAT.Interfaces = []string{cfg.Network.LAN}
 			s.NAT.Resolved = true
 		default:
@@ -223,6 +293,9 @@ func FromConfig(cfg config.Config) State {
 		Interface:    cfg.QoS.Interface,
 		DownloadKbps: cfg.QoS.DownloadKbps,
 		UploadKbps:   cfg.QoS.UploadKbps,
+	}
+	if s.QoS.Interface == "" && s.WAN.Present && s.WAN.Name != "" {
+		s.QoS.Interface = s.WAN.Name
 	}
 	if !s.QoS.Enabled {
 		// QoS off is a resolved state, not a pending one.

@@ -365,6 +365,7 @@ func observeHost(cfg config.Config) (diff.Observed, *network.Snapshot, *firewall
 	// Unassigned now means unassigned. `thn discover` shows the host; it
 	// does not decide for it.
 	res := host.Resolve(device, roleAssignments(cfg))
+	applyResolutionTo(device, res)
 
 	// The WAN's addresses are observed but not recorded: THN does not manage
 	// uplink addressing, so the diff must not compare it.
@@ -431,10 +432,10 @@ func roleInterface(res host.Resolution, r host.Role) (host.Interface, bool) {
 // through validation as everything else. That is deliberate — an override that
 // skipped the role model would be an override that skipped the checks.
 func roleAssignments(cfg config.Config) []host.Assignment {
-	return []host.Assignment{
-		{Role: host.RoleWAN, Selector: strings.TrimSpace(cfg.Network.WAN)},
-		{Role: host.RoleLAN, Selector: strings.TrimSpace(cfg.Network.LAN)},
-	}
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	bindings, _, _ := mergeBindings(cfg, stored)
+	return bindings
 }
 
 // desiredFor projects the diff package's structural view from desired.State.
@@ -496,20 +497,46 @@ func runValidate(env *Env, args []string) ExitCode {
 		return ExitProblems
 	}
 
+	// Check stored assignments for conflicts with declared configuration.
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	_, conflicts, _ := mergeBindings(cfg, stored)
+
 	// A live run needs an observation; a static run does not, and must work
 	// with no network, no root and no daemon.
 	var obs *diff.Observed
+	var dev *host.Device
 	if *live {
-		o, _, _, _ := observeHost(cfg)
+		o, _, _, d := observeHost(cfg)
 		obs = &o
+		dev = d
 	}
 
 	var d diff.Result
 	if obs != nil {
-		d = diff.Compare(*obs, desiredFor(desired.FromConfig(cfg)))
+		res := host.Resolve(dev, roleAssignments(cfg))
+		d = diff.Compare(*obs, desiredFor(desired.FromConfigWithResolution(cfg, res)))
 	}
 
 	result := validation.Combined(cfg, obs, d)
+
+	// Report conflicts between declared configuration and stored assignments.
+	if len(conflicts) > 0 {
+		var conflictFindings []validation.Finding
+		for _, c := range conflicts {
+			conflictFindings = append(conflictFindings, validation.Finding{
+				Layer:    validation.LayerStatic,
+				Field:    "network." + c.Role,
+				Severity: validation.SeverityError,
+				Message:  fmt.Sprintf("configuration (%s) and stored assignment (%s) conflict for role %s", c.Declared, c.Stored, c.Role),
+				Hint:     "resolve the conflict by aligning the configuration and stored assignment, or unassigning the stored role",
+			})
+		}
+		result = result.Merge(validation.Result{
+			Findings: conflictFindings,
+			Layers:   []validation.Layer{validation.LayerStatic},
+		})
+	}
 
 	// Fold in the subsystems that validate themselves elsewhere.
 	//
@@ -660,8 +687,10 @@ func runPlan(env *Env, args []string) ExitCode {
 	// not grounded in what the machine actually has is not useful. The
 	// --live flag only controls whether the observation is considered
 	// authoritative enough to report against.
-	obs, _, _, _ := observeHost(cfg)
-	d := diff.Compare(obs, desiredFor(desired.FromConfig(cfg)))
+	obs, _, _, device := observeHost(cfg)
+	res := host.Resolve(device, roleAssignments(cfg))
+	des := desired.FromConfigWithResolution(cfg, res)
+	d := diff.Compare(obs, desiredFor(des))
 
 	p := planner.Build(d, planner.Options{
 		Generation: cfg.Gateway.Generation,

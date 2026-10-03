@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/host"
 )
 
 // base returns a configuration with the WAN identified and no LAN, which is
@@ -314,5 +315,39 @@ func TestAddressingIsPopulated(t *testing.T) {
 	}
 	if !s.Addressing.IPv4Forwarding {
 		t.Error("a gateway must request IPv4 forwarding")
+	}
+}
+
+func TestFromConfigWithResolution(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Network.LANPrefix = "10.77.0.1/24"
+	cfg.NAT.Enabled = true
+
+	res := host.Resolution{
+		Assigned: map[host.Role]host.Interface{
+			host.RoleWAN: {SystemName: "enp0s31f6", ID: "hw:7c6170fd7f34317a", Role: host.RoleWAN},
+			host.RoleLAN: {SystemName: "enx00e099001812", ID: "hw:2c886f45ad0cb12f", Role: host.RoleLAN},
+		},
+	}
+
+	s := FromConfigWithResolution(cfg, res)
+
+	if !s.WAN.Present || s.WAN.Name != "enp0s31f6" {
+		t.Errorf("WAN = %+v, want present enp0s31f6", s.WAN)
+	}
+	if !s.LAN.Present || s.LAN.Name != "enx00e099001812" {
+		t.Errorf("LAN = %+v, want present enx00e099001812", s.LAN)
+	}
+	if !s.NAT.Resolved || len(s.NAT.Interfaces) != 1 || s.NAT.Interfaces[0] != "enx00e099001812" {
+		t.Errorf("NAT = %+v, want resolved with enx00e099001812", s.NAT)
+	}
+}
+
+func TestKnownRolesAreDefined(t *testing.T) {
+	roles := []Role{RoleWAN, RoleLAN, RoleMGMT, RoleGuest, RoleDMZ, RoleUnassigned}
+	for _, r := range roles {
+		if r.String() == "" {
+			t.Errorf("role %v has empty string representation", r)
+		}
 	}
 }

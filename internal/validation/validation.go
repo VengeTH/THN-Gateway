@@ -483,31 +483,61 @@ func Live(cfg config.Config, obs diff.Observed, d diff.Result) Result {
 
 	// The configured WAN must actually exist on this host.
 	if cfg.Network.WAN == "" {
-		r.errorf(LayerLive, "network.wan", "no WAN interface is configured", "")
+		if !obs.WANPresent {
+			r.errorf(LayerLive, "network.wan", "no WAN interface is configured", "")
+		}
 	} else {
-		if obs.WANName != cfg.Network.WAN && !hasInterface(obs, cfg.Network.WAN) {
-			r.errorf(LayerLive, "network.wan",
-				fmt.Sprintf("the configured WAN interface %s does not exist on this host", cfg.Network.WAN),
-				"check the name, or run thn status to list the interfaces present")
-		} else if !obs.WANUp {
-			r.warnf(LayerLive, "network.wan",
-				fmt.Sprintf("the WAN interface %s is administratively down", cfg.Network.WAN), "")
+		isSelector := strings.HasPrefix(cfg.Network.WAN, "hw:") || strings.HasPrefix(cfg.Network.WAN, "ephemeral:") || cfg.Network.WAN == "wan"
+		if isSelector {
+			if !obs.WANPresent {
+				r.errorf(LayerLive, "network.wan",
+					fmt.Sprintf("the configured WAN interface %s does not exist on this host", cfg.Network.WAN),
+					"check the name, or run thn status to list the interfaces present")
+			} else if !obs.WANUp {
+				r.warnf(LayerLive, "network.wan",
+					fmt.Sprintf("the WAN interface %s is administratively down", obs.WANName), "")
+			}
+		} else {
+			if obs.WANName != cfg.Network.WAN && !hasInterface(obs, cfg.Network.WAN) {
+				r.errorf(LayerLive, "network.wan",
+					fmt.Sprintf("the configured WAN interface %s does not exist on this host", cfg.Network.WAN),
+					"check the name, or run thn status to list the interfaces present")
+			} else if !obs.WANUp {
+				r.warnf(LayerLive, "network.wan",
+					fmt.Sprintf("the WAN interface %s is administratively down", cfg.Network.WAN), "")
+			}
 		}
 	}
 
 	// The configured LAN must be attached. This is informational rather than
 	// an error: not being attached is the expected development state.
 	if cfg.Network.LAN == "" {
-		r.infof(LayerLive, "network.lan",
-			"no LAN interface has been identified in the configuration",
-			"set network.lan once the downstream interface is attached")
-	} else if !obs.LANPresent || obs.LANName != cfg.Network.LAN {
-		r.infof(LayerLive, "network.lan",
-			fmt.Sprintf("the configured LAN interface %s is not attached to this host", cfg.Network.LAN),
-			"attach the interface, or correct the name")
-	} else if !obs.LANUp {
-		r.warnf(LayerLive, "network.lan",
-			fmt.Sprintf("the LAN interface %s has no carrier", cfg.Network.LAN), "")
+		if !obs.LANPresent {
+			r.infof(LayerLive, "network.lan",
+				"no LAN interface has been identified in the configuration",
+				"set network.lan once the downstream interface is attached")
+		}
+	} else {
+		isSelector := strings.HasPrefix(cfg.Network.LAN, "hw:") || strings.HasPrefix(cfg.Network.LAN, "ephemeral:") || cfg.Network.LAN == "lan"
+		if isSelector {
+			if !obs.LANPresent {
+				r.infof(LayerLive, "network.lan",
+					fmt.Sprintf("the configured LAN interface %s is not attached to this host", cfg.Network.LAN),
+					"attach the interface, or correct the name")
+			} else if !obs.LANUp {
+				r.warnf(LayerLive, "network.lan",
+					fmt.Sprintf("the LAN interface %s has no carrier", obs.LANName), "")
+			}
+		} else {
+			if !obs.LANPresent || obs.LANName != cfg.Network.LAN {
+				r.infof(LayerLive, "network.lan",
+					fmt.Sprintf("the configured LAN interface %s is not attached to this host", cfg.Network.LAN),
+					"attach the interface, or correct the name")
+			} else if !obs.LANUp {
+				r.warnf(LayerLive, "network.lan",
+					fmt.Sprintf("the LAN interface %s has no carrier", cfg.Network.LAN), "")
+			}
+		}
 	}
 
 	// A blocked diff means the configuration cannot be reconciled here at
@@ -576,6 +606,15 @@ func sameResolverList(a, b []string) bool {
 
 // checkInterfaceName returns a message when an interface name is implausible.
 func checkInterfaceName(name string) string {
+	if strings.HasPrefix(name, "hw:") || strings.HasPrefix(name, "ephemeral:") {
+		if strings.ContainsAny(name, " \t\n") {
+			return fmt.Sprintf("interface selector %q contains whitespace", name)
+		}
+		if strings.Contains(name, "/") {
+			return fmt.Sprintf("interface selector %q contains a path separator", name)
+		}
+		return ""
+	}
 	if len(name) > 15 {
 		return fmt.Sprintf("interface name %q is longer than the 15 characters Linux permits", name)
 	}

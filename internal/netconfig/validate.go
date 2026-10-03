@@ -169,7 +169,8 @@ func validateStructure(r *Result, p Policy) {
 		if iface.name == "" {
 			continue
 		}
-		if len(iface.name) > 15 {
+		isSelector := strings.HasPrefix(iface.name, "hw:") || strings.HasPrefix(iface.name, "ephemeral:")
+		if !isSelector && len(iface.name) > 15 {
 			r.errorf(iface.field,
 				fmt.Sprintf("interface name %q exceeds the 15 characters Linux permits", iface.name), "")
 		}

@@ -145,6 +145,15 @@ func mergeBindings(cfg config.Config, stored []state.InterfaceAssignment) (
 		}
 
 		switch {
+		case doc == string(r):
+			// The document states the logical role name, delegating hardware
+			// resolution to stored assignments.
+			if storedSel != "" {
+				bindings = append(bindings, host.Assignment{Role: r, Selector: storedSel})
+			} else {
+				bindings = append(bindings, host.Assignment{Role: r, Selector: ""})
+			}
+			fromConfig[r] = true
 		case doc != "" && storedSel != "" && doc != storedSel:
 			conflicts = append(conflicts, bindingConflict{
 				Role: string(r), Declared: doc, Stored: storedSel,
@@ -160,6 +169,35 @@ func mergeBindings(cfg config.Config, stored []state.InterfaceAssignment) (
 	}
 
 	return bindings, conflicts, fromConfig
+}
+
+// bindingSelector reports what a role is being resolved against, in the form
+// an operator wrote it.
+//
+// It exists so the gate reason and subsystems quote the SELECTOR the operator
+// used — a stable identity, a logical role, or a kernel name.
+func bindingSelector(cfg config.Config, stored []state.InterfaceAssignment, r host.Role) string {
+	declared := map[host.Role]string{
+		host.RoleWAN: cfg.Network.WAN,
+		host.RoleLAN: cfg.Network.LAN,
+	}
+	if d := strings.TrimSpace(declared[r]); d != "" {
+		if d == string(r) {
+			for _, s := range stored {
+				if s.Role == string(r) {
+					return s.Selector
+				}
+			}
+			return ""
+		}
+		return d
+	}
+	for _, s := range stored {
+		if s.Role == string(r) {
+			return s.Selector
+		}
+	}
+	return ""
 }
 
 // loadBindings reads the operator's assignments.

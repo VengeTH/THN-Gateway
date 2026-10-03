@@ -12,6 +12,7 @@ import (
 	"github.com/venth/thn-gateway/internal/dhcp"
 	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
 	"github.com/venth/thn-gateway/internal/dns"
+	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/identity"
 	"github.com/venth/thn-gateway/internal/sandbox"
 )
@@ -32,9 +33,13 @@ func dhcpPolicyFromConfig(cfg config.Config) (dhcp.Policy, error) {
 		gateway = prefix.Addr()
 	}
 
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	lanSel := bindingSelector(cfg, stored, host.RoleLAN)
+
 	p := dhcp.Policy{
 		Enabled:        cfg.DHCP.Enabled,
-		Interface:      cfg.Network.LAN,
+		Interface:      lanSel,
 		LANPrefix:      prefix,
 		Authoritative:  cfg.DHCP.Authoritative,
 		LeaseTime:      cfg.DHCP.LeaseTime,
@@ -124,9 +129,13 @@ func upstreamResolvers(cfg config.Config) (list []string, from string, err error
 }
 
 func dnsPolicyFromConfig(cfg config.Config) (dns.Policy, error) {
+	storePath := resolveStorePath(cfg, "")
+	stored := loadBindings(storePath)
+	lanSel := bindingSelector(cfg, stored, host.RoleLAN)
+
 	p := dns.Policy{
 		Enabled:              cfg.DNS.Enabled,
-		Interface:            cfg.Network.LAN,
+		Interface:            lanSel,
 		LocalDomain:          cfg.DNS.LocalDomain,
 		CacheSize:            cfg.DNS.CacheSize,
 		LogQueries:           cfg.DNS.LogQueries,
