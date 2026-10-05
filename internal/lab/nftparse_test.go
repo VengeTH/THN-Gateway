@@ -47,19 +47,25 @@ type nftRule struct {
 
 type nftExpr struct {
 	Match *nftMatch `json:"match"`
-	Nat   *nftNat   `json:"nat"`
 
-	// Masq and Masquerade carry the NAT statement as a top-level key on the
-	// rule rather than nested under "nat".
+	// NAT statements are identified by the key being PRESENT, not by a
+	// non-nil pointer.
 	//
-	// Kept alongside Nat rather than instead of it because which spelling a
-	// given nftables release emits for a rule it just installed is not
-	// something to assert in advance — it is the kind of detail that differs
-	// between versions. Recognising the statement by its presence and then
-	// classifying it is what lets the test be right about masquerade and honest
-	// about anything it did not recognise.
-	Masq       *json.RawMessage `json:"masq"`
-	Masquerade *json.RawMessage `json:"masquerade"`
+	// nft renders a masquerade as `{"masquerade": null}` — a member whose
+	// value is null. encoding/json turns a JSON null into a nil pointer before
+	// the field's type is ever consulted, so a `*json.RawMessage` field makes
+	// that statement indistinguishable from an absent one. The live gateway's
+	// masquerade rule did exactly that: it read as an unrecognised expression,
+	// and the NAT assertion reported a missing rule that was enforcing
+	// translation at the time.
+	//
+	// json.RawMessage as a value keeps the literal bytes, so the key present
+	// with a null value decodes to the four bytes `null` and len() answers the
+	// question. Measured, not assumed: a pointer form yields nil for the same
+	// input, a value form yields len 4.
+	Nat        json.RawMessage `json:"nat"`
+	Masq       json.RawMessage `json:"masq"`
+	Masquerade json.RawMessage `json:"masquerade"`
 }
 
 // nftMatch is one comparison within a rule.
@@ -147,6 +153,18 @@ type nftNat struct {
 	Type string `json:"type"`
 }
 
+// nftStatement is a NAT expression, and how it was spelled.
+type nftStatement struct {
+	// Key is the JSON member that carried it.
+	Key string
+	// Type is the translation it performs. For a key that names the
+	// translation directly — `masq`, `masquerade` — that is the name. For
+	// `nat` it is the `type` inside the object, and "" when nft gave none.
+	Type string
+	// Raw is the member's value, including a JSON null.
+	Raw json.RawMessage
+}
+
 // natType reports the NAT statement this expression carries: which key spelled
 // it, and what type it claimed to be.
 //
@@ -154,15 +172,45 @@ type nftNat struct {
 // under `nat` and it said `snat`" instead of the far less useful "no
 // masquerade rule found".
 func (e nftExpr) natType() (spelling, natType string, ok bool) {
-	switch {
-	case e.Nat != nil:
-		return "nat", e.Nat.Type, true
-	case e.Masquerade != nil:
-		return "masquerade", "masquerade", true
-	case e.Masq != nil:
-		return "masq", "masquerade", true
+	s := e.natStatement()
+	if s == nil {
+		return "", "", false
 	}
-	return "", "", false
+	return s.Key, s.Type, true
+}
+
+// natStatement identifies the NAT statement in this expression, if there is one.
+//
+// Ordered rather than merged: a rule carries at most one, and naming the key
+// that spelled it is what makes a diagnostic actionable.
+func (e nftExpr) natStatement() *nftStatement {
+	for _, c := range []nftStatement{
+		{Key: "nat", Type: natTypeOf(e.Nat), Raw: e.Nat},
+		{Key: "masquerade", Type: "masquerade", Raw: e.Masquerade},
+		{Key: "masq", Type: "masquerade", Raw: e.Masq},
+	} {
+		if len(c.Raw) > 0 {
+			return &c
+		}
+	}
+	return nil
+}
+
+// natTypeOf reads the `type` of a `nat` statement object.
+//
+// "" when the object is null, empty, or states no type. A caller treats that as
+// "a NAT statement whose type was not stated", which is deliberately not
+// masquerade: a statement the parser could not read must not be counted as the
+// one the assertion is looking for.
+func natTypeOf(raw json.RawMessage) string {
+	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
+		return ""
+	}
+	var n nftNat
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return ""
+	}
+	return n.Type
 }
 
 // isMasqueradeType reports whether a NAT statement type is masquerade.
@@ -355,8 +403,20 @@ const liveTableJSON = `{"nftables":[
 
 {"rule":{"family":"inet","table":"thn","chain":"postrouting","handle":263,"expr":[
   {"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"thnwan0"}},
-  {"nat":{"type":"masquerade"}}]}}
+  {"masquerade":null}]}}
 ]}`
+
+// liveMasqueradeJSON is the exact expression nft emits for the gateway's
+// masquerade, captured from the disposable lab:
+//
+//	{"masquerade": null}
+//
+// The null is not incidental. It is how nft spells a statement that carries no
+// operand, and it is precisely what defeated a pointer-typed field: the decoder
+// turns a JSON null into a nil pointer, so the statement became
+// indistinguishable from an absent one and the rule read as
+// `expr[1]=<unrecognised>` while the kernel was translating traffic with it.
+const liveMasqueradeJSON = `{"masquerade": null}`
 
 // TestLiveTableParses is the regression test for the parser bug itself.
 //
@@ -383,33 +443,101 @@ func TestLiveTableParses(t *testing.T) {
 		}
 	}
 
-	// Every shape of `right` in the live table must be readable.
-	var list, iface, prefix int
+	// Every shape of `right` in the live table must be readable, and the counts
+	// are the fixture's own. They are asserted rather than assumed so that a
+	// change to the fixture cannot quietly stop covering a shape — and they are
+	// what the fixture contains, not what a rough reading suggests: six string
+	// matches, not seven.
+	var list, str, prefix, masquerade int
 	for _, r := range rules {
 		for _, e := range r.Exprs {
+			if _, _, ok := e.natType(); ok {
+				masquerade++
+			}
 			if e.Match == nil {
 				continue
 			}
-			switch {
-			case e.Match.op() == "in":
+			if e.Match.op() == "in" {
 				list++
-			default:
-				if _, ok := e.Match.rightString(); ok {
-					iface++
-				} else if len(e.Match.Right) > 0 {
-					prefix++
-				}
+				continue
+			}
+			if _, ok := e.Match.rightString(); ok {
+				str++
+			} else if len(e.Match.Right) > 0 {
+				prefix++
 			}
 		}
 	}
-	if list != 2 {
-		t.Errorf("read %d connection-state matches with a list right, want 2", list)
+
+	for _, c := range []struct {
+		name      string
+		got, want int
+	}{
+		{"connection-state matches with a list right", list, 2},
+		{"interface matches with a string right", str, 6},
+		{"subnet matches with an object right", prefix, 2},
+		{"NAT statements", masquerade, 1},
+	} {
+		if c.got != c.want {
+			t.Errorf("read %d %s, want %d", c.got, c.name, c.want)
+		}
 	}
-	if iface == 0 {
-		t.Error("no interface match was read from a string right")
+}
+
+// TestLiveMasqueradeExpressionIsDetected is the focused regression for the
+// live representation, isolated from the rest of the table.
+//
+// `{"masquerade": null}` is a JSON member whose value is null. encoding/json
+// turns a JSON null into a nil pointer before the field's type is consulted, so
+// the pointer-typed field this parser originally used could not tell that
+// statement from an absent key — and the rule that was translating the
+// gateway's traffic read as `expr[1]=<unrecognised>`.
+func TestLiveMasqueradeExpressionIsDetected(t *testing.T) {
+	var expr nftExpr
+	if err := json.Unmarshal([]byte(liveMasqueradeJSON), &expr); err != nil {
+		t.Fatalf("decoding %s: %v", liveMasqueradeJSON, err)
 	}
-	if prefix != 2 {
-		t.Errorf("read %d prefix matches with an object right, want 2, one per chain that filters the LAN", prefix)
+
+	spelling, natType, ok := expr.natType()
+	if !ok {
+		t.Fatalf("no NAT statement recognised in %s", liveMasqueradeJSON)
+	}
+	if spelling != "masquerade" {
+		t.Errorf("statement spelled %q, want %q", spelling, "masquerade")
+	}
+	if natType != "masquerade" {
+		t.Errorf("statement type %q, want %q", natType, "masquerade")
+	}
+	if !isMasqueradeType(natType) {
+		t.Errorf("%q was not classified as masquerade", natType)
+	}
+
+	// The member's value is preserved, null included, so a diagnostic can show
+	// what the kernel actually said.
+	if got := strings.TrimSpace(string(expr.Masquerade)); got != "null" {
+		t.Errorf("raw statement value = %q, want %q", got, "null")
+	}
+}
+
+// TestNatMemberWithNoTypeIsNotMasquerade keeps the fail-closed direction.
+//
+// A `nat` statement the parser could not read a type from is not counted as
+// masquerade. Counting it would let the assertion pass on a statement it does
+// not understand.
+func TestNatMemberWithNoTypeIsNotMasquerade(t *testing.T) {
+	for _, raw := range []string{`{"nat": null}`, `{"nat": {}}`, `{"nat": {"type": ""}}`} {
+		var expr nftExpr
+		if err := json.Unmarshal([]byte(raw), &expr); err != nil {
+			t.Fatalf("decoding %s: %v", raw, err)
+		}
+		_, natType, ok := expr.natType()
+		if !ok {
+			t.Errorf("%s: statement not recognised at all, want it recognised with no type", raw)
+			continue
+		}
+		if isMasqueradeType(natType) {
+			t.Errorf("%s: a statement with no type was accepted as masquerade", raw)
+		}
 	}
 }
 
@@ -475,6 +603,16 @@ func TestMasqueradeRuleIsDetected(t *testing.T) {
 		{
 			name: "NAT statement nested under nat",
 			expr: `{"nat":{"type":"masquerade"}}`,
+		},
+		{
+			// The live representation, and the one that broke: a member whose
+			// value is null.
+			name: "NAT statement spelled masquerade with a null value",
+			expr: liveMasqueradeJSON,
+		},
+		{
+			name: "NAT statement spelled masq with a null value",
+			expr: `{"masq": null}`,
 		},
 		{
 			name: "NAT statement spelled masq",

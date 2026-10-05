@@ -552,6 +552,19 @@ absent, so every transaction re-planned a firewall installation.
 yields a value only when the JSON really is a string. A non-string right is a
 value the parser read, not a failure.
 
+That exposed a second defect in the same parser. nft spells a masquerade as
+`{"masquerade": null}` — a member whose value is null, because the statement
+carries no operand. `encoding/json` turns a JSON null into a nil pointer before
+the field's type is consulted, so a `*json.RawMessage` field could not tell that
+statement from an absent one. The gateway's masquerade rule read as
+`expr[1]=<unrecognised>` while the kernel was translating traffic with it.
+
+NAT statements are now held as value-typed `json.RawMessage` and identified by
+the key being present, whatever the value. A `nat` member whose `type` cannot be
+read is reported with no type and is deliberately **not** counted as
+masquerade, so a statement the parser could not understand cannot satisfy the
+assertion.
+
 `internal/lab/nftparse_test.go` reproduces the whole live table — all three
 chains, every shape of `match.right` — because a fixture trimmed to the
 masquerade rule could not have reproduced a failure that happened elsewhere in
