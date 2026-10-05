@@ -303,9 +303,14 @@ func capabilityGates(d *host.Device) []activation.CapabilityGate {
 			continue
 		}
 		out = append(out, activation.CapabilityGate{
-			Name:       string(c),
+			Name: string(c),
+			// string() converts the host package's typed confidence to the
+			// string the safety package carries. The safety package stays
+			// dependent on nothing but itself, and the wire format is
+			// unchanged because host.Confidence is a string type whose
+			// values are the same three words it has always used.
 			Available:  s.Available,
-			Confidence: s.Confidence,
+			Confidence: string(s.Confidence),
 			Reason:     s.Reason,
 		})
 	}

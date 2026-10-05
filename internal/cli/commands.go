@@ -203,6 +203,12 @@ var commands = map[string]Command{
 		Summary: "report this machine's interfaces, roles and capabilities",
 		Run:     runDiscover,
 	},
+	"host": {
+		Name:    "host",
+		Tier:    TierPure,
+		Summary: "report this host's platform, subsystems, capabilities and gateway readiness",
+		Run:     runHost,
+	},
 	"interface": {
 		Name:    "interface",
 		Tier:    TierPure,

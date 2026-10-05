@@ -1,0 +1,25 @@
+[
+  {
+    "ifname": "lo",
+    "ifindex": 1,
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host" },
+      { "family": "inet6", "local": "::1", "prefixlen": 128, "scope": "host" }
+    ]
+  },
+  {
+    "ifname": "wan0",
+    "ifindex": 2,
+    "addr_info": [
+      { "family": "inet", "local": "203.0.113.40", "prefixlen": 24, "scope": "global" }
+    ]
+  },
+  {
+    "ifname": "wan1",
+    "ifindex": 3,
+    "addr_info": [
+      { "family": "inet", "local": "10.20.0.1", "prefixlen": 24, "scope": "global" },
+      { "family": "inet6", "local": "fe80::1c2d:3e4f:5a6b:7c8d", "prefixlen": 64, "scope": "link" }
+    ]
+  }
+]

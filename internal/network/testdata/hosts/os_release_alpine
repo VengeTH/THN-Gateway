@@ -1,0 +1,7 @@
+# Alpine formats os-release with single quotes rather than double quotes, and
+# omits PRETTY_NAME. A parser that only understands double-quoted Ubuntu
+# output reports an empty distribution on every Alpine host.
+NAME='Alpine Linux'
+ID=alpine
+VERSION_ID=3.20.1
+PRETTY_NAME='Alpine Linux v3.20'

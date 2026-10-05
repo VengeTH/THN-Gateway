@@ -1,0 +1,22 @@
+{
+  "comment": "Fixture C: an nftables host running Docker's own tables. None of these are THN's, and none may be removed.",
+  "nftables": [
+    {
+      "metainfo": {
+        "version": "1.0.6",
+        "release": "3~rc1",
+        "json_schema_version": 1
+      }
+    },
+    { "table": { "family": "ip", "name": "filter", "handle": 2 } },
+    { "chain": { "family": "ip", "table": "filter", "name": "INPUT", "handle": 1, "type": "filter", "hook": "input", "policy": "accept" } },
+    { "chain": { "family": "ip", "table": "filter", "name": "FORWARD", "handle": 2, "type": "filter", "hook": "forward", "policy": "accept" } },
+    { "table": { "family": "ip", "name": "nat", "handle": 3 } },
+    { "chain": { "family": "ip", "table": "nat", "name": "POSTROUTING", "handle": 1, "type": "nat", "hook": "postrouting", "policy": "accept" } },
+    { "table": { "family": "inet", "name": "filter", "handle": 5 } },
+    { "chain": { "family": "inet", "table": "filter", "name": "input", "handle": 1, "type": "filter", "hook": "input", "policy": "accept" } },
+    { "table": { "family": "ip", "name": "docker-forward", "handle": 6 } },
+    { "chain": { "family": "ip", "table": "docker-forward", "name": "DOCKER-FORWARD", "handle": 1, "type": "filter", "hook": "forward", "policy": "accept" } },
+    { "chain": { "family": "ip", "table": "docker-forward", "name": "DOCKER-ISOLATION-STAGE-1", "handle": 2, "type": "filter", "hook": "forward", "policy": "accept" } }
+  ]
+}

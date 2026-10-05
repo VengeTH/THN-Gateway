@@ -168,6 +168,7 @@ func (e *Env) fatalf(format string, args ...any) ExitCode {
 type flagSet struct {
 	bools   map[string]*bool
 	strings map[string]*string
+	ints    map[string]*int
 	seen    map[string]bool
 }
 
@@ -176,6 +177,7 @@ func newFlagSet() *flagSet {
 	return &flagSet{
 		bools:   map[string]*bool{},
 		strings: map[string]*string{},
+		ints:    map[string]*int{},
 		seen:    map[string]bool{},
 	}
 }
@@ -185,6 +187,19 @@ func (f *flagSet) Bool(name string, def bool) *bool {
 	v := new(bool)
 	*v = def
 	f.bools[name] = v
+	return v
+}
+
+// Int registers an integer flag and returns a pointer to its value.
+//
+// Added for `thn host --requires`, which asks how many physical interfaces
+// the intended topology needs. That is a count an operator supplies, and
+// parsing it from a string at the call site would mean every such command
+// re-implements the error message for a malformed value.
+func (f *flagSet) Int(name string, def int) *int {
+	v := new(int)
+	*v = def
+	f.ints[name] = v
 	return v
 }
 

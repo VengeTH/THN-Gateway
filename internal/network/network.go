@@ -169,6 +169,19 @@ type Snapshot struct {
 	Neighbours []Neighbour `json:"neighbours"`
 	// Sysctl holds kernel tunables relevant to gateway operation.
 	Sysctl []SysctlValue `json:"sysctl"`
+	// System identifies the running system: distribution, version, kernel.
+	//
+	// Distinct from Platform above, which is the bare GOOS string this
+	// struct already used to carry. Both exist because they answer different
+	// questions: Platform answers "was this observed somewhere useful?", and
+	// System answers "what machine is this?".
+	System System `json:"system"`
+	// NFTables is what nftables this host exposes. Observed, never modified.
+	NFTables NFTablesState `json:"nftables"`
+	// TrafficControl is what traffic control this host exposes.
+	TrafficControl TCState `json:"traffic_control"`
+	// DNS is how this host resolves names.
+	DNS DNSState `json:"dns"`
 	// Diagnostics records what could not be observed and why.
 	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
 }
@@ -280,6 +293,14 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 	// the same instant, and running it after ParseLinks means the
 	// enrichment operates on a complete link list.
 	enrichLinks(ctx, snap.Interfaces, i.info, &snap.Diagnostics)
+
+	// Subsystem availability. Every call below is read-only: `nft list`,
+	// `tc show`, and a file read. They are gathered last so that the cheap
+	// interface facts are already in hand if a slower tool is slow.
+	snap.System = readSystem()
+	snap.NFTables = ObserveNFTables(ctx)
+	snap.TrafficControl = ObserveTrafficControl(ctx)
+	snap.DNS = ObserveDNS()
 
 	return snap, nil
 }

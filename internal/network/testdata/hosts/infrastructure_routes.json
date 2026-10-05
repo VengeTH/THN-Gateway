@@ -1,0 +1,39 @@
+{
+  "comment": "Fixture C: a host that already carries unrelated infrastructure. THN must record all of it and touch none of it.",
+  "routes": [
+    {
+      "dst": "default",
+      "gateway": "192.168.2.1",
+      "dev": "enp1s0",
+      "protocol": "dhcp",
+      "metric": 100,
+      "flags": []
+    },
+    {
+      "dst": "172.17.0.0/16",
+      "dev": "docker0",
+      "protocol": "kernel",
+      "scope": "link",
+      "prefsrc": "172.17.0.1",
+      "metric": 0,
+      "flags": []
+    },
+    {
+      "dst": "192.168.2.0/24",
+      "dev": "enp1s0",
+      "protocol": "kernel",
+      "scope": "link",
+      "prefsrc": "192.168.2.50",
+      "metric": 100,
+      "flags": []
+    },
+    {
+      "dst": "100.64.0.0/10",
+      "dev": "tailscale0",
+      "protocol": "boot",
+      "scope": "global",
+      "metric": 0,
+      "flags": []
+    }
+  ]
+}

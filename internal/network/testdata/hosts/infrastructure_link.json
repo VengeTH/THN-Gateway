@@ -1,0 +1,63 @@
+[
+  {
+    "ifname": "lo",
+    "ifindex": 1,
+    "mtu": 65536,
+    "operstate": "UNKNOWN",
+    "link_type": "loopback",
+    "address": "00:00:00:00:00:00",
+    "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "loopback" }
+  },
+  {
+    "ifname": "enp1s0",
+    "ifindex": 2,
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "b8:27:eb:aa:bb:cc",
+    "speed": 1000,
+    "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "ether" }
+  },
+  {
+    "ifname": "enp2s0",
+    "ifindex": 3,
+    "mtu": 1500,
+    "operstate": "DOWN",
+    "link_type": "ether",
+    "address": "b8:27:eb:aa:bb:cd",
+    "flags": ["BROADCAST", "MULTICAST", "UP"],
+    "linkinfo": { "info_kind": "ether" }
+  },
+  {
+    "ifname": "docker0",
+    "ifindex": 4,
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "02:42:1a:2b:3c:4d",
+    "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "bridge" }
+  },
+  {
+    "ifname": "veth9f2a1c",
+    "ifindex": 5,
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "9e:1f:2a:3b:4c:5d",
+    "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "veth", "info_data": { "link_index": 12 } },
+    "link_netnsid": 3
+  },
+  {
+    "ifname": "tailscale0",
+    "ifindex": 6,
+    "mtu": 1280,
+    "operstate": "UNKNOWN",
+    "link_type": "none",
+    "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "tun" }
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "ifname": "lo",
+    "ifindex": 1,
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host" }
+    ]
+  },
+  {
+    "ifname": "eth0",
+    "ifindex": 2,
+    "addr_info": [
+      { "family": "inet", "local": "198.51.100.7", "prefixlen": 24, "scope": "global" }
+    ]
+  }
+]

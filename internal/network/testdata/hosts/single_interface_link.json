@@ -1,0 +1,23 @@
+[
+  {
+    "ifname": "lo",
+    "ifindex": 1,
+    "mtu": 65536,
+    "operstate": "UNKNOWN",
+    "link_type": "loopback",
+    "address": "00:00:00:00:00:00",
+    "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "loopback" }
+  },
+  {
+    "ifname": "eth0",
+    "ifindex": 2,
+    "mtu": 1500,
+    "operstate": "UP",
+    "link_type": "ether",
+    "address": "52:54:00:12:34:56",
+    "speed": 1000,
+    "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+    "linkinfo": { "info_kind": "ether" }
+  }
+]

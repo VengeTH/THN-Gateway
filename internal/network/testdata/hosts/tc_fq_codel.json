@@ -1,0 +1,17 @@
+[
+  {
+    "kind": "noqueue",
+    "handle": "0:",
+    "root": true,
+    "refcnt": 2,
+    "options": {}
+  },
+  {
+    "kind": "fq_codel",
+    "handle": "0:",
+    "root": true,
+    "refcnt": 2,
+    "dev": "enp1s0",
+    "options": {}
+  }
+]

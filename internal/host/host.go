@@ -131,6 +131,51 @@ const (
 	CapBridge         Capability = "bridge"
 	CapWirelessAP     Capability = "wireless-ap"
 	CapWirelessClient Capability = "wireless-client"
+
+	// The capabilities below were added in M7.0, when observation widened
+	// from "what interfaces exist" to "what this host can actually do".
+	// Each names a specific, separately-observable fact, because each can
+	// fail independently and a gateway that reports one verdict for all of
+	// them cannot tell an operator which one to go and fix.
+
+	// CapNFTables reports whether nftables is installed and answerable.
+	// Distinct from CapFirewall: the firewall needs nftables, but so does
+	// anything else that touches netfilter, and a host can have one without
+	// the other.
+	CapNFTables Capability = "nftables"
+
+	// CapTC reports whether traffic control is installed and answerable.
+	// Distinct from CapQoS, which is about shaping policy rather than the
+	// presence of the tc tooling itself.
+	CapTC Capability = "tc"
+
+	// CapCake reports whether the CAKE shaper can be used.
+	//
+	// This is the capability most likely to be wrong on a real host, and it
+	// is deliberately the strictest in the model. sch_cake is a kernel
+	// module; `tc` being installed says nothing about whether it is loaded,
+	// and the only non-mutating evidence that it works is a CAKE discipline
+	// already attached somewhere. Absent that, this stays unknown — see
+	// CapTC for why a binary is not a capability.
+	CapCake Capability = "cake"
+
+	// CapMultipleEthernet reports whether the host has at least two physical
+	// Ethernet interfaces — enough for the canonical two-port gateway.
+	CapMultipleEthernet Capability = "multiple-ethernet"
+
+	// CapVeth reports whether veth pairs can be created.
+	//
+	// Observed from existing veth interfaces rather than by creating one,
+	// which would be mutation. Its absence therefore means "not observed",
+	// not "impossible" — see the confidence attached to it.
+	CapVeth Capability = "veth"
+
+	// CapNetns reports whether network namespaces are in use.
+	//
+	// This is what the M6.x lab uses, so a host that cannot do it cannot run
+	// THN's own tests — which makes it a real requirement for the project
+	// even though a production gateway does not need it.
+	CapNetns Capability = "network-namespace"
 )
 
 // AllCapabilities is every capability this package can report, for the CLI to
@@ -139,8 +184,87 @@ func AllCapabilities() []Capability {
 	return []Capability{
 		CapRouting, CapForwarding, CapNAT, CapDHCP, CapDNS, CapFirewall,
 		CapQoS, CapVLAN, CapBridge, CapWirelessAP, CapWirelessClient,
+		CapNFTables, CapTC, CapCake, CapMultipleEthernet, CapVeth, CapNetns,
 	}
 }
+
+// Confidence is how firmly a capability verdict was established.
+//
+// # The three states are not interchangeable
+//
+// This is the most important type in the package, because collapsing any two
+// of its values produces a gateway that lies in a way it looks correct doing so.
+//
+//	ConfidenceObserved   THN asked the host and the host answered
+//	ConfidenceInferred   THN concluded it from the platform
+//	ConfidenceUnknown    THN could not tell, and says so
+//
+// A host running Linux does not have nftables. "Linux has nftables" is a
+// statement about a great many kernels, and a gateway that reports firewall
+// support on the strength of it will cheerfully plan rules for a machine whose
+// nft binary is not installed.
+//
+// # Unknown is not false
+//
+// An unknown capability is not unavailable. They are different, and treating
+// them as the same produces two opposite mistakes: a host THN failed to probe
+// gets reported as incapable, and a host it never asked gets reported as
+// capable. The first wastes an operator's afternoon. The second is worse.
+type Confidence string
+
+const (
+	// ConfidenceObserved means THN queried the host and got an answer.
+	ConfidenceObserved Confidence = "observed"
+
+	// ConfidenceInferred means THN concluded the verdict from the platform
+	// rather than from a probe.
+	//
+	// A gate that must not guess rejects this. See CapabilityState.Satisfies.
+	ConfidenceInferred Confidence = "inferred"
+
+	// ConfidenceUnknown means THN could not determine the answer.
+	//
+	// It fails closed: an unknown capability never satisfies a hard gate and
+	// never reports available.
+	ConfidenceUnknown Confidence = "unknown"
+)
+
+// ParseConfidence normalises a confidence string, defaulting to unknown.
+//
+// The default matters more than it looks. A capability state whose confidence
+// is blank, misspelled, or set by a caller that did not think about it must
+// land on the safe answer rather than on whichever constant happened to sort
+// first.
+func ParseConfidence(s string) Confidence {
+	switch Confidence(strings.ToLower(strings.TrimSpace(s))) {
+	case ConfidenceObserved:
+		return ConfidenceObserved
+	case ConfidenceInferred:
+		return ConfidenceInferred
+	default:
+		return ConfidenceUnknown
+	}
+}
+
+// rank orders confidences from weakest to strongest.
+//
+// Used only for ordering display. It is never used to decide whether a gate
+// passes — Satisfies does that, by exact comparison.
+func (c Confidence) rank() int {
+	switch c {
+	case ConfidenceObserved:
+		return 3
+	case ConfidenceInferred:
+		return 2
+	case ConfidenceUnknown:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// AtLeast reports whether c is at least as strong as other.
+func (c Confidence) AtLeast(other Confidence) bool { return c.rank() >= other.rank() }
 
 // IdentityKind explains where an interface's ID came from.
 //
@@ -308,6 +432,34 @@ type Device struct {
 	// Recorded as an observation; THN never writes it.
 	ForwardingEnabled bool `json:"forwarding_enabled"`
 
+	// ForwardingKnown reports whether the forwarding setting was actually
+	// read, as opposed to defaulting to false because the read failed.
+	//
+	// Without this the two cases are indistinguishable on the model, and a
+	// host where THN could not read the sysctl reports identically to a host
+	// with forwarding genuinely off. Only the second is a gateway problem.
+	ForwardingKnown bool `json:"forwarding_known"`
+
+	// System identifies the running system: distribution, version, kernel.
+	System network.System `json:"system"`
+
+	// NFTables is what nftables this host exposes. Observed, never modified.
+	NFTables network.NFTablesState `json:"nftables"`
+
+	// TrafficControl is what traffic control this host exposes.
+	TrafficControl network.TCState `json:"traffic_control"`
+
+	// DNS is how this host resolves names.
+	DNS network.DNSState `json:"dns"`
+
+	// Routes are the observed routing table entries.
+	//
+	// Recorded whole rather than distilled into "is there a default route",
+	// because the other entries matter too: an operator needs to see that
+	// this machine already carries routes for a Docker bridge and a VPN
+	// before deciding what to do with its own.
+	Routes []network.Route `json:"routes,omitempty"`
+
 	// ObservedAt is when the observation was taken.
 	ObservedAt time.Time `json:"observed_at"`
 
@@ -315,16 +467,49 @@ type Device struct {
 	Diagnostics []string `json:"diagnostics,omitempty"`
 }
 
+// DefaultRoute returns the observed default route, or nil.
+//
+// Nil is a real answer: a host with no default route has one, and reporting
+// that plainly is more useful than omitting the field.
+func (d *Device) DefaultRoute() (network.Route, bool) {
+	for _, r := range d.Routes {
+		if r.Default {
+			return r, true
+		}
+	}
+	return network.Route{}, false
+}
+
+// UnmanagedResources counts the observed resources THN does not own.
+//
+// It is a count, not a verdict. Docker bridges, Tailscale tunnels and
+// someone else's nftables tables are all normal on a real gateway, and M7.0
+// records them without judging them: discovery exists to describe a host, not
+// to tidy one.
+func (d *Device) UnmanagedResources() int {
+	n := 0
+	for _, i := range d.Interfaces {
+		if i.Virtual {
+			n++
+		}
+	}
+	for _, t := range d.NFTables.Tables {
+		if !t.IsTHNTable() {
+			n++
+		}
+	}
+	return n
+}
+
 // CapabilityState is one capability and how it was determined.
 type CapabilityState struct {
 	// Available reports whether the host can perform it.
 	Available bool `json:"available"`
 
-	// Confidence is "observed", "inferred" or "unknown".
-	//
-	// "inferred" means THN concluded it from the platform rather than from a
-	// probe. A caller that must not guess should require "observed".
-	Confidence string `json:"confidence"`
+	// Confidence is how the verdict was established: observed, inferred or
+	// unknown. See the Confidence type for why the three are not
+	// interchangeable.
+	Confidence Confidence `json:"confidence"`
 
 	// Reason explains the verdict, especially when unavailable.
 	Reason string `json:"reason,omitempty"`
@@ -334,7 +519,26 @@ type CapabilityState struct {
 //
 // It is a method rather than a field read because the field is exported for
 // serialisation and a caller reaching for `.Available` should be deliberate.
+//
+// It deliberately ignores confidence. IsAvailable answers "did THN conclude
+// the host has this?" — a reporting question. Satisfies answers "may this
+// satisfy a hard gate?", which is a different question with a stricter answer,
+// and a caller that wants the strict one must ask for it explicitly.
 func (s CapabilityState) IsAvailable() bool { return s.Available }
+
+// Satisfies reports whether this state may satisfy a hard gate.
+//
+// The rule is exact and deliberately unforgiving: a gate is satisfied only by
+// an AVAILABLE capability that was OBSERVED. Inferred does not pass, and
+// unknown does not pass.
+//
+// This is the entire point of modelling confidence. If an inference could
+// satisfy a gate, then a host whose nft binary is missing would report
+// firewall support on the strength of running Linux, and the gate meant to
+// catch exactly that would wave it through.
+func (s CapabilityState) Satisfies() bool {
+	return s.Available && s.Confidence == ConfidenceObserved
+}
 
 // Can reports whether the host has a capability, and how confidently.
 func (d *Device) Can(c Capability) (CapabilityState, bool) {
@@ -347,6 +551,60 @@ func (d *Device) Can(c Capability) (CapabilityState, bool) {
 func (d *Device) Has(c Capability) bool {
 	s, ok := d.Capabilities[c]
 	return ok && s.Available
+}
+
+// Satisfies reports whether a capability is available AND was observed.
+//
+// This is the method a gate uses. Has is the reporting accessor and ignores
+// confidence on purpose; Satisfies is the enforcing one and does not.
+func (d *Device) Satisfies(c Capability) bool {
+	s, ok := d.Capabilities[c]
+	return ok && s.Satisfies()
+}
+
+// UncertainCapabilities returns the capabilities whose confidence is not
+// observed, sorted by name.
+//
+// Readiness reports these as warnings rather than failures. The distinction
+// is deliberate: "this host cannot route" and "THN could not determine
+// whether this host can route" call for different responses from an operator,
+// and merging them into one block of red text loses that.
+func (d *Device) UncertainCapabilities() []Capability {
+	var out []Capability
+	for _, c := range AllCapabilities() {
+		s, ok := d.Capabilities[c]
+		if !ok {
+			continue
+		}
+		if s.Confidence != ConfidenceObserved {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+	return out
+}
+
+// PhysicalInterfaces returns the observed physical interfaces, sorted by
+// system name for a stable rendering.
+func (d *Device) PhysicalInterfaces() []Interface {
+	out := make([]Interface, 0, len(d.Interfaces))
+	for _, i := range d.Interfaces {
+		if i.Physical {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// CountKind returns how many interfaces of a given kind were observed.
+func (d *Device) CountKind(kind string) int {
+	n := 0
+	for _, i := range d.Interfaces {
+		if i.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // InterfaceByID returns an interface by its stable ID.

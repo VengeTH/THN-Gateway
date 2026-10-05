@@ -1,0 +1,21 @@
+[
+  {
+    "kind": "noqueue",
+    "handle": "0:",
+    "root": true,
+    "refcnt": 2,
+    "options": {}
+  },
+  {
+    "kind": "cake",
+    "handle": "8001:",
+    "root": true,
+    "refcnt": 2,
+    "dev": "wan0",
+    "options": {
+      "bandwidth": "100Mbit",
+      "besteffort": true,
+      "flowtable": true
+    }
+  }
+]

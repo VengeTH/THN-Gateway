@@ -1,0 +1,31 @@
+[
+  {
+    "ifname": "lo",
+    "ifindex": 1,
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host" }
+    ]
+  },
+  {
+    "ifname": "enp1s0",
+    "ifindex": 2,
+    "addr_info": [
+      { "family": "inet", "local": "192.168.2.50", "prefixlen": 24, "scope": "global" },
+      { "family": "inet6", "local": "fe80::ba27:ebff:feaa:bbcc", "prefixlen": 64, "scope": "link" }
+    ]
+  },
+  {
+    "ifname": "docker0",
+    "ifindex": 4,
+    "addr_info": [
+      { "family": "inet", "local": "172.17.0.1", "prefixlen": 16, "scope": "global" }
+    ]
+  },
+  {
+    "ifname": "tailscale0",
+    "ifindex": 6,
+    "addr_info": [
+      { "family": "inet", "local": "100.101.102.103", "prefixlen": 32, "scope": "global" }
+    ]
+  }
+]
