@@ -122,6 +122,25 @@ const (
 	TargetWANInterface = "thnwan0"
 )
 
+// The gateway-side veth ports.
+//
+// THN never sees these: they are enslaved to the bridges, and THN resolves its
+// roles to the bridges. They are named here rather than inline in the harness
+// so that Validate can account for every name that will exist in the gateway
+// namespace, including the ones THN does not manage.
+const (
+	GatewayWANPort = "vwan0"
+	GatewayLANPort = "vlan0"
+
+	// UnmanagedInterface is the interface THN must never touch. A dummy,
+	// which is also not assignable, so it cannot be picked up by a role.
+	UnmanagedInterface = "thnmgmt0"
+
+	// UnmanagedAddress is that interface's address, asserted after apply and
+	// after rollback to prove THN left it alone.
+	UnmanagedAddress = "10.77.99.1/24"
+)
+
 // TargetPort is the TCP port the WAN-side test target listens on.
 //
 // A fixed port rather than an ephemeral one because the gateway has to be told
@@ -159,12 +178,48 @@ type Route struct {
 	Device string
 }
 
+// Port is one end of a veth pair that carries the lab's wiring.
+//
+// # Why this is declared rather than written inline
+//
+// A veth peer has to be *named* at creation, before it can be moved into the
+// namespace that will keep it. That name is a real interface for the moment the
+// pair exists, in whichever namespace created it. If it is the same as a name
+// that namespace already holds, the kernel refuses the pair outright:
+//
+//	RTNETLINK answers: File exists
+//
+// which is why each Port is created in the namespace that KEEPS its End and
+// moves only Port out. Declaring both ends here, together with the bridges and
+// endpoints, lets Validate assert the invariant that prevents it: no namespace
+// ever holds the same interface name twice.
+type Port struct {
+	// Namespace is where the pair is created. It is also where End stays.
+	Namespace string
+
+	// End is the name End keeps in Namespace.
+	End string
+
+	// Port is the name of the far end, which is moved into PortNamespace.
+	//
+	// It must be free in PortNamespace when it arrives.
+	Port string
+
+	// PortNamespace is where the far end is moved to.
+	PortNamespace string
+
+	// Master is the interface in Namespace that End is enslaved to.
+	Master string
+}
+
 // Topology is the complete disposable lab the M6.2 tests build.
 type Topology struct {
 	// Interfaces are every endpoint, gateway interfaces first.
 	Interfaces []Interface
 	// Routes are the routes that exist before THN runs.
 	Routes []Route
+	// Ports are the veth pairs that wire the gateway to the two endpoints.
+	Ports []Port
 }
 
 // Canonical returns the M6.2 disposable topology.
@@ -173,8 +228,25 @@ func Canonical() Topology {
 		Interfaces: []Interface{
 			{Namespace: GatewayNamespace, Name: GatewayWANInterface, Address: GatewayWANAddress, Role: "wan"},
 			{Namespace: GatewayNamespace, Name: GatewayLANInterface, Address: GatewayAddress, Role: "lan"},
+			{Namespace: GatewayNamespace, Name: UnmanagedInterface, Address: UnmanagedAddress},
 			{Namespace: TargetNamespace, Name: TargetWANInterface, Address: TargetAddress},
 			{Namespace: ClientNamespace, Name: ClientLANInterface, Address: ClientAddress},
+		},
+		Ports: []Port{
+			{
+				Namespace:     TargetNamespace,
+				End:           TargetWANInterface,
+				Port:          GatewayWANPort,
+				PortNamespace: GatewayNamespace,
+				Master:        GatewayWANInterface,
+			},
+			{
+				Namespace:     ClientNamespace,
+				End:           ClientLANInterface,
+				Port:          GatewayLANPort,
+				PortNamespace: GatewayNamespace,
+				Master:        GatewayLANInterface,
+			},
 		},
 		Routes: []Route{
 			{Namespace: GatewayNamespace, Destination: "default", Via: TargetIP, Device: GatewayWANInterface},
@@ -206,6 +278,13 @@ func Canonical() Topology {
 //
 // It runs on every platform and exists so that a mistake in the address plan
 // is caught on the workstation that typed it, rather than in a lab VM.
+//
+// The name-uniqueness check is the one that matters most, and it exists because
+// its absence was found the hard way. Interface names are unique per namespace
+// and nothing else: two links claiming one name is refused by the kernel with
+// "RTNETLINK answers: File exists", which says nothing about which link
+// collided with which. Asserting it here turns an opaque runtime failure into a
+// plain statement about the topology.
 func (t Topology) Validate() error {
 	if len(t.Interfaces) == 0 {
 		return fmt.Errorf("topology declares no interfaces")
@@ -214,6 +293,16 @@ func (t Topology) Validate() error {
 	seen := map[string]string{}
 	claimed := map[netip.Addr]string{}
 
+	// occupy reserves a kernel interface name in a namespace.
+	occupy := func(namespace, name, what string) error {
+		key := namespace + "/" + name
+		if prev, dup := seen[key]; dup {
+			return fmt.Errorf("%s claims interface %s in namespace %s, which %s already holds", what, name, namespace, prev)
+		}
+		seen[key] = what
+		return nil
+	}
+
 	for _, iface := range t.Interfaces {
 		if iface.Namespace == "" {
 			return fmt.Errorf("interface %s has no namespace", iface.Name)
@@ -221,12 +310,9 @@ func (t Topology) Validate() error {
 		if iface.Name == "" {
 			return fmt.Errorf("interface in namespace %s has no name", iface.Namespace)
 		}
-
-		key := iface.Namespace + "/" + iface.Name
-		if prev, dup := seen[key]; dup {
-			return fmt.Errorf("interface %s is declared twice (namespace %s and %s)", iface.Name, prev, iface.Namespace)
+		if err := occupy(iface.Namespace, iface.Name, "interface "+iface.Name); err != nil {
+			return err
 		}
-		seen[key] = iface.Namespace
 
 		if iface.Address == "" {
 			continue
@@ -250,6 +336,26 @@ func (t Topology) Validate() error {
 		claimed[prefix.Addr()] = iface.Name
 	}
 
+	for _, p := range t.Ports {
+		// The far end arrives in the gateway under its own name, so that name
+		// must be free there.
+		if err := occupy(p.PortNamespace, p.Port, "veth port "+p.Port); err != nil {
+			return err
+		}
+
+		// The end that stays behind is not a separate interface: it IS the
+		// endpoint the topology already declared, carrying its address. It has
+		// to be declared, or the pair would be wired to something THN cannot
+		// address.
+		if _, ok := seen[p.Namespace+"/"+p.End]; !ok {
+			return fmt.Errorf("veth end %s is not a declared interface in namespace %s", p.End, p.Namespace)
+		}
+		if _, ok := seen[p.PortNamespace+"/"+p.Master]; !ok {
+			return fmt.Errorf("veth port %s is enslaved to %s, which namespace %s does not declare",
+				p.Port, p.Master, p.PortNamespace)
+		}
+	}
+
 	// The LAN and the WAN are separate segments. That is not cosmetic: it is
 	// what makes "the packet left the LAN" visible in the addresses rather
 	// than something a reader has to take on trust.
@@ -269,6 +375,39 @@ func (t Topology) Validate() error {
 	}
 
 	return nil
+}
+
+// LinkNames returns every interface name the topology expects in a namespace.
+//
+// It is the expectation the live harness asserts the kernel against after
+// building, which is how an interface the topology did not ask for becomes
+// visible instead of merely tolerated.
+func (t Topology) LinkNames(namespace string) []string {
+	seen := map[string]bool{}
+	var out []string
+
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+
+	for _, iface := range t.Interfaces {
+		if iface.Namespace == namespace {
+			add(iface.Name)
+		}
+	}
+	for _, p := range t.Ports {
+		// The end that stays is already listed above as an endpoint; only the
+		// end that arrives needs adding here.
+		if p.PortNamespace == namespace {
+			add(p.Port)
+		}
+	}
+
+	sort.Strings(out)
+	return out
 }
 
 // LANNetwork returns the LAN block the topology serves.
@@ -316,6 +455,14 @@ func (t Topology) Namespaces() []string {
 		if !seen[r.Namespace] {
 			seen[r.Namespace] = true
 			out = append(out, r.Namespace)
+		}
+	}
+	for _, p := range t.Ports {
+		for _, ns := range []string{p.Namespace, p.PortNamespace} {
+			if !seen[ns] {
+				seen[ns] = true
+				out = append(out, ns)
+			}
 		}
 	}
 	sort.Strings(out)

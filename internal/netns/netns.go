@@ -46,12 +46,14 @@
 package netns
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -366,41 +368,83 @@ func (n *Namespace) RouteDel(dest, via, dev string) error {
 	return nil
 }
 
-// AddVeth creates a veth pair inside the namespace and moves the peer end
-// into another namespace.
+// CreateVeth creates a veth pair inside the namespace. Both ends stay here.
 //
-// Both halves are created inside this namespace, so nothing appears on the
-// host. The peer keeps its own name, which is why the returned value is the
-// name actually present in this namespace — the caller's name is only
-// meaningful for the link that stayed here.
+// # Which end to create here
 //
-// The link in this namespace keeps the name given. The peer is renamed by the
-// caller in its own namespace, because a veth peer can be given a different
-// name once it is there.
-func (n *Namespace) AddVeth(name, peer, peerNamespace string) error {
-	if err := checkToken("interface", name); err != nil {
+// Create the pair in the namespace that will KEEP one of its ends under the
+// name it is going to be addressed by, and move only the far end out. The
+// alternative — create both ends here and move one away — makes the departing
+// name live here for the microseconds between creation and the move, and if
+// that transient name matches anything already in this namespace the kernel
+// refuses the pair with RTNETLINK "File exists" before anything has been
+// diagnosed.
+//
+// That failure is particularly nasty because it depends on ordering rather than
+// on state: the same code succeeds or fails depending on whether the clashing
+// interface was created first. Creating the pair where the name belongs makes
+// the collision impossible rather than merely unlikely.
+func (n *Namespace) CreateVeth(local, peer string) error {
+	if err := checkToken("interface", local); err != nil {
 		return err
 	}
 	if err := checkToken("interface", peer); err != nil {
 		return err
 	}
-	if peerNamespace == "" {
-		return fmt.Errorf("veth peer must be moved to a namespace")
-	}
-	if err := checkToken("namespace", peerNamespace); err != nil {
-		return err
-	}
-
-	if _, err := n.Run("ip", "link", "add", name, "type", "veth", "peer", "name", peer); err != nil {
-		return fmt.Errorf("creating veth pair %s/%s: %w", name, peer, err)
-	}
-	if _, err := n.Run("ip", "link", "set", peer, "netns", peerNamespace); err != nil {
-		// The pair is half-built and unusable. Remove it so the failure does
-		// not leave a link that shadows the name a later attempt would use.
-		_, _ = n.Run("ip", "link", "del", name)
-		return fmt.Errorf("moving veth peer %s into %s: %w", peer, peerNamespace, err)
+	if _, err := n.Run("ip", "link", "add", local, "type", "veth", "peer", "name", peer); err != nil {
+		return fmt.Errorf("creating veth pair %s/%s: %w", local, peer, err)
 	}
 	return nil
+}
+
+// MoveLinkTo moves an interface into another named namespace.
+//
+// The link keeps its name on arrival, so the caller is responsible for the name
+// being free in the destination. Executing this from inside a third namespace is
+// fine: `ip link set … netns <name>` resolves <name> through the shared
+// namespace store and passes the descriptor to the kernel.
+func (n *Namespace) MoveLinkTo(iface, namespace string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	if err := checkToken("namespace", namespace); err != nil {
+		return err
+	}
+	if _, err := n.Run("ip", "link", "set", iface, "netns", namespace); err != nil {
+		// The pair is half-connected and unreachable. Remove what stayed here
+		// so the failure does not leave a link shadowing the name the next
+		// attempt would use.
+		_, _ = n.Run("ip", "link", "del", iface)
+		return fmt.Errorf("moving %s into namespace %s: %w", iface, namespace, err)
+	}
+	return nil
+}
+
+// LinkNames lists the kernel interface names present in the namespace.
+//
+// It exists so a topology can be checked against what it intended to build,
+// rather than against what it believes it built. A harness that only asserts on
+// the interfaces it addressed cannot see an interface it did not expect — which
+// is exactly the shape of damage a name collision does.
+func (n *Namespace) LinkNames() ([]string, error) {
+	out, err := n.Run("ip", "-j", "link", "show")
+	if err != nil {
+		return nil, fmt.Errorf("listing links in %s: %w", n.Name, err)
+	}
+
+	var links []struct {
+		Ifname string `json:"ifname"`
+	}
+	if err := json.Unmarshal([]byte(out), &links); err != nil {
+		return nil, fmt.Errorf("parsing links in %s: %w", n.Name, err)
+	}
+
+	names := make([]string, 0, len(links))
+	for _, l := range links {
+		names = append(names, l.Ifname)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // LoopbackUp brings the namespace's loopback up, which it needs before any

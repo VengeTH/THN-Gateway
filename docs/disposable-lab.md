@@ -181,6 +181,31 @@ connected segment but had no route at all to `10.77.0.0/24`, so the WAN→LAN
 connection would be impossible for reasons that have nothing to do with the
 firewall, and the isolation test would prove nothing.
 
+Each veth pair is **created in the namespace that keeps one of its ends**, and
+only the gateway-side port is moved into the gateway:
+
+```
+in thn-m62-wan:     ip link add thnwan0 type veth peer name vwan0
+in thn-m62-wan:     ip link set vwan0 netns thn-m62-gateway
+in thn-m62-gateway: ip link set vwan0 master thnwan0
+```
+
+Creating both ends in the gateway and moving one away — the obvious reading of
+"build the topology in the gateway" — makes the departing peer name a live
+interface there for the microseconds between creation and the move. That name is
+the same one the gateway's bridge already holds, and the kernel refuses the pair
+with an error naming neither of the two interfaces involved:
+
+```
+ip netns exec thn-m62-gateway ip link add vwan0 type veth peer name thnwan0
+RTNETLINK answers: File exists
+```
+
+This was the first real M6.3 live failure. `Topology.Validate` now refuses any
+topology in which one namespace would hold the same interface name twice, and
+the harness asserts after building that each namespace holds exactly the set of
+links the topology declared — no more, no fewer.
+
 Destroyed, after every test, including after a failure:
 
 - every helper process, via a stop file the helper polls
@@ -500,10 +525,10 @@ passes.
 
 ### Live suite status
 
-**The live suite has not yet been executed.** The code compiles for Linux, vets
-cleanly for Linux, and the non-privileged suite passes on every platform — but
-no run on a real Linux kernel has happened yet, so no claim in this document is
-backed by an observed packet.
+The suite has started on Linux and failed at the first topology-building step.
+That failure is fixed; **the fix has not been re-run.** No live test has yet
+been observed passing, so no claim in this document is backed by a completed
+end-to-end run.
 
 Treat the first run as an experiment. If a test fails, the failure output is the
 input to the next change; nothing in this repository should be adjusted to make

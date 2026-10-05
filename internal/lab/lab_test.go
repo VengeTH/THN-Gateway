@@ -7,6 +7,8 @@ package lab
 
 import (
 	"net/netip"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -63,6 +65,149 @@ func TestCanonicalTopologyAddressing(t *testing.T) {
 	if gatewayRoute.Device != wan.Name {
 		t.Errorf("gateway default route leaves via %q, want the WAN interface %q",
 			gatewayRoute.Device, wan.Name)
+	}
+}
+
+// TestNoNamespaceHoldsOneInterfaceNameTwice is the regression test for the
+// first real M6.3 live failure.
+//
+// The lab used to create each veth pair inside the gateway and move the peer
+// out, so the peer name was a live interface in the gateway for the microseconds
+// between creation and the move. That name was the same one the gateway's
+// bridge already held, and the kernel refused the pair with:
+//
+//	RTNETLINK answers: File exists
+//
+// — an error naming neither of the two interfaces involved. This asserts the
+// property that makes it impossible: within one namespace, one kernel
+// interface name, one owner.
+func TestNoNamespaceHoldsOneInterfaceNameTwice(t *testing.T) {
+	// The declared topology must satisfy it.
+	if err := Canonical().Validate(); err != nil {
+		t.Fatalf("canonical topology violates name uniqueness: %v", err)
+	}
+
+	// And the check must actually reject a violation, rather than passing
+	// everything it is handed.
+	cases := []struct {
+		name    string
+		mutate  func(*Topology)
+		wantSub string
+	}{
+		{
+			name: "a veth port takes a bridge's name in the gateway",
+			mutate: func(tp *Topology) {
+				tp.Ports[0].Port = GatewayWANInterface
+			},
+			wantSub: "which interface thnwan0 already holds",
+		},
+		{
+			name: "two interfaces share a name in one namespace",
+			mutate: func(tp *Topology) {
+				tp.Interfaces[0].Name = GatewayLANInterface
+			},
+			wantSub: "already holds",
+		},
+		{
+			name: "a veth end is not a declared interface",
+			mutate: func(tp *Topology) {
+				tp.Ports[0].End = "thn-nosuch0"
+			},
+			wantSub: "not a declared interface",
+		},
+		{
+			name: "a port is enslaved to something undeclared",
+			mutate: func(tp *Topology) {
+				tp.Ports[0].Master = "thn-nosuch0"
+			},
+			wantSub: "does not declare",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			top := Canonical()
+			c.mutate(&top)
+
+			err := top.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted an invalid topology: %+v", top.Interfaces)
+			}
+			if !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("error = %q, want it to mention %q", err, c.wantSub)
+			}
+		})
+	}
+}
+
+// TestVethPairsAreCreatedWhereTheirNameBelongs pins the ordering that fixes the
+// collision, in terms the builder relies on.
+//
+// A peer name is a real interface from the moment the pair exists until it is
+// moved away. So the pair must be created in the namespace that KEEPS one of
+// its ends under its final name, and only the far end must be moved. Asserted
+// here because the live suite discovered this by failing, and because the
+// alternative formulation looks equally reasonable until it does not.
+func TestVethPairsAreCreatedWhereTheirNameBelongs(t *testing.T) {
+	top := Canonical()
+
+	namespaces := map[string]map[string]string{} // namespace -> name -> owner
+	for _, iface := range top.Interfaces {
+		if namespaces[iface.Namespace] == nil {
+			namespaces[iface.Namespace] = map[string]string{}
+		}
+		namespaces[iface.Namespace][iface.Name] = "interface"
+	}
+
+	for _, p := range top.Ports {
+		// The end that stays must already be a declared interface here, so
+		// creating the pair in this namespace cannot clobber it.
+		if _, ok := namespaces[p.Namespace][p.End]; !ok {
+			t.Errorf("port %s is created in %s, where %s is not declared; "+
+				"it would be a new name in a namespace that may already have one",
+				p.Port, p.Namespace, p.End)
+		}
+
+		// And the end that departs must be arriving at a name that is not
+		// already taken there.
+		if owner, taken := namespaces[p.PortNamespace][p.Port]; taken {
+			t.Errorf("port %s arrives in %s where %s is already held by a %s; "+
+				"RTNETLINK would answer File exists", p.Port, p.PortNamespace, p.Port, owner)
+		}
+		if p.PortNamespace == p.Namespace {
+			t.Errorf("port %s is created and arrives in the same namespace %s, "+
+				"so the transient name cannot be avoided by this layout", p.Port, p.Namespace)
+		}
+		if namespaces[p.PortNamespace] == nil {
+			namespaces[p.PortNamespace] = map[string]string{}
+		}
+		namespaces[p.PortNamespace][p.Port] = "veth port"
+	}
+}
+
+// TestLinkNamesIsExactlyWhatTheKernelMustHold checks the expectation the live
+// harness asserts after building.
+//
+// A builder that only verifies the interfaces it addressed cannot see an
+// interface it did not ask for — which is what a name collision produces — so
+// the expected set is derived here and compared as a whole.
+func TestLinkNamesIsExactlyWhatTheKernelMustHold(t *testing.T) {
+	top := Canonical()
+
+	cases := map[string][]string{
+		// Loopback is the kernel's, not the topology's; the harness adds it
+		// to the expectation itself.
+		GatewayNamespace: {GatewayLANInterface, GatewayWANInterface,
+			GatewayLANPort, GatewayWANPort, UnmanagedInterface},
+		ClientNamespace: {ClientLANInterface},
+		TargetNamespace: {TargetWANInterface},
+	}
+
+	for ns, want := range cases {
+		sort.Strings(want)
+		if got := top.LinkNames(ns); !slices.Equal(got, want) {
+			t.Errorf("LinkNames(%s) = %v, want %v", ns, got, want)
+		}
 	}
 }
 

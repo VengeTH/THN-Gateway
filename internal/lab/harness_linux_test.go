@@ -44,6 +44,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -330,55 +332,115 @@ func relaxPathFiltering(ns *netns.Namespace) {
 	}
 }
 
-// buildTopology wires the veth pairs, addresses and routes.
+// buildTopology wires the veth pairs, bridges, addresses and routes.
 //
-// The gateway's LAN is deliberately left DOWN and unaddressed. That is the
-// work THN is about to do, and a lab that arrived already configured would
+// # Why the veth pairs are created in the endpoint namespaces
+//
+// Each pair is created in the namespace that KEEPS its far end, and only the
+// gateway-side port is moved out. Creating both ends in the gateway — the
+// obvious reading of "build the topology in the gateway" — makes the departing
+// peer name a live interface in the gateway for the microseconds between
+// creation and the move, and that name is the same one the gateway's bridge
+// already holds. The kernel refuses the pair before anything else has run:
+//
+//	ip netns exec thn-m62-gateway ip link add vwan0 type veth peer name thnwan0
+//	RTNETLINK answers: File exists
+//
+// which names neither of the two interfaces involved. Creating the pair where
+// the name belongs removes the transient name entirely, so there is nothing to
+// collide.
+//
+// The gateway's LAN bridge is deliberately left DOWN and unaddressed: that is
+// the work THN is about to do, and a lab that arrived already configured would
 // prove nothing about whether the transaction configured it.
 func (h *harness) buildTopology() {
 	h.t.Helper()
 
 	gw := h.ns[GatewayNamespace]
 
-	// The bridges come first: a veth port cannot be enslaved to a bridge that
-	// does not exist yet. THN never sees the ports — it resolves its roles to
-	// the bridges, which is what a gateway role is assigned to on real hardware
-	// and what makes them assignable, since THN declines to offer a raw veth as
-	// a gateway port.
-	h.must(gw.LinkAdd(GatewayWANInterface, "bridge"))
-	h.must(gw.LinkAdd(GatewayLANInterface, "bridge"))
+	// The gateway's own interfaces first. THN resolves its roles to these
+	// bridges, never to the veth ports below: a port cannot be enslaved to a
+	// bridge that does not exist yet, and a bridge is what a gateway role is
+	// assigned to on real hardware.
+	for _, iface := range h.top.Interfaces {
+		if iface.Namespace != GatewayNamespace {
+			continue
+		}
+		if iface.Name == UnmanagedInterface {
+			h.must(gw.LinkAdd(iface.Name, "dummy"))
+			h.must(gw.AddrAdd(iface.Name, iface.Address))
+			h.must(gw.LinkUp(iface.Name))
+			continue
+		}
+		h.must(gw.LinkAdd(iface.Name, "bridge"))
+	}
 
-	h.must(gw.AddVeth("vwan0", "thnwan0", TargetNamespace))
-	h.must(gw.Enslave("vwan0", GatewayWANInterface))
-	h.must(gw.AddVeth("vlan0", "thnlan0", ClientNamespace))
-	h.must(gw.Enslave("vlan0", GatewayLANInterface))
+	// The wiring, exactly as declared.
+	for _, p := range h.top.Ports {
+		h.must(h.ns[p.Namespace].CreateVeth(p.End, p.Port))
+		h.must(h.ns[p.Namespace].MoveLinkTo(p.Port, p.PortNamespace))
+		h.must(gw.Enslave(p.Port, p.Master))
+		h.must(gw.LinkUp(p.Port))
+		h.must(h.ns[p.Namespace].LinkUp(p.End))
+	}
 
-	h.must(gw.LinkUp(GatewayWANInterface))
-	h.must(gw.LinkUp("vwan0"))
-	h.must(gw.AddrAdd(GatewayWANInterface, GatewayWANAddress))
-
-	// An unmanaged interface: THN must never touch it. A dummy is also not
-	// assignable, so it cannot be picked up by a role by accident.
-	h.must(gw.LinkAdd("thnmgmt0", "dummy"))
-	h.must(gw.AddrAdd("thnmgmt0", "10.77.99.1/24"))
-	h.must(gw.LinkUp("thnmgmt0"))
-
-	// Peer endpoints.
-	target := h.ns[TargetNamespace]
-	h.must(target.AddrAdd(TargetWANInterface, TargetAddress))
-	h.must(target.LinkUp(TargetWANInterface))
-
+	// Only the uplink is up before THN runs.
+	//
 	// The LAN bridge is deliberately left DOWN and unaddressed: that is the
-	// work THN is about to do, and a lab that arrived already configured
-	// would prove nothing about whether the transaction configured it.
-	client := h.ns[ClientNamespace]
-	h.must(client.AddrAdd(ClientLANInterface, ClientAddress))
-	h.must(client.LinkUp(ClientLANInterface))
+	// work THN is about to do, and a lab that arrived already configured would
+	// prove nothing about whether the transaction configured it. Its port is
+	// up so that bringing the bridge up later produces carrier, but the bridge
+	// itself is never touched here.
+	h.must(gw.LinkUp(GatewayWANInterface))
+
+	// Addressing. THN's own addresses only; the endpoint addresses are the
+	// veth ends created above.
+	for _, iface := range h.top.Interfaces {
+		switch iface.Namespace {
+		case GatewayNamespace:
+			if iface.Address != "" {
+				h.must(gw.AddrAdd(iface.Name, iface.Address))
+			}
+		case TargetNamespace, ClientNamespace:
+			h.must(h.ns[iface.Namespace].AddrAdd(iface.Name, iface.Address))
+		}
+	}
 
 	// Routes. The gateway already has its upstream, because a gateway does not
 	// discover one; the operator or the lab does.
 	for _, r := range h.top.Routes {
 		h.must(h.ns[r.Namespace].RouteAdd(r.Destination, r.Via, r.Device))
+	}
+
+	h.assertTopologyMatches()
+}
+
+// assertTopologyMatches checks the kernel holds exactly the interfaces the
+// topology declared.
+//
+// A builder that only asserts on what it addressed cannot see an interface it
+// did not expect, and a name collision is precisely an interface appearing that
+// was not asked for. Comparing the whole set turns that class of mistake into a
+// readable failure at build time rather than a mysterious "File exists" or a
+// packet that never arrives.
+func (h *harness) assertTopologyMatches() {
+	h.t.Helper()
+
+	for _, name := range h.top.Namespaces() {
+		got, err := h.ns[name].LinkNames()
+		if err != nil {
+			h.t.Fatalf("listing links in %s: %v", name, err)
+		}
+
+		want := append([]string{"lo"}, h.top.LinkNames(name)...)
+		sort.Strings(want)
+
+		if !slices.Equal(got, want) {
+			h.t.Fatalf("namespace %s holds %v, want exactly %v.\n"+
+				"An interface the topology did not declare is how a name collision shows up, "+
+				"and one that is missing means a link was never created.",
+				name, got, want)
+		}
 	}
 }
 
