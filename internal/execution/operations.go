@@ -487,6 +487,36 @@ func lanSubnet(p *planner.Plan, obs diff.Observed) string {
 	return ""
 }
 
+// obsoleteAddresses returns the addresses in a `lan-address-remove` step that
+// are genuinely being removed.
+//
+// The step's Current field is the interface's WHOLE observed address set and
+// Desired is the whole configured set, because that is what an operator needs
+// to read in `thn plan`. Neither is the list of addresses to delete.
+//
+// Deleting everything in Current would delete the very address the desired
+// state asks for — the gateway would take its own LAN address off the LAN and
+// stop routing — and would roll back to it afterwards, leaving the gateway
+// flapping. Only the difference is removable.
+func obsoleteAddresses(current, desired string) []string {
+	keep := make(map[string]bool)
+	for _, a := range strings.Split(desired, ",") {
+		if a = strings.TrimSpace(a); a != "" && a != "(none)" {
+			keep[a] = true
+		}
+	}
+
+	var out []string
+	for _, a := range strings.Split(current, ",") {
+		a = strings.TrimSpace(a)
+		if a == "" || a == "(none)" || keep[a] {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // PlanToOperations converts actionable steps in a planner.Plan into structured Operations.
 func PlanToOperations(p *planner.Plan, obs diff.Observed) ([]Operation, error) {
 	var ops []Operation
@@ -527,11 +557,8 @@ func PlanToOperations(p *planner.Plan, obs diff.Observed) ([]Operation, error) {
 			if iface == "" {
 				iface = step.Target
 			}
-			for _, addr := range strings.Split(step.Current, ",") {
-				addr = strings.TrimSpace(addr)
-				if addr != "" && addr != "(none)" {
-					ops = append(ops, OpAddressDelete{Interface: iface, CIDR: addr})
-				}
+			for _, addr := range obsoleteAddresses(step.Current, step.Desired) {
+				ops = append(ops, OpAddressDelete{Interface: iface, CIDR: addr})
 			}
 
 		case "default-route-add":

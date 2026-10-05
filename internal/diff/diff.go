@@ -32,6 +32,7 @@ package diff
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 )
@@ -389,7 +390,7 @@ func (d *differ) compareAddresses(role, iface string, want, obs []string) {
 		}
 	}
 	for _, a := range obs {
-		if !wantSet[a] {
+		if !wantSet[a] && !isKernelAssigned(a) {
 			extra = append(extra, a)
 		}
 	}
@@ -732,6 +733,46 @@ func boolLabel(b bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// isKernelAssigned reports whether an address is one the kernel gives an
+// interface by itself, rather than one an operator configured.
+//
+// # Why this is decided here and not in the parser
+//
+// An IPv6 link-local address (`fe80::/64`) is synthesised from the interface's
+// MAC the moment the link comes up, on every interface, forever. It is not
+// drift: no configuration lists it, and deleting it changes nothing except
+// the next packet's source address, because the kernel puts it straight back.
+//
+// Comparing a desired address set against a raw observation therefore reports
+// permanent, self-healing "extra" addresses on any interface that is up. That
+// is not a cosmetic misreport — `lan-address-remove` is RiskHigh, and the
+// operation it produces would delete an address the operator never asked to
+// have removed.
+//
+// # Why the observation still carries them
+//
+// Filtering here rather than in `network.ParseAddresses` keeps `thn discover`
+// honest. An operator diagnosing a link wants to see every address the kernel
+// holds, link-local included. What THN must not do is treat a kernel-assigned
+// address as configuration drift. Discovery reports; the diff decides.
+//
+// # What this does NOT excuse
+//
+// A genuinely unconfigured IPv4 address is still drift. `169.254.0.0/16` is
+// link-local too, but it is assigned by a peer or by a fallback mechanism and
+// removing it is a real decision, so it is deliberately excluded from this
+// check and keeps producing `lan-address-remove`.
+func isKernelAssigned(addr string) bool {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(addr))
+	if err != nil {
+		// An address that cannot be parsed cannot be reasoned about. Treating
+		// it as drift is the conservative choice: it is still reported, and
+		// the reason string names it so the operator can judge it.
+		return false
+	}
+	return prefix.Addr().Is6() && prefix.Addr().IsLinkLocalUnicast()
 }
 
 // toSet converts a slice into a lookup set.

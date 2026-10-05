@@ -36,10 +36,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/venth/thn-gateway/internal/execution"
+	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
 )
 
@@ -195,9 +197,26 @@ func TestWANToLANBlocked(t *testing.T) {
 			lanEndpoint, before.ObservedSource)
 	}
 
+	// The kernel state the second plan is about to be derived from, recorded
+	// before anything re-observes it.
+	//
+	// This is here because the failure this test had was silent: the plan came
+	// back carrying an address removal nobody asked for, and nothing in the
+	// log said what the observation actually contained. A bridge that is up
+	// carries an IPv6 link-local address the kernel assigned by itself, and
+	// that address is the difference between a two-step plan and a
+	// converged one.
+	h.logBootstrapState(t)
+
 	// Stage two is the full plan, re-derived from the live state, which now
 	// has exactly one thing left to do: install THN's firewall.
-	_, _, _, plan := h.gatewayPlan(context.Background())
+	obs, des, _, plan := h.gatewayPlan(context.Background())
+	t.Logf("after bootstrap, re-observed:\n"+
+		"  observed LAN addresses: %v\n"+
+		"  desired LAN addresses:  %v\n"+
+		"  plan steps:             %s",
+		obs.LANAddresses, des.LAN.Addresses, strings.Join(stepIDs(plan), ", "))
+
 	plan = withWANIsolationCheck(plan)
 
 	res, err := h.executor().ExecutePlan(context.Background(), plan,
@@ -594,6 +613,49 @@ func (h *harness) captureState(t *testing.T) *execution.StateSnapshot {
 		t.Fatalf("capturing live gateway state: %v", err)
 	}
 	return snap
+}
+
+// logBootstrapState records what the kernel actually holds after the dataplane
+// bootstrap, read two ways on purpose.
+//
+// The raw `ip -j addr show` output and the addresses THN parsed out of it are
+// both printed, because the question this has to answer is not "is the address
+// there" but "does what THN parsed say the same thing the kernel said". A
+// parser that reshapes an address is indistinguishable from a misconfigured
+// one once the plan is built.
+func (h *harness) logBootstrapState(t *testing.T) {
+	t.Helper()
+
+	raw, _, err := h.runners[GatewayNamespace].Run(context.Background(),
+		"ip", "-j", "addr", "show", GatewayLANInterface)
+	if err != nil {
+		t.Fatalf("reading %s in the lab gateway: %v", GatewayLANInterface, err)
+	}
+
+	parsed, err := network.ParseAddresses([]byte(raw))
+	if err != nil {
+		t.Fatalf("parsing addresses of %s: %v", GatewayLANInterface, err)
+	}
+
+	observed := make([]string, 0, len(parsed))
+	for _, a := range parsed {
+		observed = append(observed, a.CIDR)
+	}
+
+	t.Logf("after bootstrap, %s:\n"+
+		"  ip -j addr show %s: %s\n"+
+		"  parsed by network.ParseAddresses: %v\n"+
+		"  link up: %v\n"+
+		"  %s: %v",
+		GatewayLANInterface, GatewayLANInterface, strings.TrimSpace(raw),
+		observed, h.gatewayLinkUp(t, GatewayLANInterface),
+		IPForwardKey, h.gatewaySysctl(t, IPForwardKey))
+
+	if want := []string{GatewayAddress}; !slices.Equal(observed, want) {
+		t.Logf("NOTE: %s carries %v, not just %v. Any address here that no configuration "+
+			"lists is a candidate for a spurious lan-address-remove in the second plan.",
+			GatewayLANInterface, observed, want)
+	}
 }
 
 // gatewaySysctl reads a tunable from the gateway namespace.

@@ -113,6 +113,117 @@ func TestStructuredOperationsRollbackGeneration(t *testing.T) {
 	}
 }
 
+// TestAddressRemoveDeletesOnlyObsoleteAddresses guards the execution path of
+// `lan-address-remove`.
+//
+// The step's Current and Desired fields are whole SETS, for readability: an
+// operator reading `thn plan` needs to see the interface's full observed
+// addressing beside the full configured addressing. Acting on Current as though
+// it were the deletion list makes the gateway remove the address the desired
+// state explicitly asks for — taking its own LAN address off the LAN — and
+// then putting it back during rollback.
+func TestAddressRemoveDeletesOnlyObsoleteAddresses(t *testing.T) {
+	const keep = "10.77.0.1/24"
+
+	obs := diff.Observed{
+		Supported:           true,
+		LANPresent:          true,
+		LANName:             "eth1",
+		WANPresent:          true,
+		WANName:             "eth0",
+		LANUp:               true,
+		WANUp:               true,
+		IPv4Forwarding:      true,
+		IPv4ForwardingKnown: true,
+		LANAddresses:        []string{keep, "192.168.99.1/24"},
+	}
+
+	p := planner.Build(diff.Compare(obs, diff.Desired{
+		WANName:      "eth0",
+		WANPresent:   true,
+		WANUp:        true,
+		LANName:      "eth1",
+		LANPresent:   true,
+		LANUp:        true,
+		LANAddresses: []string{keep},
+	}), planner.Options{Generation: 1, Observed: obs})
+
+	var removes []string
+	for _, op := range mustOps(t, p, obs) {
+		if d, ok := op.(OpAddressDelete); ok {
+			removes = append(removes, d.CIDR)
+		}
+	}
+
+	if len(removes) != 1 || removes[0] != "192.168.99.1/24" {
+		t.Fatalf("removed addresses = %v, want exactly [192.168.99.1/24]; the configured "+
+			"address %s must never be deleted by an obsolete-address step", removes, keep)
+	}
+}
+
+// TestAddressRemoveDeletesKernelLinkLocal checks the case the disposable lab
+// hit: the interface carries the configured address plus the IPv6 link-local
+// the kernel assigns to any link it brings up.
+//
+// The link-local is not in the desired state, so the diff reports it as extra.
+// It is the only address that may be deleted, and deleting it is at worst a
+// no-op the kernel immediately reverses.
+func TestAddressRemoveDeletesKernelLinkLocal(t *testing.T) {
+	const (
+		keep      = "10.77.0.1/24"
+		linkLocal = "fe80::8a3c:2200:0:2/64"
+	)
+
+	obs := diff.Observed{
+		Supported:           true,
+		LANPresent:          true,
+		LANName:             "eth1",
+		WANPresent:          true,
+		WANName:             "eth0",
+		LANUp:               true,
+		WANUp:               true,
+		IPv4Forwarding:      true,
+		IPv4ForwardingKnown: true,
+		LANAddresses:        []string{keep, linkLocal},
+	}
+
+	p := planner.Build(diff.Compare(obs, diff.Desired{
+		WANName:      "eth0",
+		WANPresent:   true,
+		WANUp:        true,
+		LANName:      "eth1",
+		LANPresent:   true,
+		LANUp:        true,
+		LANAddresses: []string{keep},
+	}), planner.Options{Generation: 1, Observed: obs})
+
+	var removes []string
+	for _, op := range mustOps(t, p, obs) {
+		if d, ok := op.(OpAddressDelete); ok {
+			removes = append(removes, d.CIDR)
+		}
+	}
+
+	for _, r := range removes {
+		if r == keep {
+			t.Errorf("the operation would delete the configured LAN address %s; "+
+				"Current is a set, not a deletion list", keep)
+		}
+	}
+	if len(removes) > 1 {
+		t.Errorf("removed addresses = %v, want at most the one extra address", removes)
+	}
+}
+
+func mustOps(t *testing.T, p *planner.Plan, obs diff.Observed) []Operation {
+	t.Helper()
+	ops, err := PlanToOperations(p, obs)
+	if err != nil {
+		t.Fatalf("PlanToOperations failed: %v", err)
+	}
+	return ops
+}
+
 func TestPlanToOperationsConversion(t *testing.T) {
 	obs := diff.Observed{
 		Supported:           true,
