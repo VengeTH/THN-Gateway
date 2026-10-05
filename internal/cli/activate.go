@@ -201,3 +201,90 @@ func stageList(stages []activation.Stage) string {
 
 // hostPlatform names the platform, for the deployment message.
 func hostPlatform() string { return runtime.GOOS }
+
+// runActivation implements `thn activation [status|verify]`.
+func runActivation(env *Env, args []string) ExitCode {
+	sub := "status"
+	var rest []string
+	if len(args) > 0 {
+		sub = args[0]
+		rest = args[1:]
+	}
+
+	switch sub {
+	case "status":
+		return runActivationStatus(env, rest)
+	case "verify":
+		return runActivationVerify(env, rest)
+	default:
+		env.errorf("thn activation: unknown subcommand %q; use status or verify\n", sub)
+		return ExitUsage
+	}
+}
+
+func runActivationStatus(env *Env, args []string) ExitCode {
+	m := activation.NewMachine(activation.StateDevelopment)
+	report := m.Report()
+
+	if env.IsJSON {
+		if err := env.printJSON(report); err != nil {
+			env.errorf("thn activation status: %v\n", err)
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	env.printf("Activation Status\n")
+	env.printf("  State:               %s\n", report.State)
+	env.printf("  Can Apply:           %t\n", report.CanApply)
+	env.printf("  Bound Applier:       %s\n", report.Applier)
+	env.printf("  Implemented Stages:  %s\n", stageList(report.ImplementedStages))
+	env.printf("  Unsupported Stages:  %s\n", stageList(report.UnsupportedStages))
+	env.printf("  Presence Confirmed:  %t\n", report.PresenceConfirmed)
+	return ExitOK
+}
+
+func runActivationVerify(env *Env, args []string) ExitCode {
+	path := env.resolveConfigPath("")
+	cfg, cfgErr := loadConfig(env, path)
+
+	var in activation.GateInput
+	if cfgErr != nil {
+		in.ConfigValid = false
+		in.ConfigProblem = cfgErr.Error()
+	} else {
+		in.ConfigValid = true
+		in.WAN = activation.RoleGate{Role: "wan", Satisfied: cfg.Network.WAN != "", Interface: cfg.Network.WAN}
+		in.LAN = activation.RoleGate{Role: "lan", Satisfied: cfg.Network.LAN != "", Interface: cfg.Network.LAN}
+	}
+
+	res := activation.Evaluate(in)
+
+	if env.IsJSON {
+		if err := env.printJSON(res); err != nil {
+			env.errorf("thn activation verify: %v\n", err)
+			return ExitProblems
+		}
+		if !res.AllSatisfied {
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	env.printf("Activation Gate Verification\n")
+	for _, g := range res.Gates {
+		mark := "✓"
+		if !g.Satisfied {
+			mark = "✗"
+		}
+		env.printf("  [%s] %-22s %s\n", mark, g.Name, g.Description)
+		if !g.Satisfied && g.Reason != "" {
+			env.printf("      Reason: %s\n", g.Reason)
+		}
+	}
+	if !res.AllSatisfied {
+		env.printf("\nActivation is BLOCKED by %d unsatisfied gate(s).\n", len(res.Blocking))
+		return ExitProblems
+	}
+	return ExitOK
+}

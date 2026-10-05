@@ -741,8 +741,8 @@ func rollbackFor(c diff.Change) *RollbackInfo {
 			rb.RestoreCommands = []string{"sysctl -w net.ipv4.ip_forward=1"}
 		}
 	case "firewall-absent", "firewall-empty":
-		rb.RestoreCommands = []string{"nft flush ruleset"}
-		rb.Reversibility = "partially-reversible"
+		rb.RestoreCommands = []string{"nft delete table inet thn"}
+		rb.Reversibility = "reversible"
 	case "qos-absent":
 		device := qosDevice(c.Desired)
 		if device != "" {

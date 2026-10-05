@@ -65,6 +65,12 @@ var commands = map[string]Command{
 		Summary: "apply the configuration (not available in this build)",
 		Run:     runActivate,
 	},
+	"activation": {
+		Name:    "activation",
+		Tier:    TierPure,
+		Summary: "report activation status or verify safety gates (status, verify)",
+		Run:     runActivation,
+	},
 	"schema": {
 		Name:    "schema",
 		Tier:    TierPure,
