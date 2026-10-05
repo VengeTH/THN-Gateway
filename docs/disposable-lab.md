@@ -525,10 +525,18 @@ passes.
 
 ### Live suite status
 
-The suite has started on Linux and failed at the first topology-building step.
-That failure is fixed; **the fix has not been re-run.** No live test has yet
-been observed passing, so no claim in this document is backed by a completed
-end-to-end run.
+The suite has started on Linux twice. Each run has failed during lab
+construction, once on a veth name collision and once on a duplicated management
+address assignment. Both are fixed; **neither fix has been re-run.** No live
+test has yet been observed passing, so no claim in this document is backed by a
+completed end-to-end run.
+
+Both failures were the same class of defect: one fact with two owners. The
+topology now declares each fact — link kind, baseline link state, baseline
+address — exactly once, and the harness applies each exactly once. `Validate`
+refuses a topology in which two declarations claim one interface name or one
+address, and the harness asserts after building that each namespace holds
+exactly the links the topology declared.
 
 Treat the first run as an experiment. If a test fails, the failure output is the
 input to the next change; nothing in this repository should be adjusted to make

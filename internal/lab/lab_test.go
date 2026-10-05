@@ -211,6 +211,106 @@ func TestLinkNamesIsExactlyWhatTheKernelMustHold(t *testing.T) {
 	}
 }
 
+// TestEachAddressHasExactlyOneOwner is the regression test for the second real
+// M6.3 live failure.
+//
+// The gateway setup path applied the unmanaged interface's address twice: once
+// where it was created, and again where every gateway interface was addressed.
+// The kernel refused the second application with `ipv4: Address already
+// assigned`, naming neither interface nor address.
+//
+// The fix was to give the topology ownership of each fact, so a fact is applied
+// once. This asserts the property that fix rests on, and — more usefully —
+// asserts that Validate would reject a topology that declared a second owner,
+// so the duplicate cannot be reintroduced in the data.
+func TestEachAddressHasExactlyOneOwner(t *testing.T) {
+	top := Canonical()
+	if err := top.Validate(); err != nil {
+		t.Fatalf("canonical topology is invalid: %v", err)
+	}
+
+	// Exactly one declaration owns the management address, and it is the
+	// unmanaged interface that THN must never touch.
+	owners := 0
+	for _, iface := range top.Interfaces {
+		if iface.Address == UnmanagedAddress {
+			owners++
+			if iface.Name != UnmanagedInterface {
+				t.Errorf("%s is owned by %s, want %s", UnmanagedAddress, iface.Name, UnmanagedInterface)
+			}
+			if iface.Namespace != GatewayNamespace {
+				t.Errorf("%s is declared in %s, want the gateway namespace %s",
+					UnmanagedAddress, iface.Namespace, GatewayNamespace)
+			}
+		}
+	}
+	if owners != 1 {
+		t.Errorf("%s has %d owners in the topology, want exactly 1", UnmanagedAddress, owners)
+	}
+
+	// And a second owner must be rejected rather than merely discouraged.
+	top = Canonical()
+	top.Interfaces = append(top.Interfaces, Interface{
+		Namespace: GatewayNamespace,
+		Name:      "thnsecond0",
+		Address:   UnmanagedAddress,
+		Kind:      "dummy",
+	})
+	err := top.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted two interfaces claiming one address")
+	}
+	if !strings.Contains(err.Error(), "exactly one owner") {
+		t.Errorf("error = %q, want it to name the duplicate ownership", err)
+	}
+}
+
+// TestEveryDeclaredLinkKindIsCreatable keeps link creation driven by data, so
+// the harness never has to branch on an interface name to decide what to build.
+//
+// The name-based branch it replaced is how two setup paths came to own one
+// interface; a kind the harness cannot build is the same kind of drift.
+func TestEveryDeclaredLinkKindIsCreatable(t *testing.T) {
+	supported := map[string]bool{"": true, "bridge": true, "dummy": true}
+
+	for _, iface := range Canonical().Interfaces {
+		if !supported[iface.Kind] {
+			t.Errorf("interface %s declares kind %q, which the harness cannot create", iface.Name, iface.Kind)
+		}
+	}
+}
+
+// TestGatewayLANStartsDownAndUnaddressed pins the baseline THN has to change.
+//
+// If the LAN arrived configured there would be no drift to detect and the
+// transaction would have nothing to prove. This is the fact the harness must
+// not accidentally apply while fixing the duplicate-assignment bug.
+func TestGatewayLANStartsDownAndUnaddressed(t *testing.T) {
+	top := Canonical()
+
+	if _, ok := top.GatewayLAN(); !ok {
+		t.Fatal("canonical topology declares no LAN interface")
+	}
+
+	for _, iface := range top.Interfaces {
+		if iface.Name != GatewayLANInterface || iface.Namespace != GatewayNamespace {
+			continue
+		}
+		if iface.Up {
+			t.Error("the gateway LAN is declared up; it must start down so THN has drift to reconcile")
+		}
+		if iface.Baseline {
+			t.Errorf("the gateway LAN is installed at baseline (%s); it must start unaddressed "+
+				"so that assigning it is THN's work", iface.Address)
+		}
+		if iface.Address != GatewayAddress {
+			t.Errorf("the gateway LAN declares address %q, want the desired %s", iface.Address, GatewayAddress)
+		}
+		return
+	}
+	t.Fatalf("no declaration of %s in %s", GatewayLANInterface, GatewayNamespace)
+}
+
 // TestWANSideHasAReturnPathForTheLAN pins the route the isolation test depends
 // on.
 //

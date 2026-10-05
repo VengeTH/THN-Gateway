@@ -297,6 +297,16 @@ func (n *Namespace) LinkDown(iface string) error {
 }
 
 // AddrAdd assigns a CIDR to an interface inside the namespace.
+//
+// `add`, not `replace`, and deliberately so. Assignment here means "this
+// interface owns this address", stated once and applied once; replacement would
+// make a second application of the same fact succeed silently, which is how a
+// duplicate ownership bug would come to look like intended idempotence.
+//
+// The kernel's own wording for a duplicate is `ipv4: Address already assigned`,
+// which names neither the interface nor the address. Both are restated here so
+// that such a failure is diagnosable from the message alone — it always means
+// two declarations in the topology own the same address.
 func (n *Namespace) AddrAdd(iface, cidr string) error {
 	if err := checkToken("interface", iface); err != nil {
 		return err
@@ -305,7 +315,7 @@ func (n *Namespace) AddrAdd(iface, cidr string) error {
 		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
 	}
 	if _, err := n.Run("ip", "addr", "add", cidr, "dev", iface); err != nil {
-		return fmt.Errorf("assigning %s to %s: %w", cidr, iface, err)
+		return fmt.Errorf("assigning %s to %s in %s: %w (the kernel reports a duplicate here when two declarations own one address)", cidr, iface, n.Name, err)
 	}
 	return nil
 }

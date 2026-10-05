@@ -160,6 +160,36 @@ type Interface struct {
 	// Role is the logical role THN assigns to it: "wan", "lan" or "" for
 	// endpoints THN never manages.
 	Role string
+
+	// Kind is the link type to create, "bridge" or "dummy".
+	//
+	// Empty for an endpoint that is not created from scratch — the veth ends
+	// below, which arrive with their pair rather than being created here.
+	// Declaring it is what lets the harness create links from data instead of
+	// branching on a name, which is how two code paths ended up owning the same
+	// interface.
+	Kind string `json:"kind,omitempty"`
+
+	// Up is the administrative state the interface is left in before THN runs.
+	//
+	// False for the gateway's LAN on purpose: that link starting down and
+	// unaddressed is the work THN is about to do, and a lab that arrived
+	// already configured would prove nothing about whether the transaction
+	// configured it.
+	Up bool `json:"up"`
+
+	// Baseline reports whether the harness installs Address before THN runs.
+	//
+	// It is separate from Up, because a declared address and an applied one
+	// are different claims. The gateway's LAN declares the address THN is
+	// expected to give it — that is the *desired* state the plan converges on —
+	// but the harness must not put it there, or there is no drift for the
+	// transaction to detect.
+	//
+	// Conflating the two is how a generalised "address every declared
+	// interface" loop ends up pre-configuring the one link the test depends on
+	// THN configuring.
+	Baseline bool `json:"baseline"`
 }
 
 // Route is a route present in the topology before THN runs.
@@ -226,11 +256,11 @@ type Topology struct {
 func Canonical() Topology {
 	return Topology{
 		Interfaces: []Interface{
-			{Namespace: GatewayNamespace, Name: GatewayWANInterface, Address: GatewayWANAddress, Role: "wan"},
-			{Namespace: GatewayNamespace, Name: GatewayLANInterface, Address: GatewayAddress, Role: "lan"},
-			{Namespace: GatewayNamespace, Name: UnmanagedInterface, Address: UnmanagedAddress},
-			{Namespace: TargetNamespace, Name: TargetWANInterface, Address: TargetAddress},
-			{Namespace: ClientNamespace, Name: ClientLANInterface, Address: ClientAddress},
+			{Namespace: GatewayNamespace, Name: GatewayWANInterface, Address: GatewayWANAddress, Role: "wan", Kind: "bridge", Up: true, Baseline: true},
+			{Namespace: GatewayNamespace, Name: GatewayLANInterface, Address: GatewayAddress, Role: "lan", Kind: "bridge", Up: false, Baseline: false},
+			{Namespace: GatewayNamespace, Name: UnmanagedInterface, Address: UnmanagedAddress, Kind: "dummy", Up: true, Baseline: true},
+			{Namespace: TargetNamespace, Name: TargetWANInterface, Address: TargetAddress, Up: true, Baseline: true},
+			{Namespace: ClientNamespace, Name: ClientLANInterface, Address: ClientAddress, Up: true, Baseline: true},
 		},
 		Ports: []Port{
 			{
@@ -310,6 +340,12 @@ func (t Topology) Validate() error {
 		if iface.Name == "" {
 			return fmt.Errorf("interface in namespace %s has no name", iface.Namespace)
 		}
+		switch iface.Kind {
+		case "", "bridge", "dummy":
+		default:
+			return fmt.Errorf("interface %s declares link kind %q; only \"bridge\" and \"dummy\" are created by this lab",
+				iface.Name, iface.Kind)
+		}
 		if err := occupy(iface.Namespace, iface.Name, "interface "+iface.Name); err != nil {
 			return err
 		}
@@ -330,10 +366,43 @@ func (t Topology) Validate() error {
 		// A duplicate host address on two links produces the most confusing
 		// possible symptom: ARP answered by whichever link the route happened
 		// to prefer, and behaviour that changes with traffic.
+		//
+		// It is also what the kernel calls `ipv4: Address already assigned`,
+		// which names neither link. The live lab hit exactly that, because one
+		// address had two owners in the setup path rather than one. This check
+		// makes the second owner impossible to declare in the first place.
 		if prev, dup := claimed[prefix.Addr()]; dup {
-			return fmt.Errorf("interfaces %s and %s both claim address %s", prev, iface.Name, prefix.Addr())
+			return fmt.Errorf("interfaces %s and %s both claim address %s; each address has exactly one owner",
+				prev, iface.Name, prefix.Addr())
 		}
 		claimed[prefix.Addr()] = iface.Name
+	}
+
+	for _, iface := range t.Interfaces {
+		if iface.Kind != "" && iface.Baseline && iface.Address == "" {
+			return fmt.Errorf("interface %s is created and installed at baseline but carries no address", iface.Name)
+		}
+	}
+
+	// Every endpoint the live probes originate from or terminate on has to be
+	// reachable at baseline, or a probe cannot distinguish "the firewall
+	// blocked it" from "there was never anything there". That distinction is
+	// what the isolation test rests on.
+	for _, ns := range []string{ClientNamespace, TargetNamespace} {
+		found := false
+		for _, iface := range t.Interfaces {
+			if iface.Namespace != ns {
+				continue
+			}
+			found = true
+			if !iface.Baseline || iface.Address == "" {
+				return fmt.Errorf("endpoint %s in namespace %s is not addressed at baseline; "+
+					"a probe there would fail before THN did anything", iface.Name, ns)
+			}
+		}
+		if !found {
+			return fmt.Errorf("namespace %s declares no endpoint", ns)
+		}
 	}
 
 	for _, p := range t.Ports {

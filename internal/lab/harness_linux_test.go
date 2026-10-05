@@ -358,51 +358,51 @@ func (h *harness) buildTopology() {
 
 	gw := h.ns[GatewayNamespace]
 
-	// The gateway's own interfaces first. THN resolves its roles to these
-	// bridges, never to the veth ports below: a port cannot be enslaved to a
-	// bridge that does not exist yet, and a bridge is what a gateway role is
-	// assigned to on real hardware.
+	// Pass one: create the links the gateway owns.
+	//
+	// Driven entirely by Interface.Kind, so nothing here branches on an
+	// interface's name. That matters: the earlier version special-cased the
+	// unmanaged interface by name to build it *and* address it, while a
+	// second pass addressed every gateway interface again — so one interface
+	// was addressed twice, and the kernel answered:
+	//
+	//	assigning 10.77.99.1/24 to thnmgmt0: ipv4: Address already assigned
+	//
+	// The collision was never about stale state or about `add` versus
+	// `replace`. It was two owners for one fact.
 	for _, iface := range h.top.Interfaces {
-		if iface.Namespace != GatewayNamespace {
+		if iface.Kind == "" {
 			continue
 		}
-		if iface.Name == UnmanagedInterface {
-			h.must(gw.LinkAdd(iface.Name, "dummy"))
-			h.must(gw.AddrAdd(iface.Name, iface.Address))
-			h.must(gw.LinkUp(iface.Name))
-			continue
-		}
-		h.must(gw.LinkAdd(iface.Name, "bridge"))
+		h.must(gw.LinkAdd(iface.Name, iface.Kind))
 	}
 
-	// The wiring, exactly as declared.
+	// Pass two: the wiring, exactly as declared.
 	for _, p := range h.top.Ports {
 		h.must(h.ns[p.Namespace].CreateVeth(p.End, p.Port))
 		h.must(h.ns[p.Namespace].MoveLinkTo(p.Port, p.PortNamespace))
 		h.must(gw.Enslave(p.Port, p.Master))
 		h.must(gw.LinkUp(p.Port))
-		h.must(h.ns[p.Namespace].LinkUp(p.End))
 	}
 
-	// Only the uplink is up before THN runs.
+	// Pass three: the baseline addressing and administrative state, each fact
+	// applied once from its single declaration.
 	//
-	// The LAN bridge is deliberately left DOWN and unaddressed: that is the
-	// work THN is about to do, and a lab that arrived already configured would
-	// prove nothing about whether the transaction configured it. Its port is
-	// up so that bringing the bridge up later produces carrier, but the bridge
-	// itself is never touched here.
-	h.must(gw.LinkUp(GatewayWANInterface))
-
-	// Addressing. THN's own addresses only; the endpoint addresses are the
-	// veth ends created above.
+	// Only `Baseline` addresses are installed. The gateway's LAN declares the
+	// address THN is expected to give it — that is the drift the transaction
+	// has to reconcile — and applying it here would leave the lab already
+	// converged on the one thing the test is about.
+	//
+	// This loop also brings the two far ends up. They are the endpoints'
+	// declared interfaces, so their link state is owned here and nowhere else;
+	// pass two owns the gateway-side ports, which no Interface declares.
 	for _, iface := range h.top.Interfaces {
-		switch iface.Namespace {
-		case GatewayNamespace:
-			if iface.Address != "" {
-				h.must(gw.AddrAdd(iface.Name, iface.Address))
-			}
-		case TargetNamespace, ClientNamespace:
-			h.must(h.ns[iface.Namespace].AddrAdd(iface.Name, iface.Address))
+		ns := h.ns[iface.Namespace]
+		if iface.Baseline && iface.Address != "" {
+			h.must(ns.AddrAdd(iface.Name, iface.Address))
+		}
+		if iface.Up {
+			h.must(ns.LinkUp(iface.Name))
 		}
 	}
 
