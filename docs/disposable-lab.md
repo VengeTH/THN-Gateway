@@ -526,31 +526,32 @@ passes.
 ### Live suite status
 
 The suite has run three times on Linux. The third run built the topology
-successfully and passed `TestEndToEndLANToWAN` and `TestEndToEndRollback` — real
-traffic crossed a real gateway and a real rollback removed a real address.
-Five failures remained and are now fixed; **those fixes have not been re-run.**
+successfully and passed eight of the nine live tests, including real LAN → WAN
+traffic, real forwarding, WAN → LAN isolation, health-check rollback, baseline
+restoration, unmanaged-resource preservation and the production guard.
 
-The two failures that have been fixed and confirmed are worth recording because
-they were both about the same thing — the lab was inheriting the host's state
-instead of declaring its own:
+`TestEndToEndNAT` was the last failure. The gateway had translated
+`10.77.0.100` to `10.77.250.1`, which only a working masquerade rule can do, so
+the rule was present and the **parser** had failed to read it. Two defects in
+the parser were found and fixed:
 
-- **A namespace inherits `conf.all` from the host that created it**, and
-  `net.ipv4.ip_forward` is an alias for `conf.all.forwarding`. On a machine
-  that already routes between subnets the lab began with forwarding on. That
-  produced three failures at once: the forwarding pre-check demanded 0; with
-  forwarding already matching the desired state THN produced no forwarding
-  drift and so planned no forwarding operation; and two tests then asserted
-  forwarding had returned to 0 when it had never left. The lab now declares and
-  establishes its own baseline inside the gateway namespace. The host's sysctl
-  is untouched.
-- **A verification line that could not report failure.** The rollback test
-  ended with a hardcoded `t.Log` sentence listing what it had checked, printed
-  unconditionally. It therefore read "no forwarding" beside a failing
-  forwarding assertion. That line is now built from the observations.
+- A payload it could not decode was reported as "the table has zero rules" —
+  turning the test's own failure to read the kernel into a claim that the kernel
+  had no rule. A parse failure is now an error, and is never reported as an
+  absence.
+- A NAT statement was recognised only as `{"nat":{"type":"masquerade"}}`. It is
+  now recognised by the presence of a NAT statement — `nat`, `masq` or
+  `masquerade` — and then classified, so a rule doing `snat` or `dnat` is still
+  refused while a release that spells it differently is still read correctly.
 
-A third and fourth fix are ordinary defects: the NAT assertion searched the
-rendered rule for `oifname thnwan0` while nft renders `oifname "thnwan0"`, and
-the unmanaged nftables fixture added a rule to a chain it had never created.
+`internal/lab/nftparse_test.go` exercises the parser on every platform against
+captured payloads, including every way a masquerade rule can be wrong. The
+parser types are deliberately declared outside a `//go:build linux` file so a
+change in how nft renders rules is caught by `go test ./...` rather than in a
+lab.
+
+**These fixes have not been re-run on Linux.** Every other fix from the previous
+round has been confirmed by a passing live test.
 
 Treat the first run as an experiment. If a test fails, the failure output is the
 input to the next change; nothing in this repository should be adjusted to make

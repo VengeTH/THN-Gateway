@@ -627,40 +627,60 @@ func (h *harness) thnTablePresent() bool {
 // assertMasqueradeRule proves masquerade is attached to the WAN interface.
 //
 // Structured, and deliberately so. The rendered rule is
-// `oifname "thnwan0" masquerade`, so the previous text search for
-// `oifname thnwan0` did not match a rule that was present and correct. Reading
-// the parsed expression is both a fix and a stronger claim: it proves the
-// masquerade lives in postrouting *and* is bound to the expected interface,
-// rather than that a word appears somewhere in a dump.
+// `oifname "thnwan0" masquerade`, so a text search for `oifname thnwan0` cannot
+// match a rule that is present and correct. Reading the parsed rule is both the
+// fix and a stronger claim: it proves the masquerade is in `table inet thn`, is
+// in the `postrouting` chain, and is bound to the expected interface — not that
+// a word appears somewhere in a dump.
+//
+// On failure it dumps what the kernel actually returned, so the next run of a
+// failing assertion produces evidence rather than another guess.
 func assertMasqueradeRule(t *testing.T, h *harness) {
 	t.Helper()
 
-	rules, ok := h.thnRules()
-	if !ok {
-		t.Fatal("table inet thn is absent; cannot verify the masquerade rule")
+	rules, _, err := h.thnRules()
+	if err != nil {
+		h.logTHNNFTDiagnostics(t)
+		t.Fatalf("could not read table inet thn from the kernel: %v", err)
 	}
 
-	masquerades := 0
+	matched, wrongChain, wrongTable, wrongIface := 0, 0, 0, 0
+	var seen []string
+
 	for _, r := range rules {
-		isMasquerade, iface := r.masqueradeOn()
-		if !isMasquerade {
+		if r.isGatewayMasquerade(GatewayWANInterface) {
+			matched++
 			continue
 		}
-		masquerades++
 
-		if r.Chain != "postrouting" {
-			t.Errorf("a masquerade rule is in chain %q; masquerade has no effect outside postrouting", r.Chain)
+		masquerade, iface := r.masqueradeOn()
+		if !masquerade {
+			continue
 		}
-		if iface != GatewayWANInterface {
-			t.Errorf("masquerade is attached to %q, want the WAN interface %q", iface, GatewayWANInterface)
+		// A masquerade that is not the gateway's is worth naming precisely,
+		// because "no masquerade rule found" and "a masquerade rule in the
+		// wrong place" call for completely different fixes.
+		switch {
+		case r.Table != "thn":
+			wrongTable++
+		case r.Chain != "postrouting":
+			wrongChain++
+		default:
+			wrongIface++
+			seen = append(seen, fmt.Sprintf("table=%s chain=%s oifname=%q", r.Table, r.Chain, iface))
 		}
 	}
 
-	if masquerades == 0 {
-		t.Fatalf("table inet thn has no masquerade rule; the gateway would route without translating")
-	}
-	if masquerades > 1 {
-		t.Errorf("table inet thn has %d masquerade rules; THN should install exactly one", masquerades)
+	if matched != 1 {
+		h.logTHNNFTDiagnostics(t)
+		t.Fatalf("table inet thn has %d masquerade rule(s) bound to the WAN interface %s, want exactly 1.\n"+
+			"  masquerade in another table:  %d\n"+
+			"  masquerade in another chain:  %d\n"+
+			"  masquerade on another iface:  %d %v\n"+
+			"  masquerade where expected:   %d\n"+
+			"The gateway translated traffic successfully in the LAN → WAN test, so a rule that is not "+
+			"being read here is a mismatch between the parser and this nft version, not a missing rule.",
+			matched, GatewayWANInterface, wrongTable, wrongChain, wrongIface, seen, matched)
 	}
 }
 
@@ -700,47 +720,56 @@ const unmanagedChain = "unmanaged"
 // assertForeignTableIntact proves the unmanaged table still carries its own rule.
 //
 // A count, not a string search: the table existing is the weak claim, and a
-// global flush destroys the rule before it destroys the table. Reading the
-// rule back through nft's JSON form proves the resource THN was supposed to
-// leave alone is still the resource that was there.
+// global flush destroys the rule before it destroys the table. Reading it back
+// through the same parser THN's own table uses proves the resource THN was
+// supposed to leave alone is still the resource that was there.
 func assertForeignTableIntact(t *testing.T, h *harness, name string) {
 	t.Helper()
 
-	out, err := h.ns[GatewayNamespace].Run("nft", "-j", "list", "table", "inet", name)
+	ns := h.ns[GatewayNamespace]
+
+	out, err := ns.Run("nft", "-j", "list", "table", "inet", name)
 	if err != nil {
 		t.Fatalf("table inet %s was destroyed: %v", name, err)
 	}
 
+	chains, rules := parseForeignTable(out)
+	if _, ok := chains[unmanagedChain]; !ok {
+		t.Errorf("chain %s was removed from table inet %s; THN owns only table inet thn", unmanagedChain, name)
+	}
+	if rules[unmanagedChain] == 0 {
+		t.Errorf("the unmanaged rule in inet %s/%s was removed; THN must not touch foreign tables", name, unmanagedChain)
+	}
+	t.Logf("unmanaged table inet %s survived: chains=%d rules in %s=%d",
+		name, len(chains), unmanagedChain, rules[unmanagedChain])
+}
+
+// parseForeignTable reads a foreign table's chains and per-chain rule counts.
+func parseForeignTable(raw string) (map[string]bool, map[string]int) {
 	var doc struct {
 		Nftables []struct {
 			Chain *struct {
 				Name string `json:"name"`
 			} `json:"chain"`
-			Rule *struct {
-				Chain string `json:"chain"`
-			} `json:"rule"`
+			Rule *nftRule `json:"rule"`
 		} `json:"nftables"`
 	}
-	if err := json.Unmarshal([]byte(out), &doc); err != nil {
-		t.Fatalf("could not read table inet %s back from the kernel: %v\n%s", name, err, out)
-	}
+	// A parse failure yields empty results, which the caller's assertions
+	// report as a missing chain or a missing rule — a statement about what was
+	// read, not about what the kernel holds.
+	_ = json.Unmarshal([]byte(raw), &doc)
 
-	chainFound, rules := false, 0
+	chains := map[string]bool{}
+	rules := map[string]int{}
 	for _, item := range doc.Nftables {
-		if item.Chain != nil && item.Chain.Name == unmanagedChain {
-			chainFound = true
+		if item.Chain != nil {
+			chains[item.Chain.Name] = true
 		}
-		if item.Rule != nil && item.Rule.Chain == unmanagedChain {
-			rules++
+		if item.Rule != nil {
+			rules[item.Rule.Chain]++
 		}
 	}
-
-	if !chainFound {
-		t.Errorf("chain %s was removed from table inet %s; THN owns only table inet thn", unmanagedChain, name)
-	}
-	if rules == 0 {
-		t.Errorf("the unmanaged rule in inet %s/%s was removed; THN must not touch foreign tables", name, unmanagedChain)
-	}
+	return chains, rules
 }
 
 // assertUnmanagedInterfaceIntact checks the dummy interface kept its address.

@@ -702,74 +702,31 @@ func thnTablePresent(h *harness) bool {
 	return active
 }
 
+// nftRule, nftExpr and the statement classification live in nftparse_test.go.
+//
+// They are declared outside a //go:build linux file so the parser can be
+// exercised on every platform. A parser that is only ever run against a live
+// gateway turns its own failures into evidence about the product.
+
 // thnTableState reports whether `table inet thn` exists and how many rules it
 // holds.
 func thnTableState(h *harness) (bool, int) {
-	rules, ok := h.thnRules()
-	return ok, len(rules)
-}
-
-// nftRule is one rule of `table inet thn`, as nftables reports it in JSON.
-type nftRule struct {
-	Chain string    `json:"chain"`
-	Exprs []nftExpr `json:"expr"`
-}
-
-type nftExpr struct {
-	Match *struct {
-		Left  nftOperand `json:"left"`
-		Right string     `json:"right"`
-	} `json:"match"`
-	Nat *struct {
-		Type string `json:"type"`
-	} `json:"nat"`
-}
-
-type nftOperand struct {
-	Meta *struct {
-		Key string `json:"key"`
-	} `json:"meta"`
-}
-
-// masqueradeOn reports whether this rule is a masquerade, and which interface
-// it is restricted to.
-//
-// Read structurally rather than by searching the rendered rule, because nft
-// quotes the interface:
-//
-//	oifname "thnwan0" masquerade
-//
-// so a text search for `oifname thnwan0` — with the quote in the wrong place —
-// does not match a rule that is present and correct. That is not a cosmetic
-// problem: the assertion exists to prove masquerade is attached to the WAN
-// interface specifically, and reading the parsed expression proves exactly
-// that rather than proving a string appears somewhere in a dump.
-func (r nftRule) masqueradeOn() (bool, string) {
-	masquerade := false
-	iface := ""
-
-	for _, e := range r.Exprs {
-		if e.Nat != nil && e.Nat.Type == "masquerade" {
-			masquerade = true
-		}
-		if e.Match != nil && e.Match.Left.Meta != nil && e.Match.Left.Meta.Key == "oifname" {
-			iface = e.Match.Right
-		}
-	}
-	return masquerade, iface
+	rules, _, err := h.thnRules()
+	return err == nil || rules != nil, len(rules)
 }
 
 // thnRules reads `table inet thn` through nft's JSON form.
 //
-// The structured form is the only one that can answer the questions the tests
-// ask. Rendered text breaks lines wherever it likes and quotes identifiers, so
-// a rule's chain, its expressions and the interface a masquerade is bound to
-// are all recoverable only from the parse.
-func (h *harness) thnRules() ([]nftRule, bool) {
+// The raw output is returned alongside the parse, and a parse failure is
+// returned as an error rather than swallowed. Both matter: the previous version
+// discarded a failed unmarshal and reported the result as "the table has zero
+// rules", which is a statement about THN's NAT derived from the test's own
+// failure to read the kernel.
+func (h *harness) thnRules() ([]nftRule, string, error) {
 	out, _, err := h.runners[GatewayNamespace].Run(context.Background(),
 		"nft", "-j", "list", "table", "inet", "thn")
 	if err != nil {
-		return nil, false
+		return nil, out, err
 	}
 
 	var doc struct {
@@ -778,7 +735,7 @@ func (h *harness) thnRules() ([]nftRule, bool) {
 		} `json:"nftables"`
 	}
 	if err := json.Unmarshal([]byte(out), &doc); err != nil {
-		return nil, true
+		return nil, out, fmt.Errorf("parsing nft JSON for table inet thn: %w", err)
 	}
 
 	var rules []nftRule
@@ -787,7 +744,55 @@ func (h *harness) thnRules() ([]nftRule, bool) {
 			rules = append(rules, *item.Rule)
 		}
 	}
-	return rules, true
+	return rules, out, nil
+}
+
+// logTHNNFTDiagnostics reports what THN's nftables table actually contains.
+//
+// Called only when an assertion has already failed, so a passing run stays
+// quiet. It reads the disposable gateway namespace and nothing else: no host
+// table is touched, listed, or reported.
+//
+// Its purpose is that the next live run of a failing NAT assertion produces
+// evidence rather than another guess — the raw JSON, the rendered form, and a
+// per-rule summary of chain, expression kinds and detected masquerade.
+func (h *harness) logTHNNFTDiagnostics(t *testing.T) {
+	t.Helper()
+
+	ns := h.ns[GatewayNamespace]
+
+	if text, err := ns.Run("nft", "list", "table", "inet", "thn"); err != nil {
+		t.Logf("nft text for table inet thn: unavailable: %v", err)
+	} else {
+		t.Logf("nft text for table inet thn:\n%s", text)
+	}
+
+	rules, raw, err := h.thnRules()
+	if err != nil {
+		t.Logf("nft JSON for table inet thn: could not parse: %v", err)
+	}
+	if raw != "" {
+		t.Logf("nft JSON for table inet thn:\n%s", raw)
+	}
+
+	t.Logf("parsed %d rule(s) in table inet thn", len(rules))
+	postrouting, natStatements, oifnames := 0, 0, 0
+	for i, r := range rules {
+		if r.Chain == "postrouting" {
+			postrouting++
+		}
+		for _, e := range r.Exprs {
+			if _, _, ok := e.natType(); ok {
+				natStatements++
+			}
+			if e.Match != nil && e.Match.LeftMetaKey() == "oifname" {
+				oifnames++
+			}
+		}
+		t.Logf("  rule[%d] %s", i, r.describe())
+	}
+	t.Logf("  table found=%t postrouting chain=%t rules=%d nat statements=%d oifname matches=%d",
+		len(rules) > 0, postrouting > 0, len(rules), natStatements, oifnames)
 }
 
 // interfaceIDBySystemName finds a device interface's stable identity.
