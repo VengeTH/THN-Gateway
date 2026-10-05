@@ -33,6 +33,7 @@ package lab
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -118,12 +119,21 @@ func TestEndToEndNAT(t *testing.T) {
 //
 // The client's only route to 10.77.250.0/24 is its default via 10.77.0.1, so
 // there is no second path for the packet to take.
+//
+// The baseline is read from the topology rather than written as 0, because a
+// namespace inherits `conf.all` — and so `net.ipv4.ip_forward` — from the host
+// that created it. The harness establishes the declared baseline inside the
+// gateway namespace; this test checks it actually took, which is what makes the
+// later assertion about drift mean anything.
 func TestEndToEndForwarding(t *testing.T) {
 	h := newHarness(t)
 	h.startTargetServer()
 
-	if got := h.gatewaySysctl(t, "net.ipv4.ip_forward"); got != "0" {
-		t.Fatalf("the lab baseline already has net.ipv4.ip_forward = %s; the baseline is not clean", got)
+	wantBaseline := h.top.Sysctls[IPForwardKey]
+	if got := h.gatewaySysctl(t, IPForwardKey); got != wantBaseline {
+		t.Fatalf("the lab baseline has %s = %s, want the declared %s; "+
+			"the namespace inherited the host's value instead of the lab's",
+			IPForwardKey, got, wantBaseline)
 	}
 
 	res := applyGatewayPlan(t, h)
@@ -131,8 +141,8 @@ func TestEndToEndForwarding(t *testing.T) {
 		t.Fatalf("final state %s, want %s (error: %s)", res.FinalState, execution.StateCommitted, res.Error)
 	}
 
-	if got := h.gatewaySysctl(t, "net.ipv4.ip_forward"); got != "1" {
-		t.Fatalf("net.ipv4.ip_forward = %s after apply, want 1", got)
+	if got := h.gatewaySysctl(t, IPForwardKey); got != "1" {
+		t.Fatalf("%s = %s after apply, want 1", IPForwardKey, got)
 	}
 
 	outcome := h.probe(execution.ProbeSideLAN, TargetEndpoint())
@@ -263,8 +273,13 @@ func TestEndToEndHealthCheck(t *testing.T) {
 		}
 		assertCheckFailed(t, res.Health, "lan_to_wan_traffic")
 
-		if got := h.gatewaySysctl(t, "net.ipv4.ip_forward"); got != "0" {
-			t.Errorf("net.ipv4.ip_forward = %s after a failed health check; it should be rolled back to 0", got)
+		// The declared baseline, not a literal: this asserts that THN put
+		// forwarding back to where the lab said it was, which is a claim about
+		// the transaction. Asserting "0" would be a claim about the lab's
+		// starting state wearing a rollback's clothes.
+		if got := h.gatewaySysctl(t, IPForwardKey); got != h.top.Sysctls[IPForwardKey] {
+			t.Errorf("%s = %s after a failed health check; it should be rolled back to the declared baseline %s",
+				IPForwardKey, got, h.top.Sysctls[IPForwardKey])
 		}
 	})
 }
@@ -341,8 +356,10 @@ func TestEndToEndRollbackRestoresBaseline(t *testing.T) {
 		t.Fatalf("final state %s, want %s (error: %s)", res.FinalState, execution.StateRolledBack, res.Error)
 	}
 
-	if got := h.gatewaySysctl(t, "net.ipv4.ip_forward"); got != "0" {
-		t.Errorf("net.ipv4.ip_forward = %s after rollback, want 0", got)
+	forwarding := h.gatewaySysctl(t, IPForwardKey)
+	if forwarding != h.top.Sysctls[IPForwardKey] {
+		t.Errorf("%s = %s after rollback, want the captured baseline %s",
+			IPForwardKey, forwarding, baseline.Sysctls[IPForwardKey])
 	}
 	if addrs := h.gatewayAddresses(t, GatewayLANInterface); len(addrs) != 0 {
 		t.Errorf("the LAN still carries %v after rollback, want no addresses", addrs)
@@ -350,7 +367,8 @@ func TestEndToEndRollbackRestoresBaseline(t *testing.T) {
 	if up := h.gatewayLinkUp(t, GatewayLANInterface); up {
 		t.Error("the LAN link is still administratively up after rollback")
 	}
-	if present := h.thnTablePresent(); present {
+	tablePresent := h.thnTablePresent()
+	if tablePresent {
 		t.Error("table inet thn still exists after rollback")
 	}
 
@@ -364,7 +382,18 @@ func TestEndToEndRollbackRestoresBaseline(t *testing.T) {
 			"the configuration was undone but the dataplane was not", outcome.SourceAddress)
 	}
 
-	t.Log("rollback verified against live kernel state: no address, no link, no forwarding, no table, no traffic")
+	// Reported from what was observed, not from a fixed sentence.
+	//
+	// This line used to be a string constant printed unconditionally, which is
+	// why a live run could show "no forwarding" next to a failing forwarding
+	// assertion. A summary that cannot report a failure is worse than none: it
+	// reads like evidence.
+	t.Logf("rollback verified against live kernel state: addresses=%v linkUp=%v %s=%s thnTable=%t traffic=%t",
+		h.gatewayAddresses(t, GatewayLANInterface),
+		h.gatewayLinkUp(t, GatewayLANInterface),
+		IPForwardKey, forwarding,
+		tablePresent,
+		false)
 }
 
 // TestEndToEndPreservesUnmanagedResources proves table ownership is real.
@@ -556,7 +585,7 @@ func (h *harness) captureState(t *testing.T) *execution.StateSnapshot {
 
 	scope := execution.BackupScope{
 		Interfaces: []string{GatewayWANInterface, GatewayLANInterface},
-		Sysctls:    []string{"net.ipv4.ip_forward"},
+		Sysctls:    []string{IPForwardKey},
 		NFTables:   true,
 		Routes:     true,
 	}
@@ -595,45 +624,122 @@ func (h *harness) thnTablePresent() bool {
 	return thnTablePresent(h)
 }
 
-// assertMasqueradeRule checks the THN table really carries a masquerade rule.
+// assertMasqueradeRule proves masquerade is attached to the WAN interface.
+//
+// Structured, and deliberately so. The rendered rule is
+// `oifname "thnwan0" masquerade`, so the previous text search for
+// `oifname thnwan0` did not match a rule that was present and correct. Reading
+// the parsed expression is both a fix and a stronger claim: it proves the
+// masquerade lives in postrouting *and* is bound to the expected interface,
+// rather than that a word appears somewhere in a dump.
 func assertMasqueradeRule(t *testing.T, h *harness) {
 	t.Helper()
 
-	out, _, err := h.runners[GatewayNamespace].Run(context.Background(), "nft", "list", "table", "inet", "thn")
-	if err != nil {
-		t.Fatalf("reading table inet thn: %v", err)
+	rules, ok := h.thnRules()
+	if !ok {
+		t.Fatal("table inet thn is absent; cannot verify the masquerade rule")
 	}
-	if !strings.Contains(out, "masquerade") {
-		t.Fatalf("table inet thn has no masquerade rule:\n%s", out)
+
+	masquerades := 0
+	for _, r := range rules {
+		isMasquerade, iface := r.masqueradeOn()
+		if !isMasquerade {
+			continue
+		}
+		masquerades++
+
+		if r.Chain != "postrouting" {
+			t.Errorf("a masquerade rule is in chain %q; masquerade has no effect outside postrouting", r.Chain)
+		}
+		if iface != GatewayWANInterface {
+			t.Errorf("masquerade is attached to %q, want the WAN interface %q", iface, GatewayWANInterface)
+		}
 	}
-	if !strings.Contains(out, "oifname "+GatewayWANInterface) {
-		t.Fatalf("the masquerade rule does not name the WAN interface %s:\n%s", GatewayWANInterface, out)
+
+	if masquerades == 0 {
+		t.Fatalf("table inet thn has no masquerade rule; the gateway would route without translating")
+	}
+	if masquerades > 1 {
+		t.Errorf("table inet thn has %d masquerade rules; THN should install exactly one", masquerades)
 	}
 }
 
-// installForeignTable creates an nftables table THN does not own.
+// installForeignTable creates an nftables resource THN does not own.
+//
+// Three objects, because a rule needs somewhere to live: the table, a chain
+// inside it, and the rule. The first attempt created only the table and then
+// added a rule to a chain named `unmanaged` that had never been created, which
+// nft rejects with "No such file or directory" — the fixture, not the lab, was
+// broken.
+//
+// The chain is a base chain so it is a real, listable object rather than a
+// regular one that nft would silently create on first use. Making the fixture's
+// structure explicit is the point: it is standing in for an operator's own
+// firewall, and that firewall has to be as real as the one it is protecting
+// itself from.
 func (h *harness) installForeignTable(t *testing.T, name string) {
 	t.Helper()
 
 	ns := h.ns[GatewayNamespace]
+
 	if _, err := ns.Run("nft", "add", "table", "inet", name); err != nil {
 		t.Fatalf("creating the unmanaged table inet %s: %v", name, err)
 	}
-	if _, err := ns.Run("nft", "add", "rule", "inet", name, "unmanaged", "counter", "accept"); err != nil {
+	if _, err := ns.Run("nft", "add", "chain", "inet", name, unmanagedChain,
+		"{", "type", "filter", "hook", "input", "priority", "10", ";", "}"); err != nil {
+		t.Fatalf("creating the unmanaged chain %s in inet %s: %v", unmanagedChain, name, err)
+	}
+	if _, err := ns.Run("nft", "add", "rule", "inet", name, unmanagedChain, "counter", "accept"); err != nil {
 		t.Fatalf("populating the unmanaged table inet %s: %v", name, err)
 	}
 }
 
-// assertForeignTableIntact checks the unmanaged table still has its rule.
+// unmanagedChain is the chain the foreign fixture's rule lives in.
+const unmanagedChain = "unmanaged"
+
+// assertForeignTableIntact proves the unmanaged table still carries its own rule.
+//
+// A count, not a string search: the table existing is the weak claim, and a
+// global flush destroys the rule before it destroys the table. Reading the
+// rule back through nft's JSON form proves the resource THN was supposed to
+// leave alone is still the resource that was there.
 func assertForeignTableIntact(t *testing.T, h *harness, name string) {
 	t.Helper()
 
-	out, err := h.ns[GatewayNamespace].Run("nft", "list", "table", "inet", name)
+	out, err := h.ns[GatewayNamespace].Run("nft", "-j", "list", "table", "inet", name)
 	if err != nil {
 		t.Fatalf("table inet %s was destroyed: %v", name, err)
 	}
-	if !strings.Contains(out, "counter") {
-		t.Fatalf("table inet %s lost its rule:\n%s", name, out)
+
+	var doc struct {
+		Nftables []struct {
+			Chain *struct {
+				Name string `json:"name"`
+			} `json:"chain"`
+			Rule *struct {
+				Chain string `json:"chain"`
+			} `json:"rule"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("could not read table inet %s back from the kernel: %v\n%s", name, err, out)
+	}
+
+	chainFound, rules := false, 0
+	for _, item := range doc.Nftables {
+		if item.Chain != nil && item.Chain.Name == unmanagedChain {
+			chainFound = true
+		}
+		if item.Rule != nil && item.Rule.Chain == unmanagedChain {
+			rules++
+		}
+	}
+
+	if !chainFound {
+		t.Errorf("chain %s was removed from table inet %s; THN owns only table inet thn", unmanagedChain, name)
+	}
+	if rules == 0 {
+		t.Errorf("the unmanaged rule in inet %s/%s was removed; THN must not touch foreign tables", name, unmanagedChain)
 	}
 }
 

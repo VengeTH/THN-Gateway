@@ -296,6 +296,43 @@ func (n *Namespace) LinkDown(iface string) error {
 	return nil
 }
 
+// SysctlSet writes a kernel tunable inside the namespace.
+//
+// It exists because a namespace does not start from a neutral state. Linux
+// copies `conf.all` and `conf.default` from the initial namespace when a new
+// one is created, and `net.ipv4.ip_forward` is an alias for
+// `conf.all.forwarding`. A lab namespace created on a host that routes between
+// subnets therefore starts with forwarding already on, which is exactly what
+// happened: the disposable lab inherited the host's gateway behaviour and the
+// "clean baseline" the tests assumed was never established.
+//
+// A test lab states its own baseline rather than inheriting one, the same way
+// it states its own addresses and link states.
+func (n *Namespace) SysctlSet(key, value string) error {
+	if err := checkToken("sysctl key", key); err != nil {
+		return err
+	}
+	if err := checkToken("sysctl value", value); err != nil {
+		return err
+	}
+	if _, err := n.Run("sysctl", "-w", key+"="+value); err != nil {
+		return fmt.Errorf("setting %s=%s in %s: %w", key, value, n.Name, err)
+	}
+	return nil
+}
+
+// SysctlGet reads a kernel tunable inside the namespace.
+func (n *Namespace) SysctlGet(key string) (string, error) {
+	if err := checkToken("sysctl key", key); err != nil {
+		return "", err
+	}
+	out, err := n.Run("sysctl", "-n", key)
+	if err != nil {
+		return "", fmt.Errorf("reading %s in %s: %w", key, n.Name, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // AddrAdd assigns a CIDR to an interface inside the namespace.
 //
 // `add`, not `replace`, and deliberately so. Assignment here means "this

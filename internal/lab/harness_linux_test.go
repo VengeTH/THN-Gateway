@@ -358,6 +358,22 @@ func (h *harness) buildTopology() {
 
 	gw := h.ns[GatewayNamespace]
 
+	// Pass zero: the kernel baseline, applied inside the gateway namespace.
+	//
+	// This comes first because everything downstream assumes it. A namespace
+	// inherits `conf.all` — and therefore `net.ipv4.ip_forward` — from the host
+	// that created it, so on a machine which already routes between subnets the
+	// lab would otherwise begin with forwarding on. THN would then correctly
+	// see no forwarding drift, plan no forwarding operation, and roll nothing
+	// back: the lab would agree with the host rather than test against a stated
+	// baseline.
+	//
+	// Applied to the gateway namespace only. The host's own sysctl is never
+	// touched.
+	for key, value := range h.top.Sysctls {
+		h.must(gw.SysctlSet(key, value))
+	}
+
 	// Pass one: create the links the gateway owns.
 	//
 	// Driven entirely by Interface.Kind, so nothing here branches on an
@@ -688,34 +704,90 @@ func thnTablePresent(h *harness) bool {
 
 // thnTableState reports whether `table inet thn` exists and how many rules it
 // holds.
-//
-// nftables' JSON form is used rather than its text form because a rule count
-// taken from rendered text is a count of lines the renderer happened to break,
-// which is not the same fact.
 func thnTableState(h *harness) (bool, int) {
+	rules, ok := h.thnRules()
+	return ok, len(rules)
+}
+
+// nftRule is one rule of `table inet thn`, as nftables reports it in JSON.
+type nftRule struct {
+	Chain string    `json:"chain"`
+	Exprs []nftExpr `json:"expr"`
+}
+
+type nftExpr struct {
+	Match *struct {
+		Left  nftOperand `json:"left"`
+		Right string     `json:"right"`
+	} `json:"match"`
+	Nat *struct {
+		Type string `json:"type"`
+	} `json:"nat"`
+}
+
+type nftOperand struct {
+	Meta *struct {
+		Key string `json:"key"`
+	} `json:"meta"`
+}
+
+// masqueradeOn reports whether this rule is a masquerade, and which interface
+// it is restricted to.
+//
+// Read structurally rather than by searching the rendered rule, because nft
+// quotes the interface:
+//
+//	oifname "thnwan0" masquerade
+//
+// so a text search for `oifname thnwan0` — with the quote in the wrong place —
+// does not match a rule that is present and correct. That is not a cosmetic
+// problem: the assertion exists to prove masquerade is attached to the WAN
+// interface specifically, and reading the parsed expression proves exactly
+// that rather than proving a string appears somewhere in a dump.
+func (r nftRule) masqueradeOn() (bool, string) {
+	masquerade := false
+	iface := ""
+
+	for _, e := range r.Exprs {
+		if e.Nat != nil && e.Nat.Type == "masquerade" {
+			masquerade = true
+		}
+		if e.Match != nil && e.Match.Left.Meta != nil && e.Match.Left.Meta.Key == "oifname" {
+			iface = e.Match.Right
+		}
+	}
+	return masquerade, iface
+}
+
+// thnRules reads `table inet thn` through nft's JSON form.
+//
+// The structured form is the only one that can answer the questions the tests
+// ask. Rendered text breaks lines wherever it likes and quotes identifiers, so
+// a rule's chain, its expressions and the interface a masquerade is bound to
+// are all recoverable only from the parse.
+func (h *harness) thnRules() ([]nftRule, bool) {
 	out, _, err := h.runners[GatewayNamespace].Run(context.Background(),
 		"nft", "-j", "list", "table", "inet", "thn")
 	if err != nil {
-		return false, 0
+		return nil, false
 	}
 
 	var doc struct {
 		Nftables []struct {
-			Table *struct {
-				Rules []json.RawMessage `json:"rule"`
-			} `json:"table"`
+			Rule *nftRule `json:"rule"`
 		} `json:"nftables"`
 	}
 	if err := json.Unmarshal([]byte(out), &doc); err != nil {
-		return true, 0
+		return nil, true
 	}
 
+	var rules []nftRule
 	for _, item := range doc.Nftables {
-		if item.Table != nil {
-			return true, len(item.Table.Rules)
+		if item.Rule != nil {
+			rules = append(rules, *item.Rule)
 		}
 	}
-	return true, 0
+	return rules, true
 }
 
 // interfaceIDBySystemName finds a device interface's stable identity.

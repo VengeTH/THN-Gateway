@@ -250,11 +250,45 @@ type Topology struct {
 	Routes []Route
 	// Ports are the veth pairs that wire the gateway to the two endpoints.
 	Ports []Port
+
+	// Sysctls are the kernel tunables the lab establishes on the gateway
+	// before THN runs.
+	//
+	// # Why they have to be stated
+	//
+	// A network namespace does not begin neutral. Linux copies `conf.all` and
+	// `conf.default` from the initial namespace when a new one is created, and
+	// `net.ipv4.ip_forward` is an alias for `conf.all.forwarding`. On a host
+	// that routes between subnets — which any machine running this lab does —
+	// a fresh namespace arrives with forwarding already enabled.
+	//
+	// Inheriting that is not a lab; it is a copy of whatever the host happened
+	// to be doing. Worse, it makes the tests' meaning shift with the host: the
+	// lab asserted forwarding was 0 at baseline, and when it was not, THN
+	// correctly produced no forwarding drift, so no forwarding operation was
+	// ever applied and none could be rolled back. Two tests then failed an
+	// assertion about a step that had never been in the plan.
+	//
+	// Stating the baseline restores the distinction that matters: this is what
+	// the lab is before THN runs; the desired state is what THN is asked to
+	// converge it onto.
+	Sysctls map[string]string
 }
+
+// IPForwardKey is the tunable THN manages to make the gateway route at all.
+const IPForwardKey = "net.ipv4.ip_forward"
 
 // Canonical returns the M6.2 disposable topology.
 func Canonical() Topology {
 	return Topology{
+		Sysctls: map[string]string{
+			// Forwarding off at baseline. This is not an assertion about the
+			// host — it is a declaration about the lab, applied inside the
+			// gateway namespace only, and it is what gives `ip-forwarding` its
+			// drift. With forwarding already on, THN has nothing to change and
+			// the rollback tests have nothing to undo.
+			IPForwardKey: "0",
+		},
 		Interfaces: []Interface{
 			{Namespace: GatewayNamespace, Name: GatewayWANInterface, Address: GatewayWANAddress, Role: "wan", Kind: "bridge", Up: true, Baseline: true},
 			{Namespace: GatewayNamespace, Name: GatewayLANInterface, Address: GatewayAddress, Role: "lan", Kind: "bridge", Up: false, Baseline: false},
@@ -441,6 +475,16 @@ func (t Topology) Validate() error {
 				return fmt.Errorf("route %s in %s is neither `default` nor a prefix: %w", r.Destination, r.Namespace, err)
 			}
 		}
+	}
+
+	for key, value := range t.Sysctls {
+		if value != "0" && value != "1" {
+			return fmt.Errorf("baseline sysctl %s declares value %q; only 0 or 1 are meaningful here", key, value)
+		}
+	}
+	if _, ok := t.Sysctls[IPForwardKey]; !ok {
+		return fmt.Errorf("no baseline declared for %s; a namespace inherits the host's value, "+
+			"so the lab must state the forwarding baseline it means to reconcile from", IPForwardKey)
 	}
 
 	return nil

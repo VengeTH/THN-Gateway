@@ -311,6 +311,53 @@ func TestGatewayLANStartsDownAndUnaddressed(t *testing.T) {
 	t.Fatalf("no declaration of %s in %s", GatewayLANInterface, GatewayNamespace)
 }
 
+// TestLabDeclaresItsOwnForwardingBaseline is the regression test for the
+// forwarding failures in the third M6.3 live run.
+//
+// A network namespace inherits `conf.all` — and therefore `net.ipv4.ip_forward`
+// — from the host that created it. On a machine that already routes between
+// subnets the lab therefore began with forwarding on, which produced three
+// failures that looked unrelated:
+//
+//   - the forwarding test's pre-check demanded a baseline of 0;
+//   - with forwarding already matching the desired state, THN produced no
+//     forwarding drift, planned no forwarding operation, and so had nothing to
+//     roll back;
+//   - two tests then asserted forwarding had returned to 0 when it had never
+//     left.
+//
+// The fix is not to expect a different number. It is for the lab to state its
+// baseline and establish it, so the host's value cannot decide what the tests
+// mean.
+func TestLabDeclaresItsOwnForwardingBaseline(t *testing.T) {
+	top := Canonical()
+
+	value, ok := top.Sysctls[IPForwardKey]
+	if !ok {
+		t.Fatalf("the lab declares no baseline for %s; it would inherit the host's value", IPForwardKey)
+	}
+	if value != "0" {
+		t.Errorf("%s baseline is %q; the lab must start with forwarding off for `ip-forwarding` to be drift THN acts on",
+			IPForwardKey, value)
+	}
+
+	// And Validate must insist on it, so the declaration cannot be dropped.
+	top.Sysctls = nil
+	if err := top.Validate(); err == nil {
+		t.Error("Validate accepted a topology with no forwarding baseline")
+	} else if !strings.Contains(err.Error(), "baseline") {
+		t.Errorf("error = %q, want it to say a baseline is required", err)
+	}
+
+	// A non-boolean baseline is meaningless and must be rejected rather than
+	// silently applied.
+	top = Canonical()
+	top.Sysctls[IPForwardKey] = "yes"
+	if err := top.Validate(); err == nil {
+		t.Error("Validate accepted a non-boolean forwarding baseline")
+	}
+}
+
 // TestWANSideHasAReturnPathForTheLAN pins the route the isolation test depends
 // on.
 //
