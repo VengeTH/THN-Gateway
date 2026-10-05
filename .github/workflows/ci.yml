@@ -204,8 +204,7 @@ jobs:
             echo "$remaining further test(s) skipped:"
             grep -- '--- SKIP' /tmp/netns.log
           fi
-
-      # The M6.2 disposable-lab suite. This is the only step that proves a
+      # The M6.2/M6.3 disposable-lab suite. This is the only step that proves a
       # packet actually crosses the gateway, because it is the only one that
       # carries one.
       #
@@ -214,27 +213,42 @@ jobs:
       # sysctl, real netfilter, real IPv4 forwarding. Nothing is simulated, and
       # THN_M62_LAB=1 is what stops the suite from being silently skipped —
       # without it every test in the package skips and the step would pass
-      # having proved nothing, which is exactly what the check below catches.
+      # having proved nothing, which is exactly what the checks below catch.
       #
       # sudo is required for the same reason as the netns step: creating a
       # network namespace needs CAP_SYS_ADMIN.
+      #
+      # "Never against production" is a property of where this runs, not of
+      # anything the step checks: the runner is a throwaway GitHub-hosted VM
+      # with no THN state on it. The suite itself only ever creates namespaces
+      # named thn-m62-* and never reads or writes a host interface, which is
+      # what the ownership and leftover-namespace checks below confirm.
       - name: Disposable lab tests (privileged)
         shell: bash
         run: |
+          # The default shell is `bash -e`, which has no pipefail: the exit
+          # status of `go test | tee` would be tee's, so a failing suite would
+          # read as passing. pipefail fixes that, but on its own it aborts here
+          # and skips the diagnostics below, which name the test that went
+          # wrong. So the status is captured instead of aborting, checked after
+          # the greps, and the greps still get to explain a failure first.
+          set -o pipefail
+
           sudo modprobe nf_tables 2>/dev/null || echo "nf_tables already built in or unavailable"
           sudo modprobe nf_nat    2>/dev/null || echo "nf_nat already built in or unavailable"
 
           echo
-          echo "Running the M6.2 lab suite as root with THN_M62_LAB=1."
+          echo "Running the M6.2 live lab suite as root with THN_M62_LAB=1."
+          status=0
           sudo -E env "PATH=$PATH" \
             "GOCACHE=$(go env GOCACHE)" \
             "GOMODCACHE=$(go env GOMODCACHE)" \
             THN_M62_LAB=1 \
-            go test -count=1 -v -timeout 15m ./internal/lab/ | tee /tmp/lab.log
+            go test -count=1 -v -timeout 15m ./internal/lab/ | tee /tmp/lab.log || status=$?
 
           # Every one of these is a claim about packets, and a claim nobody
           # checked is not evidence. A suite that ran and skipped is reported
-          # as a failure.
+          # as a failure rather than as a pass.
           for t in TestEndToEndLANToWAN \
                    TestEndToEndNAT \
                    TestEndToEndForwarding \
@@ -247,7 +261,7 @@ jobs:
             if grep -q -- "--- SKIP: $t" /tmp/lab.log; then
               echo
               echo "$t skipped, but it must not have: the live lab suite did not run."
-              echo "The runner needs iproute2, nftables, util-linux and euid 0."
+              echo "The runner needs iproute2, nftables, util-linux (nsenter) and euid 0."
               exit 1
             fi
             if ! grep -q -- "--- PASS: $t" /tmp/lab.log; then
@@ -258,11 +272,12 @@ jobs:
             echo "$t ran"
           done
 
-          # The unit half of M6.2 runs everywhere, so a skip here would mean
+          # The unit half of M6.2/M6.3 runs everywhere, so a skip here would mean
           # the package was not built at all.
           for t in TestCanonicalTopologyAddressing \
                    TestGatewayAndClientShareTheLANBlock \
-                   TestLabUsesNonPhysicalInterfaceNames; do
+                   TestLabUsesNonPhysicalInterfaceNames \
+                   TestWANSideHasAReturnPathForTheLAN; do
             if ! grep -q -- "--- PASS: $t" /tmp/lab.log; then
               echo
               echo "$t did not pass; see the log above."
@@ -270,6 +285,37 @@ jobs:
             fi
             echo "$t ran"
           done
+
+          # Cleanup, checked rather than assumed.
+          #
+          # A namespace that outlives its test is invisible in the test log and
+          # fatal to the next run, so "the suite tore itself down" is a claim
+          # verified here rather than inferred from a green run. The suite
+          # asserts the same thing from inside teardown; this catches the case
+          # where the process died before its own cleanup could run.
+          leftovers="$(sudo ip netns list | grep -E 'thn-m62-(gateway|client|wan)' || true)"
+          if [ -n "$leftovers" ]; then
+            echo
+            echo "the lab left namespaces behind:"
+            echo "$leftovers"
+            for ns in thn-m62-gateway thn-m62-client thn-m62-wan; do
+              sudo ip netns delete "$ns" 2>/dev/null || true
+            done
+            exit 1
+          fi
+          echo "no lab namespaces survived the run"
+
+          # Last word. The greps above cover every test by name, so this only
+          # fires for a failure mode they cannot see — a panic in a helper, a
+          # build error, a subtest that failed while its parent still reported
+          # PASS. A step that cannot fail by construction will eventually not
+          # fail, so the suite's own exit status is the final authority.
+          if [ "$status" -ne 0 ]; then
+            echo
+            echo "go test exited $status; see the log above."
+            exit "$status"
+          fi
+          echo "M6.2 disposable lab suite passed"
 
       - name: Verify the Linux binary is CGO-free
         run: |

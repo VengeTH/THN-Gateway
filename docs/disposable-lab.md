@@ -134,7 +134,7 @@ If this file is missing, declares `"disposable": false`, or if production hardwa
 
 ---
 
-## 4. AUTOMATED BY CODE — The M6.2 Test Suite
+## 4. AUTOMATED BY CODE — The M6.2/M6.3 Live Test Suite
 
 `internal/lab` builds the whole four-point topology out of network namespaces
 and runs THN's real `LinuxDriver` inside the gateway namespace. Real `ip`, real
@@ -142,12 +142,55 @@ and runs THN's real `LinuxDriver` inside the gateway namespace. Real `ip`, real
 simulated.
 
 ```bash
-# On any Linux host with root, iproute2 and nftables:
+# On any Linux host with root, iproute2, nftables and util-linux:
 sudo THN_M62_LAB=1 go test -count=1 -v -timeout 15m ./internal/lab/
 ```
 
 Without `THN_M62_LAB=1` every test in that package skips with a stated reason.
 A green run therefore always means the tests ran.
+
+### What the suite creates and destroys on its own
+
+Created, before each test:
+
+| Resource | Name | Where |
+|---|---|---|
+| Gateway namespace | `thn-m62-gateway` | root netns store, `/var/run/netns/` |
+| Client namespace | `thn-m62-client` | same |
+| WAN-side namespace | `thn-m62-wan` | same |
+| Gateway WAN bridge | `thnwan0` (10.77.250.1/24) | gateway namespace |
+| Gateway LAN bridge | `thnlan0` (10.77.0.1/24) | gateway namespace |
+| veth ports | `vwan0`, `vlan0` | gateway namespace |
+| Unmanaged dummy | `thnmgmt0` (10.77.99.1/24) | gateway namespace |
+| Client address | `thnlan0` 10.77.0.100/24 | client namespace |
+| WAN target address | `thnwan0` 10.77.250.2/24 | target namespace |
+| WAN-side listener | TCP `10.77.250.2:18080` | target namespace |
+| Lab marker | `<tmp>/lab-disposable-environment.json` | host temporary directory |
+
+Routes installed before THN runs:
+
+| Namespace | Route |
+|---|---|
+| gateway | `default via 10.77.250.2 dev thnwan0` |
+| client | `default via 10.77.0.1 dev thnlan0` |
+| WAN side | `10.77.0.0/24 via 10.77.250.1 dev thnwan0` |
+
+That last route is the WAN side's return path for the LAN segment. It is not
+decoration: without it the target could answer NATed traffic on its own
+connected segment but had no route at all to `10.77.0.0/24`, so the WAN→LAN
+connection would be impossible for reasons that have nothing to do with the
+firewall, and the isolation test would prove nothing.
+
+Destroyed, after every test, including after a failure:
+
+- every helper process, via a stop file the helper polls
+- every namespace above, via `ip netns delete`
+- the suite then **verifies** the namespaces are gone and fails the test if any
+  survived, naming the one-line command that clears it
+
+The LAN bridge deliberately starts **down and unaddressed**. That is the work
+THN is about to do; a lab that arrived already configured would prove nothing
+about whether the transaction configured it.
 
 ### What each test proves
 
@@ -178,10 +221,58 @@ Three reasons, in order of importance:
    `eth1`, every test would still pass if THN had grown a hardcoded special case
    for those two names. Role resolution has to actually work.
 
+### What this suite does NOT cover
+
+It proves the dataplane on a real kernel. It does **not** prove anything about
+the lab VM's own NICs, its DHCP upstream, or any physical link. That path is
+sections 5 to 9, and it is manual. A namespace passing is not a hardware
+result.
+
+### What a successful run looks like
+
+Each live test logs the fact it established:
+
+```
+=== RUN   TestEndToEndLANToWAN
+    disposable lab topology:
+      thn-m62-client   thnlan0    10.77.0.100/24   -
+      ...
+    plan 1a2b3c4d5e6f7a8b carries 4 step(s): lan-link-state, lan-address-add, ip-forwarding, firewall-absent
+    LAN → WAN: 10.77.0.100 reached 10.77.250.2:18080 (endpoint observed source 10.77.250.1)
+--- PASS: TestEndToEndLANToWAN (12.41s)
+```
+
+The lines to look for:
+
+| Line | Means |
+|---|---|
+| `carries N step(s)` | the plan was built from a real observation of the lab gateway |
+| `LAN → WAN: …` | a packet crossed, from the LAN client through THN |
+| `NAT: 10.77.0.100 … arrived … as 10.77.250.1` | masquerade was actually applied |
+| `forwarding: … → … → …` | forwarding is on and a connection crossed anyway |
+| `WAN → LAN: reachable before THN's table, blocked after it` | isolation, in both directions |
+| `rollback undid N operation(s)` | compensating operations ran |
+| `rollback verified against live kernel state` | the kernel really went back |
+| `ownership verified: table inet lab_unmanaged …` | foreign tables survive |
+| `no lab namespaces survived the run` | only emitted by CI, checking teardown from outside |
+
+A run that ends with `--- SKIP:` on any live test has proved nothing, even if
+the command exited 0. The suite skips without `THN_M62_LAB=1`; the CI step
+treats a skip as a failure for exactly that reason.
+
 ### Running the whole suite with the lab enabled
 
 ```bash
 sudo THN_M62_LAB=1 go test -count=1 -timeout 20m ./...
+```
+
+### If a run is interrupted
+
+Namespaces survive a killed process. The next run removes them before building,
+and the suite checks afterwards that none survived:
+
+```bash
+ip netns list | grep thn-m62 || echo "clean"
 ```
 
 ---
@@ -405,15 +496,31 @@ passes.
 
 ---
 
-## 10. Remaining Limitations
+## 10. Limitations and status
 
-Known and deliberate at the end of M6.2.
+### Live suite status
+
+**The live suite has not yet been executed.** The code compiles for Linux, vets
+cleanly for Linux, and the non-privileged suite passes on every platform — but
+no run on a real Linux kernel has happened yet, so no claim in this document is
+backed by an observed packet.
+
+Treat the first run as an experiment. If a test fails, the failure output is the
+input to the next change; nothing in this repository should be adjusted to make
+a failing assertion pass.
+
+### Known limitations
 
 - **The automated suite builds its own topology in namespaces.** It proves the
   dataplane with real packets on a real kernel, but not on the VM's own NICs.
-  The manual path in sections 5–9 is what covers the VM hardware.
+  The manual path in sections 5–9 is what covers the VM hardware, and a passing
+  namespace suite is not a hardware result.
+- **The live harness disables reverse-path filtering inside its namespaces.**
+  A distribution that sets `rp_filter=2` would otherwise drop the WAN→LAN probe
+  as a forged source, and the isolation test would pass for the wrong reason —
+  the block would be the path filter, not THN's firewall.
 - **The WAN side is one controlled endpoint, not the Internet.** No test depends
   on public reachability, by design.
 - **No DHCP, DNS, VPN, multi-ISP or QoS.** Out of scope for this milestone.
-- **The real Dell remains blocked.** M6.2 changes nothing about that and adds a
-  test that says so.
+- **The real Dell remains blocked.** M6.2/M6.3 change nothing about that and add
+  a test that says so.

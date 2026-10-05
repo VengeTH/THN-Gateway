@@ -92,6 +92,9 @@ const (
 	// GatewayWANAddress is THN's uplink address inside the lab VM.
 	GatewayWANAddress = "10.77.250.1/24"
 
+	// GatewayWANIP is GatewayWANAddress without its prefix length.
+	GatewayWANIP = "10.77.250.1"
+
 	// TargetAddress is the WAN-side test target. It is also the lab's default
 	// gateway, so it plays the part an upstream router would.
 	TargetAddress = "10.77.250.2/24"
@@ -176,6 +179,25 @@ func Canonical() Topology {
 		Routes: []Route{
 			{Namespace: GatewayNamespace, Destination: "default", Via: TargetIP, Device: GatewayWANInterface},
 			{Namespace: ClientNamespace, Destination: "default", Via: GatewayIP, Device: ClientLANInterface},
+
+			// The WAN side's return path for the LAN segment.
+			//
+			// Without it the target can answer a connection the gateway opened
+			// — NAT rewrites the source, so those replies are directly
+			// connected — but has no route at all to 10.77.0.0/24, so a reply
+			// to an untranslated LAN address is undeliverable.
+			//
+			// That matters for the isolation test, which has to measure the
+			// firewall refusing WAN→LAN rather than a missing route making the
+			// same connection impossible. Without this route the "reachable
+			// before the firewall" half of that test fails for a reason that has
+			// nothing to do with the firewall, and the assertion it is guarding
+			// never gets made.
+			//
+			// A specific prefix rather than a default: the upstream is not
+			// THN's next hop for anywhere else, and pretending otherwise would
+			// hide a missing route elsewhere in the topology.
+			{Namespace: TargetNamespace, Destination: LANPrefix, Via: GatewayWANIP, Device: TargetWANInterface},
 		},
 	}
 }
@@ -238,6 +260,11 @@ func (t Topology) Validate() error {
 	for _, r := range t.Routes {
 		if _, err := netip.ParseAddr(r.Via); err != nil {
 			return fmt.Errorf("route %s in %s has unparseable next hop %q: %w", r.Destination, r.Namespace, r.Via, err)
+		}
+		if r.Destination != "default" {
+			if _, err := netip.ParsePrefix(r.Destination); err != nil {
+				return fmt.Errorf("route %s in %s is neither `default` nor a prefix: %w", r.Destination, r.Namespace, err)
+			}
 		}
 	}
 

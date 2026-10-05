@@ -372,7 +372,21 @@ func (d *LinuxDriver) CaptureState(ctx context.Context, scope BackupScope) (*Sta
 // VerifyHealth queries Linux state to evaluate post-apply health checks.
 func (d *LinuxDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (HealthResult, error) {
 	var results []HealthCheckResult
-	allPassed := true
+	allPassed := len(checks) > 0
+
+	// No checks is not health.
+	//
+	// An empty list would otherwise walk out of the loop below with everything
+	// passing and certify a gateway nobody asked a question about. That is the
+	// same fail-open as an unrecognised check, one step earlier in the same
+	// function, and it is the last place a plan's verification can be made to
+	// mean nothing.
+	if len(checks) == 0 {
+		return HealthResult{
+			Healthy:       false,
+			FailureReason: "no health checks were supplied, so the gateway's state is unverified",
+		}, nil
+	}
 
 	for _, hc := range checks {
 		res := HealthCheckResult{

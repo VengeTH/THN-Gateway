@@ -155,30 +155,31 @@ func (r *namespaceRunner) Run(ctx context.Context, name string, args ...string) 
 //
 // It satisfies execution.TrafficProber, so the driver's health checks do not
 // know or care how the lab was built.
+//
+// It holds the namespaces directly rather than looking them up in something
+// shared. A package-level registry of "which namespace is the LAN side" is one
+// more piece of state that outlives a test, and a stale entry there is
+// indistinguishable from a live one — which is the worst kind of bug to
+// diagnose in a suite whose whole value is that it talks to real kernels.
 type namespaceProber struct {
-	sides map[string]string // side -> namespace name
+	sides map[string]*netns.Namespace // side -> namespace
 }
 
 func (p *namespaceProber) Probe(ctx context.Context, side, endpoint string, _ time.Duration) (execution.ProbeResult, error) {
-	name, ok := p.sides[side]
-	if !ok {
-		return execution.ProbeResult{}, fmt.Errorf("lab has no %q side to probe from", side)
-	}
-
-	ns, ok := harnessNamespaces[side]
-	if !ok {
-		return execution.ProbeResult{}, fmt.Errorf("lab namespace %q is not built", name)
+	ns, ok := p.sides[side]
+	if !ok || ns == nil {
+		return execution.ProbeResult{}, fmt.Errorf("lab has no built %q namespace to probe from", side)
 	}
 
 	out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
 		"--", "connect", endpoint, "thn-m62-"+side)
 	if err != nil && !strings.Contains(out, helperMarker) {
-		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s could not run: %w", name, err)
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s could not run: %w", ns.Name, err)
 	}
 
 	line := helperLine(out)
 	if line == "" {
-		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s produced no report; output was: %s", name, strings.TrimSpace(out))
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s produced no report; output was: %s", ns.Name, strings.TrimSpace(out))
 	}
 
 	var report struct {
@@ -188,7 +189,7 @@ func (p *namespaceProber) Probe(ctx context.Context, side, endpoint string, _ ti
 		Error          string `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(line), &report); err != nil {
-		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s reported unparseable output %q: %w", name, line, err)
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s reported unparseable output %q: %w", ns.Name, line, err)
 	}
 
 	return execution.ProbeResult{
@@ -198,13 +199,6 @@ func (p *namespaceProber) Probe(ctx context.Context, side, endpoint string, _ ti
 		Error:          report.Error,
 	}, nil
 }
-
-// harnessNamespaces lets the prober reach a namespace by side.
-//
-// The prober is installed on a driver and outlives individual calls, so it
-// cannot close over a harness that a test has already torn down. It holds the
-// three namespaces it needs and nothing else.
-var harnessNamespaces = map[string]*netns.Namespace{}
 
 // labServer is a running probe endpoint inside a namespace.
 type labServer struct {
@@ -256,16 +250,20 @@ func newHarness(t *testing.T) *harness {
 		workDir: t.TempDir(),
 		runners: map[string]*namespaceRunner{},
 	}
-	h.prober = &namespaceProber{sides: map[string]string{
-		execution.ProbeSideLAN: ClientNamespace,
-		execution.ProbeSideWAN: TargetNamespace,
-	}}
+
+	// Registered BEFORE anything is built, and that ordering is the point.
+	//
+	// Every build step below ends in t.Fatalf on failure, which ends the test
+	// immediately. A cleanup registered afterwards would never run, and the
+	// process would exit with up to three live namespaces — which do not
+	// disappear because the test binary did. The next run would then either
+	// collide with them or silently inherit a half-built topology from a run
+	// that failed for an unrelated reason.
+	t.Cleanup(h.teardown)
 
 	h.buildNamespaces()
 	h.buildTopology()
 	h.writeMarker()
-
-	t.Cleanup(h.teardown)
 
 	t.Logf("disposable lab topology:\n%s", top.Describe())
 	return h
@@ -282,7 +280,12 @@ func (h *harness) buildNamespaces() {
 	for _, name := range h.top.Namespaces() {
 		// A namespace left behind by an interrupted run would otherwise make
 		// this one fail with an error that names neither the cause nor the fix.
-		_ = netns.Remove(name)
+		if netns.Exists(name) {
+			h.t.Logf("removing leftover lab namespace %s from a previous run", name)
+			if err := netns.Remove(name); err != nil {
+				h.t.Logf("could not remove leftover namespace %s: %v", name, err)
+			}
+		}
 
 		ns, err := netns.Create(name)
 		if err != nil {
@@ -296,12 +299,14 @@ func (h *harness) buildNamespaces() {
 		relaxPathFiltering(ns)
 	}
 
-	harnessNamespaces[execution.ProbeSideLAN] = h.ns[ClientNamespace]
-	harnessNamespaces[execution.ProbeSideWAN] = h.ns[TargetNamespace]
-
 	for _, name := range h.top.Namespaces() {
 		h.runners[name] = &namespaceRunner{ns: h.ns[name]}
 	}
+
+	h.prober = &namespaceProber{sides: map[string]*netns.Namespace{
+		execution.ProbeSideLAN: h.ns[ClientNamespace],
+		execution.ProbeSideWAN: h.ns[TargetNamespace],
+	}}
 }
 
 // relaxPathFiltering disables reverse-path filtering inside a lab namespace.
@@ -414,10 +419,15 @@ func (h *harness) writeMarker() {
 	}
 }
 
-// teardown removes the servers and the namespaces.
+// teardown removes the servers and the namespaces, then checks that it did.
 //
 // Order matters: a listener inside a namespace is destroyed with it, but the
 // helper process is not, so the servers are stopped explicitly first.
+//
+// The verification at the end is not decoration. A namespace that outlives its
+// test is invisible in the test's own output and lethal to the next run, so the
+// suite states plainly whether it left anything behind. On failure it names
+// the namespace and the one-line command that clears it.
 func (h *harness) teardown() {
 	h.mu.Lock()
 	servers := append([]*labServer(nil), h.servers...)
@@ -427,14 +437,21 @@ func (h *harness) teardown() {
 	for _, s := range servers {
 		s.shutdown()
 	}
-	for key := range harnessNamespaces {
-		delete(harnessNamespaces, key)
-	}
+
 	for _, name := range h.top.Namespaces() {
 		if ns, ok := h.ns[name]; ok {
 			if err := ns.Close(); err != nil {
-				h.t.Logf("lab namespace %s teardown: %v", name, err)
+				h.t.Errorf("lab namespace %s teardown failed: %v", name, err)
 			}
+		}
+	}
+
+	// netns.Remove as a second attempt, because Close only deletes a namespace
+	// it believes it created. A half-built lab has namespaces on disk that no
+	// Namespace value owns.
+	for _, name := range h.top.Namespaces() {
+		if netns.Exists(name) {
+			h.t.Errorf("lab namespace %s survived teardown; clear it with: ip netns delete %s", name, name)
 		}
 	}
 }

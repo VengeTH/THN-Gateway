@@ -35,6 +35,14 @@
 // internal/guard exempts this file explicitly, and that exemption is reviewed
 // rather than assumed — widening it to any other package would break the
 // invariant the whole project rests on.
+//
+// # It carries the M6.2 gateway lab, not just QoS
+//
+// The topology helpers below (veth pairs, bridges, addresses, routes) exist for
+// internal/lab, which wires a client, a gateway and a WAN-side target together
+// and moves real packets between them. Those commands are namespace-local
+// exactly as the shaping ones are, including the one that hands a veth peer to
+// a second namespace, so the exemption's justification is unchanged.
 package netns
 
 import (
@@ -94,8 +102,11 @@ func Available() error {
 	if _, err := exec.LookPath("tc"); err != nil {
 		return fmt.Errorf("tc is not installed: %w", err)
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
-		return fmt.Errorf("util-linux is not installed: %w", err)
+	// nsenter, not unshare: RunTC reaches the namespace through nsenter, and
+	// probing a util-linux binary this package never calls would report a
+	// dependency that does not exist while missing one that does.
+	if _, err := exec.LookPath("nsenter"); err != nil {
+		return fmt.Errorf("util-linux (nsenter) is not installed: %w", err)
 	}
 	if os.Geteuid() != 0 {
 		return ErrNoPermission
@@ -103,41 +114,42 @@ func Available() error {
 	return nil
 }
 
-// Create creates a new network namespace.
-//
-// unshare creates the namespace and bind-mounts it to a file, which is how it
-// survives the process that created it.
-func Create(name string) (*Namespace, error) {
-	if err := Available(); err != nil {
-		return nil, err
-	}
-
-	n := &Namespace{Name: name, Path: storeDir + name}
-
-	// iproute2's namespace store is not always present on a minimal image,
-	// and unshare cannot create the bind mount inside a directory that does
-	// not exist.
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating namespace store %s: %w", storeDir, err)
-	}
-
-	if _, err := run("unshare", "--net", "--mount", n.Path); err != nil {
-		return nil, fmt.Errorf("creating namespace %s: %w", name, err)
-	}
-
-	n.created = true
-	return n, nil
-}
-
-// Close destroys the namespace.
-//
-// It is safe to call more than once. Tearing down a namespace removes every
-// interface in it, so a qdisc attached inside goes with it and the host is
-// left untouched.
 // storeDir is where the kernel-facing namespace handles live. It is iproute2's
 // own convention, not this package's, so `ip link set <peer> netns <name>`
 // finds a namespace created here and vice versa.
 const storeDir = "/var/run/netns/"
+
+// Create creates a new network namespace.
+//
+// It delegates to `ip netns add` rather than assembling one from unshare,
+// bind-mounts and a shared mount tree by hand. That is not a style preference.
+//
+// A persistent namespace is a bind mount of /proc/self/ns/net onto a file under
+// the namespace store, and it only survives the process that made it if that
+// directory is a SHARED mount — otherwise the mount dies with the mount
+// namespace and the handle silently evaporates. `ip netns add` arranges all of
+// that: it creates the store, marks it MS_SHARED|MS_REC, unshares the network
+// namespace, and binds the handle. It is the mechanism every other tool on a
+// Linux host uses, so a namespace created here is one `ip netns exec`,
+// `ip netns delete` and `ip link set ... netns` all understand.
+//
+// Getting that wrong does not fail loudly. It produces a namespace that seems
+// to be created and is gone by the next command, which surfaces much later as
+// an unrelated-looking error.
+func Create(name string) (*Namespace, error) {
+	if err := Available(); err != nil {
+		return nil, err
+	}
+	if err := checkToken("namespace", name); err != nil {
+		return nil, err
+	}
+
+	if _, err := run("ip", "netns", "add", name); err != nil {
+		return nil, fmt.Errorf("creating namespace %s: %w", name, err)
+	}
+
+	return &Namespace{Name: name, Path: storeDir + name, created: true}, nil
+}
 
 // Remove destroys a named namespace.
 //
@@ -162,6 +174,24 @@ func Remove(name string) error {
 	return nil
 }
 
+// Exists reports whether a named namespace is present.
+//
+// It is a real query rather than an assumption, because "did the last run clean
+// up after itself?" is a question with an answer and guessing it is how a lab
+// starts failing for reasons nobody can reproduce.
+func Exists(name string) bool {
+	if err := checkToken("namespace", name); err != nil {
+		return false
+	}
+	_, err := os.Stat(storeDir + name)
+	return err == nil
+}
+
+// Close destroys the namespace.
+//
+// It is safe to call more than once. Tearing down a namespace removes every
+// interface in it, so a qdisc attached inside goes with it and the host is
+// left untouched.
 func (n *Namespace) Close() error {
 	if n == nil {
 		return nil

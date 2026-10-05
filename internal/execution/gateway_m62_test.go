@@ -427,6 +427,32 @@ func TestPlanCarriesTheLANSubnetIntoTheFirewall(t *testing.T) {
 	}
 }
 
+// TestEmptyHealthCheckListIsNotHealth closes the last fail-open in the
+// evaluation path.
+//
+// With no checks the loop below never runs, every flag stays true, and a
+// gateway nobody asked a question about gets certified. It is the same
+// fail-open as an unrecognised check one step later in the same function, and
+// it is reachable from any plan whose verification block is empty.
+func TestEmptyHealthCheckListIsNotHealth(t *testing.T) {
+	runner := newRecordingLinuxRunner()
+	driver := NewLinuxDriver(runner, DefaultLabConfig())
+	driver.labVerified = true
+
+	for _, checks := range [][]HealthCheck{nil, {}} {
+		hr, err := driver.VerifyHealth(context.Background(), checks)
+		if err != nil {
+			t.Fatalf("VerifyHealth(%v) returned an error: %v", checks, err)
+		}
+		if hr.Healthy {
+			t.Errorf("VerifyHealth(%v) reported health with nothing to verify", checks)
+		}
+		if !strings.Contains(hr.FailureReason, "no health checks") {
+			t.Errorf("failure reason = %q, want it to say no checks were supplied", hr.FailureReason)
+		}
+	}
+}
+
 // TestAddressCheckReadsThePlannedCIDR pins the change from a hardcoded address
 // to the one the plan actually asked for.
 func TestAddressCheckReadsThePlannedCIDR(t *testing.T) {

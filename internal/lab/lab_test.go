@@ -66,6 +66,37 @@ func TestCanonicalTopologyAddressing(t *testing.T) {
 	}
 }
 
+// TestWANSideHasAReturnPathForTheLAN pins the route the isolation test depends
+// on.
+//
+// The WAN-side target answers NATed traffic on its own connected segment, so it
+// never needed a route to the LAN — until the isolation test asks it to open a
+// connection into the LAN, which it must be able to complete when THN's firewall
+// is NOT installed. Without a return path that connection is impossible for
+// reasons that have nothing to do with the firewall, and the test's "reachable
+// before, blocked after" assertion silently degrades into "unreachable both
+// times, for the wrong reason".
+func TestWANSideHasAReturnPathForTheLAN(t *testing.T) {
+	top := Canonical()
+
+	var found bool
+	for _, r := range top.Routes {
+		if r.Namespace != TargetNamespace {
+			continue
+		}
+		found = true
+		if r.Destination != LANPrefix {
+			t.Errorf("WAN-side route is %+v, want a route for %s", r, LANPrefix)
+		}
+		if r.Via != GatewayWANIP {
+			t.Errorf("WAN-side route next hop is %q, want the gateway's WAN address %s", r.Via, GatewayWANIP)
+		}
+	}
+	if !found {
+		t.Errorf("the WAN side has no route at all; it cannot reply to an untranslated LAN address")
+	}
+}
+
 // TestGatewayAndClientShareTheLANBlock is the property the client's gateway
 // address depends on: THN's LAN address and the client's address must be on
 // the same segment, or the client cannot reach its own gateway.
