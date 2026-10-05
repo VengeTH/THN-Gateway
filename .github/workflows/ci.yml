@@ -205,6 +205,72 @@ jobs:
             grep -- '--- SKIP' /tmp/netns.log
           fi
 
+      # The M6.2 disposable-lab suite. This is the only step that proves a
+      # packet actually crosses the gateway, because it is the only one that
+      # carries one.
+      #
+      # It builds its own topology out of network namespaces and runs THN's
+      # real LinuxDriver inside the gateway namespace: real ip, real nft, real
+      # sysctl, real netfilter, real IPv4 forwarding. Nothing is simulated, and
+      # THN_M62_LAB=1 is what stops the suite from being silently skipped —
+      # without it every test in the package skips and the step would pass
+      # having proved nothing, which is exactly what the check below catches.
+      #
+      # sudo is required for the same reason as the netns step: creating a
+      # network namespace needs CAP_SYS_ADMIN.
+      - name: Disposable lab tests (privileged)
+        shell: bash
+        run: |
+          sudo modprobe nf_tables 2>/dev/null || echo "nf_tables already built in or unavailable"
+          sudo modprobe nf_nat    2>/dev/null || echo "nf_nat already built in or unavailable"
+
+          echo
+          echo "Running the M6.2 lab suite as root with THN_M62_LAB=1."
+          sudo -E env "PATH=$PATH" \
+            "GOCACHE=$(go env GOCACHE)" \
+            "GOMODCACHE=$(go env GOMODCACHE)" \
+            THN_M62_LAB=1 \
+            go test -count=1 -v -timeout 15m ./internal/lab/ | tee /tmp/lab.log
+
+          # Every one of these is a claim about packets, and a claim nobody
+          # checked is not evidence. A suite that ran and skipped is reported
+          # as a failure.
+          for t in TestEndToEndLANToWAN \
+                   TestEndToEndNAT \
+                   TestEndToEndForwarding \
+                   TestWANToLANBlocked \
+                   TestEndToEndHealthCheck \
+                   TestEndToEndRollback \
+                   TestEndToEndRollbackRestoresBaseline \
+                   TestEndToEndPreservesUnmanagedResources \
+                   TestEndToEndProductionActivationBlocked; do
+            if grep -q -- "--- SKIP: $t" /tmp/lab.log; then
+              echo
+              echo "$t skipped, but it must not have: the live lab suite did not run."
+              echo "The runner needs iproute2, nftables, util-linux and euid 0."
+              exit 1
+            fi
+            if ! grep -q -- "--- PASS: $t" /tmp/lab.log; then
+              echo
+              echo "$t did not pass and did not skip; see the log above."
+              exit 1
+            fi
+            echo "$t ran"
+          done
+
+          # The unit half of M6.2 runs everywhere, so a skip here would mean
+          # the package was not built at all.
+          for t in TestCanonicalTopologyAddressing \
+                   TestGatewayAndClientShareTheLANBlock \
+                   TestLabUsesNonPhysicalInterfaceNames; do
+            if ! grep -q -- "--- PASS: $t" /tmp/lab.log; then
+              echo
+              echo "$t did not pass; see the log above."
+              exit 1
+            fi
+            echo "$t ran"
+          done
+
       - name: Verify the Linux binary is CGO-free
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \

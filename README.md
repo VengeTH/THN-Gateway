@@ -15,8 +15,22 @@ removed structurally rather than avoided by convention.
 | **Implemented** | `observe` · `model` · `plan` · `validate` · `simulate` |
 | **Not implemented** | `apply` · `health-check` · `commit` · `rollback` |
 
-`apply` is absent, not disabled. There is no flag, environment variable or
-configuration key that enables it, because there is no code that could.
+`apply` is absent from this build's *shipped* path, not disabled. There is no
+flag, environment variable or configuration key that enables production
+activation, because there is no code that could.
+
+The one apply path that does exist is confined to a disposable Linux lab, and
+cannot be reached from `thn activate`:
+
+| Driver | `CanApply()` | Where it can run |
+|---|---|---|
+| `ProductionDriver` | `false`, permanently | nowhere — refuses every mutation |
+| `LinuxDriver` | only after `VerifyLabEnvironment` | a disposable lab that declares itself one, by marker file, hostname, MAC and interface checks |
+
+`internal/execution` is exercised against real packets inside network
+namespaces by `internal/lab`, and by hand in a lab VM — see
+[docs/disposable-lab.md](./docs/disposable-lab.md). Nothing in that path can
+reach a physical gateway.
 
 ## Commands
 
@@ -158,7 +172,10 @@ internal/
   activation/         state machine; Disabled applier
   network/            read-only host inspection
   firewall/           read-only nftables/tc inspection
-  recovery/           rollback planning (no execution)
+    execution/          transactions, drivers, rollback, lab authorization
+    netns/              isolated network namespaces for tests that need a kernel
+    lab/                M6.2 disposable gateway topology and live end-to-end suite
+    recovery/           rollback planning (no execution)
   state/              SQLite store, owned exclusively by thnd
   logging/            slog to journal + durable events
   cli/                command dispatch and tiers

@@ -112,20 +112,20 @@ func validateNoShellMetachars(arg string) error {
 }
 
 func validateIPArgs(args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("ip requires at least subsystem and action")
+	// A leading run of flags precedes the subsystem. `ip -j -d link show` is a
+	// read-only inspection that the guard allowlist permits outright, so a
+	// validator that stopped at the first flag would refuse a command the
+	// rest of THN considers safe — and the caller would have no way to tell
+	// that from a malformed command.
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		i++
+	}
+	if i >= len(args) {
+		return fmt.Errorf("ip requires a subsystem after its flags")
 	}
 
-	subsystem := args[0]
-	switch subsystem {
-	case "-j", "-br", "-d", "-o", "-4", "-6":
-		// Flag prefix; subsystem is next token
-		if len(args) > 1 {
-			subsystem = args[1]
-		}
-	}
-
-	switch subsystem {
+	switch args[i] {
 	case "link":
 		// ip link set <dev> up|down, or ip link show
 		return nil
@@ -136,7 +136,7 @@ func validateIPArgs(args []string) error {
 		// ip route add/replace/del/show
 		return nil
 	default:
-		return fmt.Errorf("unsupported ip subsystem %q", subsystem)
+		return fmt.Errorf("unsupported ip subsystem %q", args[i])
 	}
 }
 

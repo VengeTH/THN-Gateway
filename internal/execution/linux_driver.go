@@ -4,8 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"strings"
+	"time"
 )
+
+// trafficProbeTimeout bounds a real-traffic health check.
+//
+// Long enough to cross a veth pair, be forwarded, translated and answered; a
+// second is plenty on a healthy lab and a short timeout would let a slow host
+// report a firewall problem that does not exist.
+const trafficProbeTimeout = 3 * time.Second
 
 // LinuxDriver performs real Linux networking mutations using guarded system tools.
 //
@@ -16,6 +25,7 @@ type LinuxDriver struct {
 	labCfg       LabConfig
 	labVerified  bool
 	capabilities Capabilities
+	prober       TrafficProber
 }
 
 // NewLinuxDriver constructs a Linux driver.
@@ -27,6 +37,16 @@ func NewLinuxDriver(runner CommandRunner, labCfg LabConfig) *LinuxDriver {
 		runner: runner,
 		labCfg: labCfg,
 	}
+}
+
+// SetTrafficProber installs the prober used by real-traffic health checks.
+//
+// It is optional. A driver without one still runs every structural check; it
+// simply reports a traffic check as unevaluable rather than passing it, which
+// is the only safe reading of "I could not try".
+func (d *LinuxDriver) SetTrafficProber(p TrafficProber) *LinuxDriver {
+	d.prober = p
+	return d
 }
 
 func (d *LinuxDriver) Name() string {
@@ -144,53 +164,7 @@ func (d *LinuxDriver) Execute(ctx context.Context, op Operation) error {
 		return err
 
 	case OpNFTApplyTHNTable:
-		// THN owns table inet thn ONLY.
-		// 1. Create table
-		if _, _, err := d.runner.Run(ctx, "nft", "add", "table", "inet", "thn"); err != nil {
-			return err
-		}
-		// 2. Flush only inet thn (never flush ruleset!)
-		if _, _, err := d.runner.Run(ctx, "nft", "flush", "table", "inet", "thn"); err != nil {
-			return err
-		}
-		// 3. Create input chain with policy
-		if _, _, err := d.runner.Run(ctx, "nft", "add", "chain", "inet", "thn", "input",
-			"{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", o.InboundPolicy, ";", "}"); err != nil {
-			return err
-		}
-		// 4. Create forward chain with policy
-		if _, _, err := d.runner.Run(ctx, "nft", "add", "chain", "inet", "thn", "forward",
-			"{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", o.InboundPolicy, ";", "}"); err != nil {
-			return err
-		}
-		// 5. Allow established,related
-		if o.AllowEstablished {
-			if _, _, err := d.runner.Run(ctx, "nft", "add", "rule", "inet", "thn", "input",
-				"ct", "state", "established,related", "accept"); err != nil {
-				return err
-			}
-		}
-		// 6. Allow loopback
-		if o.AllowLoopback {
-			if _, _, err := d.runner.Run(ctx, "nft", "add", "rule", "inet", "thn", "input",
-				"iifname", "lo", "accept"); err != nil {
-				return err
-			}
-		}
-		// 7. NAT masquerade if configured
-		if len(o.NATInterfaces) > 0 {
-			if _, _, err := d.runner.Run(ctx, "nft", "add", "chain", "inet", "thn", "postrouting",
-				"{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "policy", "accept", ";", "}"); err != nil {
-				return err
-			}
-			for _, iface := range o.NATInterfaces {
-				if _, _, err := d.runner.Run(ctx, "nft", "add", "rule", "inet", "thn", "postrouting",
-					"oifname", iface, "masquerade"); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
+		return d.applyTHNTable(ctx, o)
 
 	case OpNFTDeleteTHNTable:
 		// Delete only table inet thn
@@ -216,6 +190,101 @@ func (d *LinuxDriver) Execute(ctx context.Context, op Operation) error {
 	default:
 		return fmt.Errorf("unknown operation type: %T", op)
 	}
+}
+
+// applyTHNTable installs `table inet thn`, which is the only nftables table
+// THN owns.
+//
+// Every other table on the host is left alone, so a foreign firewall — a VPN
+// client, a container runtime, the operator's own rules — survives a THN
+// transaction untouched. The flush below is scoped to this table for the same
+// reason: it makes apply idempotent without ever reaching the ruleset.
+func (d *LinuxDriver) applyTHNTable(ctx context.Context, o OpNFTApplyTHNTable) error {
+	run := func(args ...string) error {
+		_, _, err := d.runner.Run(ctx, "nft", args...)
+		return err
+	}
+
+	if err := run("add", "table", "inet", "thn"); err != nil {
+		return err
+	}
+	// Scope of the flush is exactly `inet thn`. `nft flush ruleset` is
+	// forbidden by ValidateCommand and is never constructed here.
+	if err := run("flush", "table", "inet", "thn"); err != nil {
+		return err
+	}
+
+	if err := run("add", "chain", "inet", "thn", "input",
+		"{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", o.InboundPolicy, ";", "}"); err != nil {
+		return err
+	}
+	if err := run("add", "chain", "inet", "thn", "forward",
+		"{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", o.InboundPolicy, ";", "}"); err != nil {
+		return err
+	}
+
+	if o.AllowEstablished {
+		if err := run("add", "rule", "inet", "thn", "input", "ct", "state", "established,related", "accept"); err != nil {
+			return err
+		}
+		// Return traffic for a forwarded session has to be permitted in the
+		// forward chain too. Without it a client can open a connection and
+		// every reply is dropped, which presents as a hang rather than as a
+		// firewall problem.
+		if err := run("add", "rule", "inet", "thn", "forward", "ct", "state", "established,related", "accept"); err != nil {
+			return err
+		}
+	}
+
+	if o.AllowLoopback {
+		if err := run("add", "rule", "inet", "thn", "input", "iifname", "lo", "accept"); err != nil {
+			return err
+		}
+		if err := run("add", "rule", "inet", "thn", "forward", "iifname", "lo", "accept"); err != nil {
+			return err
+		}
+	}
+
+	if o.GatewayPath() {
+		// LAN to WAN is the one direction a gateway exists to permit. The
+		// chain policy is drop, so this rule is what makes the device forward
+		// at all — there is no implicit allow.
+		forward := []string{"add", "rule", "inet", "thn", "forward",
+			"iifname", o.LANInterface, "oifname", o.WANInterface}
+		if o.LANSubnet != "" {
+			forward = append(forward, "ip", "saddr", o.LANSubnet)
+		}
+		forward = append(forward, "accept")
+		if err := run(forward...); err != nil {
+			return err
+		}
+
+		// The LAN is the trusted segment, so a client can reach the gateway's
+		// own services. WAN-to-LAN is deliberately absent: with a drop policy
+		// it is refused, and no rule below grants it.
+		input := []string{"add", "rule", "inet", "thn", "input", "iifname", o.LANInterface}
+		if o.LANSubnet != "" {
+			input = append(input, "ip", "saddr", o.LANSubnet)
+		}
+		input = append(input, "accept")
+		if err := run(input...); err != nil {
+			return err
+		}
+	}
+
+	if len(o.NATInterfaces) > 0 {
+		if err := run("add", "chain", "inet", "thn", "postrouting",
+			"{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "policy", "accept", ";", "}"); err != nil {
+			return err
+		}
+		for _, iface := range o.NATInterfaces {
+			if err := run("add", "rule", "inet", "thn", "postrouting", "oifname", iface, "masquerade"); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // CaptureState inspects actual Linux network state for scoped resources.
@@ -344,21 +413,33 @@ func (d *LinuxDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (H
 			}
 
 		case "address_assigned":
-			parts := strings.Split(hc.Target, ":")
-			iface := parts[0]
+			iface := hc.Target
+			if idx := strings.Index(iface, ":"); idx >= 0 {
+				iface = iface[:idx]
+			}
 			stdout, _, err := d.runner.Run(ctx, "ip", "-j", "addr", "show", iface)
 			if err != nil {
 				res.Passed = false
 				res.Error = err.Error()
 				allPassed = false
-			} else {
-				if strings.Contains(hc.Expectation, "10.77.0.1/24") && !strings.Contains(stdout, "10.77.0.1") {
-					res.Passed = false
-					res.Observed = "10.77.0.1 not found on interface"
-					allPassed = false
+			} else if want, ok := expectedCIDR(hc.Expectation); ok {
+				// The CIDR is read from the plan's own expectation rather than
+				// assumed, so the check verifies the address the operator asked
+				// for. A hardcoded 10.77.0.1 would pass on a lab configured for
+				// something else, which is the opposite of a check.
+				if interfaceHasAddress(stdout, want) {
+					res.Observed = fmt.Sprintf("%s assigned to %s", want, iface)
 				} else {
-					res.Observed = "address assigned"
+					res.Passed = false
+					res.Observed = fmt.Sprintf("%s not found on interface %s (kernel reports %s)", want, iface, strings.TrimSpace(stdout))
+					allPassed = false
 				}
+			} else if interfaceHasAddress(stdout, "10.77.0.1/24") {
+				res.Observed = "address assigned"
+			} else {
+				res.Passed = false
+				res.Observed = "10.77.0.1 not found on interface"
+				allPassed = false
 			}
 
 		case "kernel_forwarding":
@@ -381,6 +462,26 @@ func (d *LinuxDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (H
 			} else {
 				res.Observed = "table inet thn active"
 			}
+
+		case "nat_masquerade":
+			res, allPassed = d.checkNAT(ctx, hc, res, allPassed)
+
+		case "lan_to_wan_traffic":
+			res, allPassed = d.checkTraffic(ctx, hc, res, allPassed, ProbeSideLAN, true)
+
+		case "wan_to_lan_blocked":
+			res, allPassed = d.checkTraffic(ctx, hc, res, allPassed, ProbeSideWAN, false)
+
+		default:
+			// An unrecognised check fails rather than passing.
+			//
+			// The alternative is worse than useless: a plan carrying a check
+			// this build cannot evaluate would report the gateway healthy on
+			// the strength of the checks that happened to be understood.
+			res.Passed = false
+			res.Observed = "check was not evaluated"
+			res.Error = fmt.Sprintf("unsupported health check %q", hc.Check)
+			allPassed = false
 		}
 
 		results = append(results, res)
@@ -396,4 +497,175 @@ func (d *LinuxDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (H
 		Checks:        results,
 		FailureReason: failReason,
 	}, nil
+}
+
+// checkNAT confirms a masquerade rule is really installed.
+//
+// The rule's presence in the table is not enough on its own: masquerade has to
+// be in the postrouting chain to be consulted, and a rule naming an interface
+// that does not exist never matches.
+func (d *LinuxDriver) checkNAT(ctx context.Context, hc HealthCheck, res HealthCheckResult, allPassed bool) (HealthCheckResult, bool) {
+	stdout, _, err := d.runner.Run(ctx, "nft", "list", "table", "inet", "thn")
+	if err != nil {
+		res.Passed, allPassed = false, false
+		res.Observed = "table inet thn absent or error"
+		return res, allPassed
+	}
+
+	if !strings.Contains(stdout, "chain postrouting") {
+		res.Passed, allPassed = false, false
+		res.Observed = "no postrouting chain"
+		return res, allPassed
+	}
+	if !strings.Contains(stdout, "masquerade") {
+		res.Passed, allPassed = false, false
+		res.Observed = "postrouting chain has no masquerade rule"
+		return res, allPassed
+	}
+
+	for _, iface := range interfacesNamedIn(hc.Expectation) {
+		if !strings.Contains(stdout, iface) {
+			res.Passed, allPassed = false, false
+			res.Observed = fmt.Sprintf("masquerade rule does not name interface %s", iface)
+			return res, allPassed
+		}
+	}
+
+	res.Observed = "masquerade rule active in postrouting"
+	return res, allPassed
+}
+
+// interfacesNamedIn extracts interface names from an expectation of the form
+// "masquerade rule active for eth0, thnwan0".
+func interfacesNamedIn(expectation string) []string {
+	const marker = " active for "
+	idx := strings.Index(expectation, marker)
+	if idx < 0 {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(expectation[idx+len(marker):], ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// checkTraffic performs a real connection and judges the result.
+//
+// wantReachable is the point of the check. For the LAN-to-WAN check it is
+// true and a refusal is a failure of the gateway; for the WAN-to-LAN check it
+// is false and a success is the failure. The two are otherwise the same probe,
+// which is the point: a firewall that is open and a firewall that is shut are
+// distinguished by a packet, not by a rule listing.
+func (d *LinuxDriver) checkTraffic(ctx context.Context, hc HealthCheck, res HealthCheckResult, allPassed bool, side string, wantReachable bool) (HealthCheckResult, bool) {
+	if d.prober == nil {
+		res.Passed, allPassed = false, false
+		res.Observed = "not evaluated"
+		res.Error = "no traffic prober is configured; real-traffic checks cannot be claimed"
+		return res, allPassed
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, trafficProbeTimeout)
+	defer cancel()
+
+	outcome, err := d.prober.Probe(probeCtx, side, hc.Target, trafficProbeTimeout)
+	if err != nil {
+		// A probe that could not run is not a probe that failed. Reporting it
+		// as either would be a claim about the firewall the code has not made.
+		res.Passed, allPassed = false, false
+		res.Observed = "probe could not be executed"
+		res.Error = err.Error()
+		return res, allPassed
+	}
+
+	res.Observed = describeProbe(outcome)
+
+	if outcome.Reachable != wantReachable {
+		res.Passed, allPassed = false, false
+		if wantReachable {
+			res.Error = fmt.Sprintf("connection from %s to %s failed: %s", side, hc.Target, outcome.Error)
+		} else {
+			res.Error = fmt.Sprintf("connection from %s to %s succeeded and should not have", side, hc.Target)
+		}
+		return res, allPassed
+	}
+
+	return res, allPassed
+}
+
+func describeProbe(p ProbeResult) string {
+	if !p.Reachable {
+		return fmt.Sprintf("no connection (source %s): %s", orNone(p.SourceAddress), p.Error)
+	}
+	seen := p.ObservedSource
+	if seen == "" {
+		seen = "(not reported)"
+	}
+	return fmt.Sprintf("connected from %s; endpoint observed source %s",
+		orNone(p.SourceAddress), seen)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(unknown)"
+	}
+	return s
+}
+
+// expectedCIDR extracts the address a plan expects an interface to carry.
+//
+// Expectations are rendered as "interface eth1 carries CIDR 10.77.0.1/24",
+// so the CIDR is the last whitespace-separated token that parses as one.
+// Anything that does not parse yields no expectation, and the caller falls back
+// to the address the whole project has always treated as canonical.
+func expectedCIDR(expectation string) (string, bool) {
+	fields := strings.Fields(expectation)
+	if len(fields) == 0 {
+		return "", false
+	}
+	last := fields[len(fields)-1]
+	if _, err := netip.ParsePrefix(last); err != nil {
+		return "", false
+	}
+	return last, true
+}
+
+// interfaceHasAddress reports whether `ip -j addr show` output carries a
+// specific CIDR.
+//
+// The comparison is over parsed fields rather than a substring. `ip` reports
+// the address and its prefix length separately, so a substring search for
+// "10.77.0.1/24" against real kernel output fails on a correct interface — and
+// a substring search for "10.77.0.1" would match 10.77.0.10. Either error turns
+// a health check into noise.
+func interfaceHasAddress(jsonOutput, cidr string) bool {
+	want, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return false
+	}
+
+	var links []struct {
+		AddrInfo []struct {
+			Local     string `json:"local"`
+			Prefixlen int    `json:"prefixlen"`
+		} `json:"addr_info"`
+	}
+	if err := json.Unmarshal([]byte(jsonOutput), &links); err != nil {
+		return false
+	}
+
+	for _, link := range links {
+		for _, info := range link.AddrInfo {
+			addr, err := netip.ParseAddr(info.Local)
+			if err != nil {
+				continue
+			}
+			if addr == want.Addr() && info.Prefixlen == want.Bits() {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -104,6 +105,49 @@ type HealthCheck struct {
 	Target      string `json:"target"`
 	Check       string `json:"check"`
 	Expectation string `json:"expectation"`
+}
+
+// ProbeSide names which side of the gateway a real-traffic probe starts from.
+const (
+	// ProbeSideLAN originates in the downstream segment.
+	ProbeSideLAN = "lan"
+	// ProbeSideWAN originates on the upstream segment.
+	ProbeSideWAN = "wan"
+)
+
+// ProbeResult reports what actually happened when a connection was attempted.
+//
+// This is the difference between "the firewall loaded" and "the firewall
+// permits the traffic it was installed for". Only a real connection produces
+// these fields.
+type ProbeResult struct {
+	// Reachable reports whether the connection completed.
+	Reachable bool `json:"reachable"`
+	// SourceAddress is the address the probe left from, which is how a NAT
+	// translation is confirmed from the near side.
+	SourceAddress string `json:"source_address,omitempty"`
+	// ObservedSource is the source address the far end reported seeing, which
+	// is how a NAT translation is confirmed from the far side.
+	ObservedSource string `json:"observed_source,omitempty"`
+	// Error carries the connection failure, so a blocked path and a broken
+	// path can be told apart in a failure message.
+	Error string `json:"error,omitempty"`
+}
+
+// TrafficProber performs real network connections on behalf of a health check.
+//
+// It is an interface rather than a concrete type because the driver must not
+// know how the lab is built: a disposable namespace harness, an operator's
+// manual client VM and a future remote prober are all the same dependency.
+//
+// A driver without one is not broken — it simply cannot evaluate a check that
+// requires real traffic, and says so instead of reporting a pass.
+type TrafficProber interface {
+	// Probe opens a TCP connection to endpoint from the given side of the
+	// gateway. It must return a result rather than an error for an ordinary
+	// connection refusal: a firewall blocking traffic is a finding, not a
+	// failure of the probe.
+	Probe(ctx context.Context, side, endpoint string, timeout time.Duration) (ProbeResult, error)
 }
 
 // HealthCheckResult reports the outcome of a single health check.

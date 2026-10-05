@@ -294,6 +294,27 @@ type OpNFTApplyTHNTable struct {
 	AllowEstablished bool     `json:"allow_established"`
 	AllowLoopback    bool     `json:"allow_loopback"`
 	NATInterfaces    []string `json:"nat_interfaces,omitempty"`
+
+	// LANInterface and WANInterface are the kernel names the gateway routes
+	// between. They are optional because not every plan has both resolved;
+	// when either is absent THN installs the table without the inter-segment
+	// forwarding rules rather than guessing a direction.
+	//
+	// This matters more than it looks. The forward chain's policy is the same
+	// drop policy the input chain uses, and a drop policy with no accept rule
+	// blocks everything — including the LAN-to-WAN traffic that is the entire
+	// point of the device. These fields are what make the gateway forward
+	// anything at all.
+	LANInterface string `json:"lan_interface,omitempty"`
+	WANInterface string `json:"wan_interface,omitempty"`
+
+	// LANSubnet is the prefix LANInterface is expected to serve. When set it
+	// is matched alongside the interface name, so a host that somehow
+	// acquired a second address on the LAN link cannot source forwarding
+	// traffic with it.
+	//
+	// Empty when the segment was never determined.
+	LANSubnet string `json:"lan_subnet,omitempty"`
 }
 
 func (o OpNFTApplyTHNTable) Kind() OpKind                   { return OpKindNFTApplyTHNTable }
@@ -312,7 +333,29 @@ func (o OpNFTApplyTHNTable) Validate() error {
 			return fmt.Errorf("invalid NAT interface %q", iface)
 		}
 	}
+	for field, iface := range map[string]string{"LAN": o.LANInterface, "WAN": o.WANInterface} {
+		if iface != "" && !ifaceRegex.MatchString(iface) {
+			return fmt.Errorf("invalid %s interface %q", field, iface)
+		}
+	}
+	if o.LANInterface != "" && o.WANInterface != "" && o.LANInterface == o.WANInterface {
+		return fmt.Errorf("LAN and WAN must not both be %q; a gateway cannot route out of its own ingress", o.LANInterface)
+	}
+	if o.LANSubnet != "" {
+		if _, err := netip.ParsePrefix(o.LANSubnet); err != nil {
+			return fmt.Errorf("invalid LAN subnet %q: %w", o.LANSubnet, err)
+		}
+	}
 	return nil
+}
+
+// GatewayPath reports whether the operation can install forwarding rules.
+//
+// A caller that needs to know whether LAN-to-WAN traffic will be permitted
+// asks this rather than reading the policy, because the policy alone answers
+// "drop" whether or not the gateway is allowed to pass traffic.
+func (o OpNFTApplyTHNTable) GatewayPath() bool {
+	return o.LANInterface != "" && o.WANInterface != ""
 }
 
 type OpNFTDeleteTHNTable struct{}
@@ -414,6 +457,36 @@ func (o OpDNSApply) Validate() error {
 
 // ---------------------------------------------------------------- planner bridge
 
+// lanSubnet derives the LAN prefix the plan's firewall should match.
+//
+// It is read from the plan where the plan carries the information, and from
+// the observation where it does not. Both orderings occur in practice: a plan
+// that also assigns the LAN address states the prefix directly, and a plan
+// that only installs the firewall has to fall back to what is already
+// configured — otherwise the second transaction on a gateway would install a
+// looser forwarding rule than the first.
+//
+// Deriving it here, rather than from a constant, is what keeps the forwarding
+// rule and the addressing it governs from describing different segments.
+func lanSubnet(p *planner.Plan, obs diff.Observed) string {
+	for _, step := range p.Steps {
+		if step.ID != "lan-address-add" {
+			continue
+		}
+		for _, field := range strings.Split(step.Desired, ",") {
+			if prefix, err := netip.ParsePrefix(strings.TrimSpace(field)); err == nil {
+				return prefix.Masked().String()
+			}
+		}
+	}
+	for _, addr := range obs.LANAddresses {
+		if prefix, err := netip.ParsePrefix(strings.TrimSpace(addr)); err == nil {
+			return prefix.Masked().String()
+		}
+	}
+	return ""
+}
+
 // PlanToOperations converts actionable steps in a planner.Plan into structured Operations.
 func PlanToOperations(p *planner.Plan, obs diff.Observed) ([]Operation, error) {
 	var ops []Operation
@@ -497,6 +570,9 @@ func PlanToOperations(p *planner.Plan, obs diff.Observed) ([]Operation, error) {
 				AllowEstablished: true,
 				AllowLoopback:    true,
 				NATInterfaces:    natIfaces,
+				LANInterface:     obs.LANName,
+				WANInterface:     obs.WANName,
+				LANSubnet:        lanSubnet(p, obs),
 			})
 
 		case "qos-absent", "qos-algorithm":

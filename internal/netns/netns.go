@@ -39,8 +39,10 @@ package netns
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -110,7 +112,14 @@ func Create(name string) (*Namespace, error) {
 		return nil, err
 	}
 
-	n := &Namespace{Name: name, Path: "/var/run/netns/" + name}
+	n := &Namespace{Name: name, Path: storeDir + name}
+
+	// iproute2's namespace store is not always present on a minimal image,
+	// and unshare cannot create the bind mount inside a directory that does
+	// not exist.
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating namespace store %s: %w", storeDir, err)
+	}
 
 	if _, err := run("unshare", "--net", "--mount", n.Path); err != nil {
 		return nil, fmt.Errorf("creating namespace %s: %w", name, err)
@@ -125,6 +134,34 @@ func Create(name string) (*Namespace, error) {
 // It is safe to call more than once. Tearing down a namespace removes every
 // interface in it, so a qdisc attached inside goes with it and the host is
 // left untouched.
+// storeDir is where the kernel-facing namespace handles live. It is iproute2's
+// own convention, not this package's, so `ip link set <peer> netns <name>`
+// finds a namespace created here and vice versa.
+const storeDir = "/var/run/netns/"
+
+// Remove destroys a named namespace.
+//
+// Separate from Close because a namespace can outlive the Namespace value that
+// created it: a test killed mid-run leaves one behind, and the next attempt to
+// create it fails with an error that names neither the cause nor the fix.
+//
+// The unmount is unconditional and best-effort. A stale bind mount outlives the
+// namespace it pointed at, and `ip netns delete` refuses to remove a path that
+// is still mounted — so the unmount has to be attempted whether or not the
+// mount is believed to be there.
+func Remove(name string) error {
+	if err := checkToken("namespace", name); err != nil {
+		return err
+	}
+	if _, err := run("umount", storeDir+name); err != nil {
+		_ = err
+	}
+	if _, err := run("ip", "netns", "delete", name); err != nil {
+		return fmt.Errorf("removing namespace %s: %w", name, err)
+	}
+	return nil
+}
+
 func (n *Namespace) Close() error {
 	if n == nil {
 		return nil
@@ -147,6 +184,225 @@ func (n *Namespace) Close() error {
 	}
 	if _, err := run("ip", "netns", "delete", n.Name); err != nil {
 		return fmt.Errorf("destroying namespace %s: %w", n.Name, err)
+	}
+	return nil
+}
+
+// -------------------------------------------------------------- topology
+//
+// Everything below builds a wired topology. It exists because the M6.2
+// gateway tests need more than one interface, and because a veth pair is the
+// only way to give two namespaces a real link to carry real packets over.
+//
+// The safety argument is unchanged. Every command here runs *inside* a
+// namespace, including the one that moves a veth peer into a second
+// namespace: `ip link set <peer> netns <name>` resolves <name> through
+// /var/run/netns and enters it, so no link is ever created on the host. A
+// namespace carries its links to its destruction, so there is no code path
+// from here to a host interface.
+
+// LinkAdd creates a link of the given kind inside the namespace.
+//
+// kind is a plain word ("bridge", "dummy") and every extra argument is checked
+// as a single token, so nothing here can reach a shell. The link exists only
+// inside the namespace and disappears with it.
+func (n *Namespace) LinkAdd(name, kind string, extra ...string) error {
+	if err := checkToken("interface", name); err != nil {
+		return err
+	}
+	if err := checkToken("link kind", kind); err != nil {
+		return err
+	}
+	args := []string{"link", "add", name, "type", kind}
+	for _, arg := range extra {
+		if err := checkToken("argument", arg); err != nil {
+			return err
+		}
+		args = append(args, arg)
+	}
+	if _, err := n.Run("ip", args...); err != nil {
+		return fmt.Errorf("creating %s link %s: %w", kind, name, err)
+	}
+	return nil
+}
+
+// Enslave attaches an interface to a bridge or bond inside the namespace.
+func (n *Namespace) Enslave(iface, master string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	if err := checkToken("interface", master); err != nil {
+		return err
+	}
+	if _, err := n.Run("ip", "link", "set", iface, "master", master); err != nil {
+		return fmt.Errorf("enslaving %s to %s: %w", iface, master, err)
+	}
+	return nil
+}
+
+// LinkUp brings an interface up inside the namespace.
+func (n *Namespace) LinkUp(iface string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	_, err := n.Run("ip", "link", "set", iface, "up")
+	if err != nil {
+		return fmt.Errorf("bringing %s up: %w", iface, err)
+	}
+	return nil
+}
+
+// LinkDown brings an interface down inside the namespace.
+func (n *Namespace) LinkDown(iface string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	_, err := n.Run("ip", "link", "set", iface, "down")
+	if err != nil {
+		return fmt.Errorf("bringing %s down: %w", iface, err)
+	}
+	return nil
+}
+
+// AddrAdd assigns a CIDR to an interface inside the namespace.
+func (n *Namespace) AddrAdd(iface, cidr string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	if _, err := netip.ParsePrefix(cidr); err != nil {
+		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+	}
+	if _, err := n.Run("ip", "addr", "add", cidr, "dev", iface); err != nil {
+		return fmt.Errorf("assigning %s to %s: %w", cidr, iface, err)
+	}
+	return nil
+}
+
+// AddrDel removes a CIDR from an interface inside the namespace.
+func (n *Namespace) AddrDel(iface, cidr string) error {
+	if err := checkToken("interface", iface); err != nil {
+		return err
+	}
+	if _, err := n.Run("ip", "addr", "del", cidr, "dev", iface); err != nil {
+		return fmt.Errorf("removing %s from %s: %w", cidr, iface, err)
+	}
+	return nil
+}
+
+// RouteAdd installs a route inside the namespace.
+//
+// via is optional: a connected or blackhole route has no next hop.
+func (n *Namespace) RouteAdd(dest, via, dev string) error {
+	if err := checkDestination(dest); err != nil {
+		return err
+	}
+	args := []string{"route", "add", dest}
+	if via != "" {
+		if _, err := netip.ParseAddr(via); err != nil {
+			return fmt.Errorf("invalid next hop %q: %w", via, err)
+		}
+		args = append(args, "via", via)
+	}
+	if dev != "" {
+		if err := checkToken("interface", dev); err != nil {
+			return err
+		}
+		args = append(args, "dev", dev)
+	}
+	if _, err := n.Run("ip", args...); err != nil {
+		return fmt.Errorf("adding route %s: %w", dest, err)
+	}
+	return nil
+}
+
+// RouteDel removes a route inside the namespace.
+func (n *Namespace) RouteDel(dest, via, dev string) error {
+	if err := checkDestination(dest); err != nil {
+		return err
+	}
+	args := []string{"route", "del", dest}
+	if via != "" {
+		args = append(args, "via", via)
+	}
+	if dev != "" {
+		if err := checkToken("interface", dev); err != nil {
+			return err
+		}
+		args = append(args, "dev", dev)
+	}
+	if _, err := n.Run("ip", args...); err != nil {
+		return fmt.Errorf("deleting route %s: %w", dest, err)
+	}
+	return nil
+}
+
+// AddVeth creates a veth pair inside the namespace and moves the peer end
+// into another namespace.
+//
+// Both halves are created inside this namespace, so nothing appears on the
+// host. The peer keeps its own name, which is why the returned value is the
+// name actually present in this namespace — the caller's name is only
+// meaningful for the link that stayed here.
+//
+// The link in this namespace keeps the name given. The peer is renamed by the
+// caller in its own namespace, because a veth peer can be given a different
+// name once it is there.
+func (n *Namespace) AddVeth(name, peer, peerNamespace string) error {
+	if err := checkToken("interface", name); err != nil {
+		return err
+	}
+	if err := checkToken("interface", peer); err != nil {
+		return err
+	}
+	if peerNamespace == "" {
+		return fmt.Errorf("veth peer must be moved to a namespace")
+	}
+	if err := checkToken("namespace", peerNamespace); err != nil {
+		return err
+	}
+
+	if _, err := n.Run("ip", "link", "add", name, "type", "veth", "peer", "name", peer); err != nil {
+		return fmt.Errorf("creating veth pair %s/%s: %w", name, peer, err)
+	}
+	if _, err := n.Run("ip", "link", "set", peer, "netns", peerNamespace); err != nil {
+		// The pair is half-built and unusable. Remove it so the failure does
+		// not leave a link that shadows the name a later attempt would use.
+		_, _ = n.Run("ip", "link", "del", name)
+		return fmt.Errorf("moving veth peer %s into %s: %w", peer, peerNamespace, err)
+	}
+	return nil
+}
+
+// LoopbackUp brings the namespace's loopback up, which it needs before any
+// TCP probe inside it can complete a handshake.
+func (n *Namespace) LoopbackUp() error {
+	if _, err := n.Run("ip", "link", "set", "lo", "up"); err != nil {
+		return fmt.Errorf("bringing up loopback: %w", err)
+	}
+	return nil
+}
+
+// tokenPattern is the set of names accepted as a single argv token.
+//
+// These functions build argument vectors, never a shell string, so this is not
+// an injection boundary. It exists because a name containing a space would
+// otherwise be silently split by a caller and produce a confusing failure much
+// later, and because a namespace name is used as a path component.
+var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.\-]{1,63}$`)
+
+func checkToken(what, s string) error {
+	if !tokenPattern.MatchString(s) {
+		return fmt.Errorf("invalid %s name %q", what, s)
+	}
+	return nil
+}
+
+func checkDestination(dest string) error {
+	if dest == "default" {
+		return nil
+	}
+	if _, err := netip.ParsePrefix(dest); err != nil {
+		return fmt.Errorf("invalid route destination %q: %w", dest, err)
 	}
 	return nil
 }

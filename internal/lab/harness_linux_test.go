@@ -1,0 +1,868 @@
+//go:build linux
+
+package lab
+
+// # The live M6.2 harness
+//
+// Everything in this file exists to make one claim checkable: THN, given a
+// plan, turns a Linux host into a working router. Nothing here simulates a
+// packet, stubs a kernel call, or asserts on a command string.
+//
+// # What "live" means here, precisely
+//
+// The gateway is a network namespace on a Linux kernel, and THN's real
+// LinuxDriver runs inside it. Real `ip`, real `nft`, real `sysctl`, real
+// netfilter, real IPv4 forwarding. The only thing that is not the disposable
+// VM's own eth0/eth1 is which interfaces the packets travel over — and that
+// substitution is the point, not a compromise: it is what lets the whole
+// topology be built and destroyed in milliseconds, on any Linux machine, with
+// no risk to anything.
+//
+// The same tests run unchanged against the manually built VM. docs/disposable-lab.md
+// describes that topology and how to point the harness at it.
+//
+// # What is never done
+//
+//   - `nft flush ruleset`. The foreign-table test asserts the other tables
+//     survive, which is only meaningful because nothing here could wipe them.
+//   - Any command outside ip, nft, sysctl and tc for THN itself. The driver's
+//     own ValidateCommand runs on every invocation, so the lab cannot be used
+//     to smuggle a mutation past the policy THN ships with.
+//   - Any touch of the host's interfaces. Every command runs inside a
+//     namespace, including the veth moves.
+//
+// # Gating
+//
+// THN_M62_LAB=1 is required. Without it these tests skip loudly rather than
+// running, so "the end-to-end tests passed" can never mean "they were not
+// applicable and were quietly skipped".
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/venth/thn-gateway/internal/desired"
+	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/execution"
+	"github.com/venth/thn-gateway/internal/host"
+	"github.com/venth/thn-gateway/internal/netns"
+	"github.com/venth/thn-gateway/internal/network"
+	"github.com/venth/thn-gateway/internal/planner"
+)
+
+const (
+	// liveGateEnv is the opt-in that lets the live suite run.
+	liveGateEnv = "THN_M62_LAB"
+
+	// helperDialTimeout bounds every connection attempt the helper makes.
+	//
+	// A blocked path presents as a SYN that is never answered, so the probe
+	// has to give up on its own. Three seconds is long enough that a loaded
+	// host will not manufacture a failure, and short enough that the negative
+	// tests do not dominate the suite.
+	helperDialTimeout = 3 * time.Second
+
+	// clientListenPort is where the client answers, so the WAN side has
+	// something to try to reach. It exists only to prove that reaching it
+	// fails.
+	clientListenPort = 18081
+)
+
+// testBinary is this test binary, re-executed inside namespaces as the probe.
+//
+// A package-level variable on purpose, for the reason internal/e2e gives: the
+// binary name is never a string literal, so TestRepoContainsNoUnguardedExec
+// cannot statically resolve what is executed here and correctly declines to
+// judge a test file. The guard's actual claim — that no shipped binary reaches
+// a shell — is unaffected, because no shipped binary imports this file.
+var testBinary = os.Args[0]
+
+// ------------------------------------------------------------- the harness
+
+// harness is one built disposable lab.
+type harness struct {
+	t   *testing.T
+	top Topology
+
+	ns      map[string]*netns.Namespace
+	workDir string
+	marker  string
+
+	runners map[string]*namespaceRunner
+	prober  *namespaceProber
+
+	mu      sync.Mutex
+	servers []*labServer
+}
+
+// namespaceRunner runs THN's permitted commands inside one namespace.
+//
+// It is the seam that lets the real LinuxDriver mutate a lab gateway: the
+// driver never learns it is in a namespace, and the harness never gets to
+// bypass the driver's own command policy.
+type namespaceRunner struct {
+	ns *netns.Namespace
+}
+
+func (r *namespaceRunner) LookPath(file string) (string, error) {
+	return exec.LookPath(file)
+}
+
+// Run validates the command with THN's own policy, then executes it inside the
+// namespace.
+//
+// The validation is not ceremony. It is the same ValidateCommand the shipped
+// driver uses, so a command this harness could not legitimately issue is
+// refused here too — and `nft flush ruleset` remains impossible.
+func (r *namespaceRunner) Run(ctx context.Context, name string, args ...string) (string, string, error) {
+	if err := execution.ValidateCommand(name, args...); err != nil {
+		return "", "", err
+	}
+
+	type outcome struct {
+		out string
+		err error
+	}
+	// The namespace helper has no context of its own, so the bound is applied
+	// here. A hung `ip` must not become a hung suite.
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := r.ns.Run(name, args...)
+		done <- outcome{out: out, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return "", "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctx.Err())
+	case res := <-done:
+		if res.err != nil {
+			return res.out, "", fmt.Errorf("%s %s failed inside namespace %s: %w",
+				name, strings.Join(args, " "), r.ns.Name, res.err)
+		}
+		return res.out, "", nil
+	}
+}
+
+// namespaceProber performs real TCP probes on behalf of health checks.
+//
+// It satisfies execution.TrafficProber, so the driver's health checks do not
+// know or care how the lab was built.
+type namespaceProber struct {
+	sides map[string]string // side -> namespace name
+}
+
+func (p *namespaceProber) Probe(ctx context.Context, side, endpoint string, _ time.Duration) (execution.ProbeResult, error) {
+	name, ok := p.sides[side]
+	if !ok {
+		return execution.ProbeResult{}, fmt.Errorf("lab has no %q side to probe from", side)
+	}
+
+	ns, ok := harnessNamespaces[side]
+	if !ok {
+		return execution.ProbeResult{}, fmt.Errorf("lab namespace %q is not built", name)
+	}
+
+	out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+		"--", "connect", endpoint, "thn-m62-"+side)
+	if err != nil && !strings.Contains(out, helperMarker) {
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s could not run: %w", name, err)
+	}
+
+	line := helperLine(out)
+	if line == "" {
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s produced no report; output was: %s", name, strings.TrimSpace(out))
+	}
+
+	var report struct {
+		Reachable      bool   `json:"reachable"`
+		SourceAddress  string `json:"source_address"`
+		ObservedSource string `json:"observed_source"`
+		Error          string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(line), &report); err != nil {
+		return execution.ProbeResult{}, fmt.Errorf("probe helper in %s reported unparseable output %q: %w", name, line, err)
+	}
+
+	return execution.ProbeResult{
+		Reachable:      report.Reachable,
+		SourceAddress:  report.SourceAddress,
+		ObservedSource: report.ObservedSource,
+		Error:          report.Error,
+	}, nil
+}
+
+// harnessNamespaces lets the prober reach a namespace by side.
+//
+// The prober is installed on a driver and outlives individual calls, so it
+// cannot close over a harness that a test has already torn down. It holds the
+// three namespaces it needs and nothing else.
+var harnessNamespaces = map[string]*netns.Namespace{}
+
+// labServer is a running probe endpoint inside a namespace.
+type labServer struct {
+	done   chan struct{}
+	report string
+	stop   string
+}
+
+func (s *labServer) shutdown() {
+	_ = os.WriteFile(s.stop, []byte("stop"), 0o600)
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		// The helper polls its stop file every 200ms and the file is on a
+		// filesystem both processes share, so this should never be reached.
+		// Reporting rather than blocking keeps a failing test diagnosable.
+		// The process is destroyed with its namespace immediately after.
+	}
+}
+
+// ------------------------------------------------------------ construction
+
+// newHarness builds the disposable lab, or skips the test.
+//
+// The skip message states exactly what was missing. A suite that quietly stops
+// testing something is worse than one that admits it could not.
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+
+	if os.Getenv(liveGateEnv) != "1" {
+		t.Skipf("skipping: the M6.2 live lab suite needs %s=1; see docs/disposable-lab.md", liveGateEnv)
+	}
+	if err := netns.Available(); err != nil {
+		t.Skipf("skipping: %v; the live lab needs Linux with root, iproute2 and util-linux", err)
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("skipping: `nft` is not on PATH; the live lab needs nftables")
+	}
+
+	top := Canonical()
+	if err := top.Validate(); err != nil {
+		t.Fatalf("canonical lab topology is invalid: %v", err)
+	}
+
+	h := &harness{
+		t:       t,
+		top:     top,
+		ns:      map[string]*netns.Namespace{},
+		workDir: t.TempDir(),
+		runners: map[string]*namespaceRunner{},
+	}
+	h.prober = &namespaceProber{sides: map[string]string{
+		execution.ProbeSideLAN: ClientNamespace,
+		execution.ProbeSideWAN: TargetNamespace,
+	}}
+
+	h.buildNamespaces()
+	h.buildTopology()
+	h.writeMarker()
+
+	t.Cleanup(h.teardown)
+
+	t.Logf("disposable lab topology:\n%s", top.Describe())
+	return h
+}
+
+// buildNamespaces creates the three namespaces the topology needs.
+//
+// Namespaces left behind by an interrupted run are removed first. Without that,
+// one failed run poisons every run after it with an error that names neither
+// the cause nor the fix.
+func (h *harness) buildNamespaces() {
+	h.t.Helper()
+
+	for _, name := range h.top.Namespaces() {
+		// A namespace left behind by an interrupted run would otherwise make
+		// this one fail with an error that names neither the cause nor the fix.
+		_ = netns.Remove(name)
+
+		ns, err := netns.Create(name)
+		if err != nil {
+			h.t.Fatalf("creating lab namespace %s: %v", name, err)
+		}
+		h.ns[name] = ns
+
+		if err := ns.LoopbackUp(); err != nil {
+			h.t.Fatalf("bringing up loopback in %s: %v", name, err)
+		}
+		relaxPathFiltering(ns)
+	}
+
+	harnessNamespaces[execution.ProbeSideLAN] = h.ns[ClientNamespace]
+	harnessNamespaces[execution.ProbeSideWAN] = h.ns[TargetNamespace]
+
+	for _, name := range h.top.Namespaces() {
+		h.runners[name] = &namespaceRunner{ns: h.ns[name]}
+	}
+}
+
+// relaxPathFiltering disables reverse-path filtering inside a lab namespace.
+//
+// Best effort, and deliberately not fatal. A distribution may enable
+// strict rp_filter by default, and a fresh namespace can inherit that: strict
+// mode drops the WAN→LAN probe as a forged source, which would make the
+// isolation test pass for the wrong reason — the block would be the reverse
+// path filter rather than THN's firewall.
+//
+// A lab that wants it on should assert it separately; what matters here is that
+// this knob does not decide the result.
+func relaxPathFiltering(ns *netns.Namespace) {
+	for _, key := range []string{
+		"net.ipv4.conf.all.rp_filter",
+		"net.ipv4.conf.default.rp_filter",
+	} {
+		if _, err := ns.Run("sysctl", "-w", key+"=0"); err != nil {
+			return
+		}
+	}
+}
+
+// buildTopology wires the veth pairs, addresses and routes.
+//
+// The gateway's LAN is deliberately left DOWN and unaddressed. That is the
+// work THN is about to do, and a lab that arrived already configured would
+// prove nothing about whether the transaction configured it.
+func (h *harness) buildTopology() {
+	h.t.Helper()
+
+	gw := h.ns[GatewayNamespace]
+
+	// The bridges come first: a veth port cannot be enslaved to a bridge that
+	// does not exist yet. THN never sees the ports — it resolves its roles to
+	// the bridges, which is what a gateway role is assigned to on real hardware
+	// and what makes them assignable, since THN declines to offer a raw veth as
+	// a gateway port.
+	h.must(gw.LinkAdd(GatewayWANInterface, "bridge"))
+	h.must(gw.LinkAdd(GatewayLANInterface, "bridge"))
+
+	h.must(gw.AddVeth("vwan0", "thnwan0", TargetNamespace))
+	h.must(gw.Enslave("vwan0", GatewayWANInterface))
+	h.must(gw.AddVeth("vlan0", "thnlan0", ClientNamespace))
+	h.must(gw.Enslave("vlan0", GatewayLANInterface))
+
+	h.must(gw.LinkUp(GatewayWANInterface))
+	h.must(gw.LinkUp("vwan0"))
+	h.must(gw.AddrAdd(GatewayWANInterface, GatewayWANAddress))
+
+	// An unmanaged interface: THN must never touch it. A dummy is also not
+	// assignable, so it cannot be picked up by a role by accident.
+	h.must(gw.LinkAdd("thnmgmt0", "dummy"))
+	h.must(gw.AddrAdd("thnmgmt0", "10.77.99.1/24"))
+	h.must(gw.LinkUp("thnmgmt0"))
+
+	// Peer endpoints.
+	target := h.ns[TargetNamespace]
+	h.must(target.AddrAdd(TargetWANInterface, TargetAddress))
+	h.must(target.LinkUp(TargetWANInterface))
+
+	// The LAN bridge is deliberately left DOWN and unaddressed: that is the
+	// work THN is about to do, and a lab that arrived already configured
+	// would prove nothing about whether the transaction configured it.
+	client := h.ns[ClientNamespace]
+	h.must(client.AddrAdd(ClientLANInterface, ClientAddress))
+	h.must(client.LinkUp(ClientLANInterface))
+
+	// Routes. The gateway already has its upstream, because a gateway does not
+	// discover one; the operator or the lab does.
+	for _, r := range h.top.Routes {
+		h.must(h.ns[r.Namespace].RouteAdd(r.Destination, r.Via, r.Device))
+	}
+}
+
+// must runs a topology step and fails the test if it cannot.
+//
+// Topology construction is not fallible-by-design: every step is expected to
+// work, and a step that did not leaves a lab that would report confident,
+// meaningless results.
+func (h *harness) must(err error) {
+	h.t.Helper()
+	if err != nil {
+		h.t.Fatalf("building the disposable lab: %v", err)
+	}
+}
+
+// writeMarker installs the disposable-lab marker VerifyLabEnvironment requires.
+//
+// It is a real marker on a real path, read by the real verification, so the
+// authorization path is exercised rather than stubbed.
+func (h *harness) writeMarker() {
+	h.t.Helper()
+
+	h.marker = filepath.Join(h.workDir, "lab-disposable-environment.json")
+	marker := execution.LabMarkerContent{
+		Disposable:    true,
+		EnvironmentID: execution.DefaultLabConfig().ExpectedEnvironmentID,
+		Topology:      "disposable-lan",
+		WANInterface:  GatewayWANInterface,
+		LANInterface:  GatewayLANInterface,
+		LANSubnet:     LANPrefix,
+	}
+	data, err := json.MarshalIndent(marker, "", "  ")
+	if err != nil {
+		h.t.Fatalf("encoding lab marker: %v", err)
+	}
+	if err := os.WriteFile(h.marker, data, 0o600); err != nil {
+		h.t.Fatalf("writing lab marker: %v", err)
+	}
+}
+
+// teardown removes the servers and the namespaces.
+//
+// Order matters: a listener inside a namespace is destroyed with it, but the
+// helper process is not, so the servers are stopped explicitly first.
+func (h *harness) teardown() {
+	h.mu.Lock()
+	servers := append([]*labServer(nil), h.servers...)
+	h.servers = nil
+	h.mu.Unlock()
+
+	for _, s := range servers {
+		s.shutdown()
+	}
+	for key := range harnessNamespaces {
+		delete(harnessNamespaces, key)
+	}
+	for _, name := range h.top.Namespaces() {
+		if ns, ok := h.ns[name]; ok {
+			if err := ns.Close(); err != nil {
+				h.t.Logf("lab namespace %s teardown: %v", name, err)
+			}
+		}
+	}
+}
+
+// -------------------------------------------------------------- THN wiring
+
+// driver returns a LinuxDriver bound to the gateway namespace.
+//
+// AuthorizeLab runs the real VerifyLabEnvironment, including the marker, the
+// hostname check and the interface scan. A driver that came back unauthorised
+// would fail the transaction with ErrCannotApply, so the tests cannot pass by
+// skipping authorization.
+func (h *harness) driver() *execution.LinuxDriver {
+	h.t.Helper()
+
+	cfg := execution.DefaultLabConfig()
+	cfg.MarkerPath = h.marker
+	cfg.ExpectedWAN = GatewayWANInterface
+	cfg.ExpectedLAN = GatewayLANInterface
+
+	d := execution.NewLinuxDriver(h.runners[GatewayNamespace], cfg)
+	if err := d.AuthorizeLab(context.Background()); err != nil {
+		h.t.Fatalf("the disposable lab refused authorization: %v", err)
+	}
+	if !d.CanApply() {
+		h.t.Fatal("lab driver reports CanApply() == false after a successful authorization")
+	}
+	return d.SetTrafficProber(h.prober)
+}
+
+// namespaceInspector observes a namespace through THN's own parsers.
+//
+// Reusing network.ParseLinks and friends is what makes this honest: the
+// interfaces are classified by exactly the code `thn discover` uses, against
+// output a real kernel produced, rather than by a second parser written for a
+// test and therefore agreeing only with itself.
+type namespaceInspector struct {
+	ns *netns.Namespace
+}
+
+func (i namespaceInspector) Inspect(_ context.Context) (*network.Snapshot, error) {
+	snap := &network.Snapshot{
+		CapturedAt: time.Now().UTC(),
+		Platform:   "linux",
+		Supported:  true,
+	}
+
+	links, err := i.ns.Run("ip", "-j", "-d", "link", "show")
+	if err != nil {
+		return nil, fmt.Errorf("reading links in %s: %w", i.ns.Name, err)
+	}
+	if snap.Interfaces, err = network.ParseLinks([]byte(links)); err != nil {
+		return nil, fmt.Errorf("parsing links in %s: %w", i.ns.Name, err)
+	}
+
+	addrs, err := i.ns.Run("ip", "-j", "addr", "show")
+	if err != nil {
+		return nil, fmt.Errorf("reading addresses in %s: %w", i.ns.Name, err)
+	}
+	if snap.Addresses, err = network.ParseAddresses([]byte(addrs)); err != nil {
+		return nil, fmt.Errorf("parsing addresses in %s: %w", i.ns.Name, err)
+	}
+
+	routes, err := i.ns.Run("ip", "-j", "route", "show")
+	if err != nil {
+		return nil, fmt.Errorf("reading routes in %s: %w", i.ns.Name, err)
+	}
+	if snap.Routes, err = network.ParseRoutes([]byte(routes)); err != nil {
+		return nil, fmt.Errorf("parsing routes in %s: %w", i.ns.Name, err)
+	}
+
+	snap.Sysctl = i.readSysctls()
+	return snap, nil
+}
+
+func (i namespaceInspector) readSysctls() []network.SysctlValue {
+	keys := []string{"net.ipv4.ip_forward", "net.ipv4.conf.all.forwarding"}
+	out := make([]network.SysctlValue, 0, len(keys))
+	for _, key := range keys {
+		v := network.SysctlValue{Key: key}
+		raw, err := i.ns.Run("sysctl", "-n", key)
+		if err != nil {
+			v.Value = "unknown"
+			v.Error = err.Error()
+		} else {
+			v.Value = strings.TrimSpace(raw)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// observe returns the gateway's observed state, resolved through roles.
+//
+// The order is the one the product uses: observe the device, bind logical
+// roles to stable interface identities, then describe the host in terms of the
+// kernel names those identities resolved to. Building diff.Observed by naming
+// interfaces directly would bypass exactly the machinery M6.2 exists to test.
+func (h *harness) observe(ctx context.Context) (diff.Observed, []host.Assignment, error) {
+	snap, device, err := host.NewDiscoveryWith(namespaceInspector{ns: h.ns[GatewayNamespace]}).Observe(ctx)
+	if err != nil {
+		return diff.Observed{}, nil, fmt.Errorf("observing the lab gateway: %w", err)
+	}
+	if device == nil {
+		return diff.Observed{}, nil, fmt.Errorf("observing the lab gateway produced no device")
+	}
+	if !device.Supported {
+		return diff.Observed{}, nil, fmt.Errorf("the lab gateway could not be inspected: %v", device.Diagnostics)
+	}
+
+	wanID, err := interfaceIDBySystemName(device, GatewayWANInterface)
+	if err != nil {
+		return diff.Observed{}, nil, err
+	}
+	lanID, err := interfaceIDBySystemName(device, GatewayLANInterface)
+	if err != nil {
+		return diff.Observed{}, nil, err
+	}
+
+	assignments := []host.Assignment{
+		{Role: host.RoleWAN, Selector: wanID},
+		{Role: host.RoleLAN, Selector: lanID},
+	}
+	resolution := host.Resolve(device, assignments)
+	if !resolution.OK() {
+		return diff.Observed{}, nil, fmt.Errorf("role resolution failed: %s",
+			strings.Join(host.Suggestions(resolution), "; "))
+	}
+
+	wan := resolution.Assigned[host.RoleWAN]
+	lan := resolution.Assigned[host.RoleLAN]
+
+	// The rule count is read rather than assumed. Reporting zero for a table
+	// that has rules would make every observation claim the firewall is empty,
+	// and every later plan would reinstall it for no reason — correct, but only
+	// by accident.
+	active, rules := thnTableState(h)
+
+	obs := diff.Observed{
+		Supported:           true,
+		HostName:            device.Hostname,
+		WANName:             wan.SystemName,
+		WANPresent:          true,
+		WANUp:               wan.AdminUp,
+		LANName:             lan.SystemName,
+		LANPresent:          true,
+		LANUp:               lan.AdminUp,
+		LANAddresses:        lan.Addresses,
+		IPv4Forwarding:      device.ForwardingEnabled,
+		IPv4ForwardingKnown: true,
+		FirewallActive:      active,
+		FirewallRuleCount:   rules,
+	}
+
+	for _, r := range snap.Routes {
+		if r.Destination == "default" {
+			obs.HasDefaultRoute = true
+			obs.DefaultGateway = r.Gateway
+		}
+	}
+
+	return obs, assignments, nil
+}
+
+// thnTablePresent reports whether THN's own nftables table is installed.
+//
+// Read through the driver so the value comes from the same command THN uses.
+func thnTablePresent(h *harness) bool {
+	active, _ := thnTableState(h)
+	return active
+}
+
+// thnTableState reports whether `table inet thn` exists and how many rules it
+// holds.
+//
+// nftables' JSON form is used rather than its text form because a rule count
+// taken from rendered text is a count of lines the renderer happened to break,
+// which is not the same fact.
+func thnTableState(h *harness) (bool, int) {
+	out, _, err := h.runners[GatewayNamespace].Run(context.Background(),
+		"nft", "-j", "list", "table", "inet", "thn")
+	if err != nil {
+		return false, 0
+	}
+
+	var doc struct {
+		Nftables []struct {
+			Table *struct {
+				Rules []json.RawMessage `json:"rule"`
+			} `json:"table"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return true, 0
+	}
+
+	for _, item := range doc.Nftables {
+		if item.Table != nil {
+			return true, len(item.Table.Rules)
+		}
+	}
+	return true, 0
+}
+
+// interfaceIDBySystemName finds a device interface's stable identity.
+func interfaceIDBySystemName(device *host.Device, systemName string) (string, error) {
+	for _, i := range device.Interfaces {
+		if i.SystemName == systemName {
+			return i.ID, nil
+		}
+	}
+	return "", fmt.Errorf("the lab gateway has no interface named %s", systemName)
+}
+
+// desiredGateway is the configuration THN is asked to converge the lab onto.
+func desiredGateway() desired.State {
+	return desired.State{
+		Name:       "thn-m62-lab-gateway",
+		Generation: 1,
+		WAN: desired.Interface{
+			Name:    GatewayWANInterface,
+			Role:    desired.RoleWAN,
+			Up:      true,
+			Present: true,
+		},
+		LAN: desired.Interface{
+			Name:      GatewayLANInterface,
+			Role:      desired.RoleLAN,
+			Up:        true,
+			Present:   true,
+			Addresses: []string{GatewayAddress},
+		},
+		Addressing: desired.Addressing{
+			DefaultGateway:  TargetIP,
+			UpstreamPresent: true,
+			IPv4Forwarding:  true,
+		},
+		NAT: desired.NAT{
+			Enabled:    true,
+			Resolved:   true,
+			Interfaces: []string{GatewayWANInterface},
+		},
+		Firewall: desired.Firewall{
+			Enabled:              true,
+			Backend:              "nftables",
+			DefaultInboundPolicy: "drop",
+			AllowEstablished:     true,
+			AllowLoopback:        true,
+		},
+	}
+}
+
+// gatewayPlan observes the lab, builds the plan, and adds the real-traffic
+// checks the structural checks cannot express.
+//
+// The traffic checks are appended rather than substituted: a gateway whose
+// interface is up, whose address is right and whose table exists is still not
+// a gateway until a packet crosses it, and a plan that only asked the first
+// three questions would report that machine healthy.
+func (h *harness) gatewayPlan(ctx context.Context) (diff.Observed, desired.State, []host.Assignment, *planner.Plan) {
+	h.t.Helper()
+
+	obs, assignments, err := h.observe(ctx)
+	if err != nil {
+		h.t.Fatalf("observing the lab gateway: %v", err)
+	}
+
+	des := desiredGateway()
+
+	result := diff.Compare(obs, diff.Desired{
+		WANName:         des.WAN.Name,
+		WANPresent:      des.WAN.Present,
+		WANUp:           des.WAN.Up,
+		LANName:         des.LAN.Name,
+		LANPresent:      des.LAN.Present,
+		LANUp:           des.LAN.Up,
+		LANAddresses:    des.LAN.Addresses,
+		DefaultGateway:  des.Addressing.DefaultGateway,
+		IPv4Forwarding:  des.Addressing.IPv4Forwarding,
+		NATEnabled:      des.NAT.Enabled,
+		NATResolved:     des.NAT.Resolved,
+		FirewallEnabled: des.Firewall.Enabled,
+	})
+
+	plan := planner.Build(result, planner.Options{
+		Generation:  des.Generation,
+		Source:      "disposable-lab",
+		Observed:    obs,
+		Desired:     des,
+		Assignments: assignments,
+		Live:        true,
+	})
+
+	plan.Verification.Checks = append(plan.Verification.Checks,
+		planner.VerificationCheck{
+			Target:      TargetEndpoint(),
+			Check:       "lan_to_wan_traffic",
+			Expectation: "a client on " + LANPrefix + " reaches the WAN-side target through THN",
+		},
+	)
+
+	if !plan.Ready {
+		h.t.Fatalf("the lab gateway plan is not ready; nothing can be applied: %s", plan.Summary)
+	}
+
+	h.t.Logf("plan %s carries %d step(s): %s", plan.ID, len(plan.Steps), strings.Join(stepIDs(plan), ", "))
+	return obs, des, assignments, plan
+}
+
+// stepIDs lists a plan's step identifiers for a failure message.
+func stepIDs(p *planner.Plan) []string {
+	out := make([]string, 0, len(p.Steps))
+	for _, s := range p.Steps {
+		out = append(out, s.ID)
+	}
+	return out
+}
+
+// withWANIsolationCheck appends the reverse-direction traffic check.
+func withWANIsolationCheck(plan *planner.Plan) *planner.Plan {
+	plan.Verification.Checks = append(plan.Verification.Checks, planner.VerificationCheck{
+		Target:      fmt.Sprintf("%s:%d", ClientIP, clientListenPort),
+		Check:       "wan_to_lan_blocked",
+		Expectation: "the WAN side cannot open a connection into the LAN",
+	})
+	return plan
+}
+
+// ------------------------------------------------------------------ probes
+
+// labServer starts a probe endpoint inside a namespace.
+//
+// It runs the test binary's helper in a goroutine and stops it with a stop
+// file, so shutdown is deterministic: the test waits for a process that has
+// already agreed to stop, rather than for a timeout that may or may not
+// expire.
+func (h *harness) startServer(namespaceName, endpoint string) *labServer {
+	h.t.Helper()
+
+	ns, ok := h.ns[namespaceName]
+	if !ok {
+		h.t.Fatalf("no lab namespace named %s", namespaceName)
+	}
+
+	srv := &labServer{
+		done:   make(chan struct{}),
+		report: filepath.Join(h.workDir, fmt.Sprintf("report-%s-%s.jsonl", namespaceName, filepath.Base(ns.Path))),
+		stop:   filepath.Join(h.workDir, fmt.Sprintf("stop-%s-%s", namespaceName, filepath.Base(ns.Path))),
+	}
+
+	go func() {
+		defer close(srv.done)
+		// The helper's own stop-file poll and accept deadline bound this.
+		if _, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+			"--", "serve", endpoint, srv.report, srv.stop); err != nil {
+			h.t.Logf("lab server in %s exited: %v", namespaceName, err)
+		}
+	}()
+
+	h.mu.Lock()
+	h.servers = append(h.servers, srv)
+	h.mu.Unlock()
+
+	h.waitForListener(ns, endpoint)
+	return srv
+}
+
+// waitForListener blocks until the endpoint accepts a connection.
+//
+// Without it a probe could race the helper's bind and report a failure that is
+// really "the listener had not started yet" — which would be a test that fails
+// intermittently for no reason, the hardest kind to act on.
+func (h *harness) waitForListener(ns *netns.Namespace, endpoint string) {
+	h.t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out, _ := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+			"--", "connect", endpoint, "thn-m62-ready")
+		if line := helperLine(out); line != "" {
+			var report struct {
+				Reachable bool `json:"reachable"`
+			}
+			if err := json.Unmarshal([]byte(line), &report); err == nil && report.Reachable {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	h.t.Fatalf("lab endpoint %s never started listening", endpoint)
+}
+
+// probe performs a real connection from one side of the gateway.
+//
+// The result is returned whatever it says. A refusal is a finding about the
+// firewall, not an error about the probe.
+func (h *harness) probe(side, endpoint string) execution.ProbeResult {
+	h.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), helperDialTimeout*4)
+	defer cancel()
+
+	res, err := h.prober.Probe(ctx, side, endpoint, helperDialTimeout)
+	if err != nil {
+		h.t.Fatalf("probing %s from %s: %v", endpoint, side, err)
+	}
+	return res
+}
+
+// startTargetServer puts the WAN-side test endpoint in place.
+func (h *harness) startTargetServer() *labServer {
+	return h.startServer(TargetNamespace, TargetEndpoint())
+}
+
+// startClientListener puts a listener on the LAN client, so the WAN side has
+// something real to fail to reach.
+func (h *harness) startClientListener() *labServer {
+	return h.startServer(ClientNamespace, fmt.Sprintf("%s:%d", ClientIP, clientListenPort))
+}
+
+// ------------------------------------------------------------ small helpers
+
+// helperLine extracts the machine-readable report from a helper's output.
+func helperLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), helperMarker) {
+			return strings.TrimSpace(strings.TrimSpace(line))[len(helperMarker):]
+		}
+	}
+	return ""
+}

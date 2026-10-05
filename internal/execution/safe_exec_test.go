@@ -107,3 +107,40 @@ func TestSafeExecPermittedCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeExecAcceptsInspectionFlagsBeforeTheSubsystem covers `ip -j -d link
+// show`, which the lab's own environment verification issues.
+//
+// The guard allowlist permits it outright. A validator that stopped at the
+// first flag would refuse it, and the caller would be unable to tell a refused
+// command from a malformed one — so the topology check inside
+// VerifyLabEnvironment would silently stop happening.
+func TestSafeExecAcceptsInspectionFlagsBeforeTheSubsystem(t *testing.T) {
+	permitted := [][]string{
+		{"-j", "-d", "link", "show"},
+		{"-j", "link", "show"},
+		{"-br", "addr", "show"},
+		{"-j", "-d", "addr", "show", "eth1"},
+		{"-j", "route", "show", "table", "all"},
+		{"-4", "-o", "addr", "show", "scope", "global"},
+	}
+	for _, args := range permitted {
+		if err := ValidateCommand("ip", args...); err != nil {
+			t.Errorf("ValidateCommand(ip, %v) failed: %v", args, err)
+		}
+	}
+
+	// Reading the flags correctly must not open a subsystem that was already
+	// refused, and must not accept a bare flag list with nothing after it.
+	refused := [][]string{
+		{"-j"},
+		{"-j", "-d"},
+		{"-j", "neigh", "show"},
+		{"-j", "rule", "show"},
+	}
+	for _, args := range refused {
+		if err := ValidateCommand("ip", args...); err == nil {
+			t.Errorf("ValidateCommand(ip, %v) = nil, want denial", args)
+		}
+	}
+}
