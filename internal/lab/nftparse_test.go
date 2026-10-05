@@ -25,6 +25,7 @@ package lab
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -61,9 +62,79 @@ type nftExpr struct {
 	Masquerade *json.RawMessage `json:"masquerade"`
 }
 
+// nftMatch is one comparison within a rule.
+//
+// # Right is raw JSON, and that is not laziness
+//
+// `right` is polymorphic. The same field holds a plain string for an interface
+// name:
+//
+//	"right": "thnwan0"
+//
+// a list for a connection-state test, which is what the live gateway's
+// `ct state established,related` rule emits:
+//
+//	"right": ["established", "related"]
+//
+// and an object for a prefix:
+//
+//	"right": {"prefix": {"addr": "10.77.0.0", "len": 24}}
+//
+// Declaring it `string` made the whole document undecodable. `encoding/json`
+// fails the entire unmarshal on the first type mismatch, so one perfectly
+// valid connection-state expression in the `forward` chain meant zero rules
+// were read from the table — and the NAT assertion, which asked what the
+// `postrouting` chain contained, was told the kernel had no masquerade rule at
+// all while it was enforcing one.
+//
+// Left stays typed: the assertions need the meta key to identify an interface
+// comparison, and there is no reason to give that up.
 type nftMatch struct {
-	Left  nftOperand `json:"left"`
-	Right string     `json:"right"`
+	Op    string          `json:"op"`
+	Left  nftOperand      `json:"left"`
+	Right json.RawMessage `json:"right"`
+}
+
+// rightString returns the match's right-hand value when it is a JSON string.
+//
+// False for a list, an object, an absent value or null — none of which are
+// interface names. That is not an error: those are valid nft expressions the
+// parser read correctly and simply has nothing to extract.
+func (m nftMatch) rightString() (string, bool) {
+	if len(m.Right) == 0 {
+		return "", false
+	}
+	// `null` must be refused explicitly. encoding/json accepts it for a string
+	// and leaves the value empty, so it would otherwise report an empty
+	// interface name as though one had been read.
+	if trimmed := strings.TrimSpace(string(m.Right)); trimmed == "" || trimmed == "null" {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(m.Right, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// rightValue renders the right-hand value for a diagnostic.
+//
+// Strings are quoted so an empty one is visible; anything else is shown as the
+// JSON nft actually produced, which is the only useful thing to print when the
+// question is "why did this not parse as expected".
+func (m nftMatch) rightValue() string {
+	if len(m.Right) == 0 {
+		return "<absent>"
+	}
+	if s, ok := m.rightString(); ok {
+		return strconv.Quote(s)
+	}
+	raw := strings.TrimSpace(string(m.Right))
+	const max = 72
+	if len(raw) > max {
+		return raw[:max] + "..."
+	}
+	return raw
 }
 
 type nftOperand struct {
@@ -118,17 +189,23 @@ func isMasqueradeType(natType string) bool {
 // WAN interface *specifically*, and only the parse can say so.
 func (r nftRule) masqueradeOn() (bool, string) {
 	masquerade := false
-	iface := ""
+	bound := ""
 
 	for _, e := range r.Exprs {
 		if _, natType, ok := e.natType(); ok && isMasqueradeType(natType) {
 			masquerade = true
 		}
-		if e.Match != nil && e.Match.Left.Meta != nil && e.Match.Left.Meta.Key == "oifname" {
-			iface = e.Match.Right
+		// Only a comparison of the oifname meta key whose right-hand value is
+		// an actual string identifies an interface. A list or an object there
+		// is valid nft JSON the parser has read correctly and has no interface
+		// name to report.
+		if e.Match != nil && e.Match.LeftMetaKey() == "oifname" {
+			if iface, ok := e.Match.rightString(); ok {
+				bound = iface
+			}
 		}
 	}
-	return masquerade, iface
+	return masquerade, bound
 }
 
 // LeftMetaKey reports which kernel key a match compares.
@@ -163,7 +240,8 @@ func (r nftRule) describe() string {
 	for i, e := range r.Exprs {
 		switch {
 		case e.Match != nil:
-			parts = append(parts, fmt.Sprintf("expr[%d]=match(%s=%q)", i, e.Match.LeftMetaKey(), e.Match.Right))
+			parts = append(parts, fmt.Sprintf("expr[%d]=match(%s op=%s right=%s)",
+				i, e.Match.LeftMetaKey(), e.Match.Op, e.Match.rightValue()))
 		default:
 			spelling, natType, ok := e.natType()
 			if ok {
@@ -178,6 +256,9 @@ func (r nftRule) describe() string {
 		r.Family, r.Table, r.Chain, len(r.Exprs), masquerade, iface,
 		strings.Join(parts, " "))
 }
+
+// op reports the comparison operator, or "" when the match has none.
+func (m nftMatch) op() string { return m.Op }
 
 // ruleJSON builds the nft JSON document for a set of rules.
 //
@@ -220,6 +301,168 @@ func parseRules(t *testing.T, raw string) []nftRule {
 		}
 	}
 	return rules
+}
+
+// liveTableJSON is the nft JSON for the table THN installs on the disposable
+// lab gateway, transcribed from a real `nft -j list table inet thn` on Ubuntu.
+//
+// It is reproduced whole rather than trimmed to the masquerade rule on purpose.
+// The failure was never in reading the masquerade rule — it was that one
+// connection-state expression in the `forward` chain aborted the decode of the
+// entire document, so a table with all three chains present reported zero
+// rules. A fixture containing only the rule the assertion cares about cannot
+// reproduce that, and would have passed while the bug was live.
+//
+// It carries each shape of `match.right` the live table contains:
+//
+//	rule A  "right": ["established","related"]   the connection-state test
+//	rule B  "right": "lo"                        an interface, as a string
+//	rule C  "right": "thnwan0"                   the masquerade's interface
+//	rule D  "right": {"prefix":{"addr":..,"len":24}}   the LAN subnet match
+const liveTableJSON = `{"nftables":[
+{"metainfo":{"version":"1.0.6","release_name":"Dave Théron","json_schema_version":1}},
+{"table":{"family":"inet","name":"thn","handle":253}},
+{"chain":{"family":"inet","table":"thn","name":"input","handle":254,"type":"filter","hook":"input","priority":0,"policy":"drop"}},
+{"chain":{"family":"inet","table":"thn","name":"forward","handle":255,"type":"filter","hook":"forward","priority":0,"policy":"drop"}},
+{"chain":{"family":"inet","table":"thn","name":"postrouting","handle":256,"type":"nat","hook":"postrouting","priority":100,"policy":"accept"}},
+
+{"rule":{"family":"inet","table":"thn","chain":"input","handle":257,"expr":[
+  {"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"input","handle":258,"expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"lo"}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"input","handle":259,"expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"thnlan0"}},
+  {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"10.77.0.0","len":24}}}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"forward","handle":260,"expr":[
+  {"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"forward","handle":261,"expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"lo"}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"forward","handle":262,"expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"thnlan0"}},
+  {"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"thnwan0"}},
+  {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"10.77.0.0","len":24}}}},
+  {"accept":null}]}},
+
+{"rule":{"family":"inet","table":"thn","chain":"postrouting","handle":263,"expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"thnwan0"}},
+  {"nat":{"type":"masquerade"}}]}}
+]}`
+
+// TestLiveTableParses is the regression test for the parser bug itself.
+//
+// Before the fix this failed to decode at all:
+//
+//	json: cannot unmarshal array into Go struct field
+//	nftMatch.nftables.rule.expr.match.right of type string
+//
+// and every assertion that reads THN's table saw zero rules.
+func TestLiveTableParses(t *testing.T) {
+	rules := parseRules(t, liveTableJSON)
+
+	if len(rules) == 0 {
+		t.Fatal("the live table parsed as zero rules; every rule must be read")
+	}
+
+	byChain := map[string]int{}
+	for _, r := range rules {
+		byChain[r.Chain]++
+	}
+	for chain, want := range map[string]int{"input": 3, "forward": 3, "postrouting": 1} {
+		if byChain[chain] != want {
+			t.Errorf("chain %s has %d rules, want %d", chain, byChain[chain], want)
+		}
+	}
+
+	// Every shape of `right` in the live table must be readable.
+	var list, iface, prefix int
+	for _, r := range rules {
+		for _, e := range r.Exprs {
+			if e.Match == nil {
+				continue
+			}
+			switch {
+			case e.Match.op() == "in":
+				list++
+			default:
+				if _, ok := e.Match.rightString(); ok {
+					iface++
+				} else if len(e.Match.Right) > 0 {
+					prefix++
+				}
+			}
+		}
+	}
+	if list != 2 {
+		t.Errorf("read %d connection-state matches with a list right, want 2", list)
+	}
+	if iface == 0 {
+		t.Error("no interface match was read from a string right")
+	}
+	if prefix != 2 {
+		t.Errorf("read %d prefix matches with an object right, want 2, one per chain that filters the LAN", prefix)
+	}
+}
+
+// TestLiveTableYieldsTheGatewayMasquerade is the end of the chain the parser
+// exists to serve: from the complete live document, the postrouting masquerade
+// bound to the WAN interface must still be identified.
+func TestLiveTableYieldsTheGatewayMasquerade(t *testing.T) {
+	accepted := 0
+	for _, r := range parseRules(t, liveTableJSON) {
+		if r.isGatewayMasquerade(GatewayWANInterface) {
+			accepted++
+		}
+	}
+	if accepted != 1 {
+		t.Errorf("the live table yielded %d gateway masquerade rules, want exactly 1", accepted)
+	}
+}
+
+// TestMatchRightShapesAreClassifiedNotRejected pins the classification: a
+// non-string `right` is a value the parser has read, not a failure.
+func TestMatchRightShapesAreClassifiedNotRejected(t *testing.T) {
+	cases := []struct {
+		name   string
+		right  string
+		want   string
+		wantOK bool
+	}{
+		{"interface name", `"thnwan0"`, "thnwan0", true},
+		{"connection state list", `["established","related"]`, "", false},
+		{"subnet prefix", `{"prefix":{"addr":"10.77.0.0","len":24}}`, "", false},
+		{"numeric port", `18080`, "", false},
+		{"null", `null`, "", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := nftMatch{Op: "==", Left: nftOperand{}, Right: json.RawMessage(c.right)}
+
+			got, ok := m.rightString()
+			if ok != c.wantOK || got != c.want {
+				t.Errorf("rightString() = (%q, %v), want (%q, %v)", got, ok, c.want, c.wantOK)
+			}
+			if m.rightValue() == "" {
+				t.Error("rightValue() rendered nothing; diagnostics need it")
+			}
+		})
+	}
+
+	// An absent right is valid too: some matches carry no value at all.
+	absent := nftMatch{Op: "!="}
+	if _, ok := absent.rightString(); ok {
+		t.Error("an absent right must not report a string")
+	}
 }
 
 // TestMasqueradeRuleIsDetected is the positive case: the rule THN installs for

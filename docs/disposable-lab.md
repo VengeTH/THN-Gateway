@@ -530,28 +530,34 @@ successfully and passed eight of the nine live tests, including real LAN → WAN
 traffic, real forwarding, WAN → LAN isolation, health-check rollback, baseline
 restoration, unmanaged-resource preservation and the production guard.
 
-`TestEndToEndNAT` was the last failure. The gateway had translated
-`10.77.0.100` to `10.77.250.1`, which only a working masquerade rule can do, so
-the rule was present and the **parser** had failed to read it. Two defects in
-the parser were found and fixed:
+`TestEndToEndNAT` was the last failure, and it was a parser bug rather than a
+missing rule: the gateway had translated 10.77.0.100 to 10.77.250.1, which only a
+working masquerade rule can do.
 
-- A payload it could not decode was reported as "the table has zero rules" —
-  turning the test's own failure to read the kernel into a claim that the kernel
-  had no rule. A parse failure is now an error, and is never reported as an
-  absence.
-- A NAT statement was recognised only as `{"nat":{"type":"masquerade"}}`. It is
-  now recognised by the presence of a NAT statement — `nat`, `masq` or
-  `masquerade` — and then classified, so a rule doing `snat` or `dnat` is still
-  refused while a release that spells it differently is still read correctly.
+The cause was one field. nftables renders `match.right` polymorphically — a
+string for an interface name, a list for a connection-state test, an object for
+a subnet — and the parser declared it a `string`:
 
-`internal/lab/nftparse_test.go` exercises the parser on every platform against
-captured payloads, including every way a masquerade rule can be wrong. The
-parser types are deliberately declared outside a `//go:build linux` file so a
-change in how nft renders rules is caught by `go test ./...` rather than in a
-lab.
+    json: cannot unmarshal array into Go struct field
+    nftMatch.nftables.rule.expr.match.right of type string
 
-**These fixes have not been re-run on Linux.** Every other fix from the previous
-round has been confirmed by a passing live test.
+`encoding/json` fails the whole document on the first type mismatch, so one
+perfectly valid `ct state established,related` rule in the `forward` chain meant
+**zero rules were read from the entire table**. The NAT assertion asked what the
+`postrouting` chain held and was told the kernel had no masquerade rule while it
+was enforcing one. The same failure made `observe()` report the firewall as
+absent, so every transaction re-planned a firewall installation.
+
+`match.right` is now `json.RawMessage`, with a `rightString()` accessor that
+yields a value only when the JSON really is a string. A non-string right is a
+value the parser read, not a failure.
+
+`internal/lab/nftparse_test.go` reproduces the whole live table — all three
+chains, every shape of `match.right` — because a fixture trimmed to the
+masquerade rule could not have reproduced a failure that happened elsewhere in
+the document.
+
+**These fixes have not been re-run on Linux.**
 
 Treat the first run as an experiment. If a test fails, the failure output is the
 input to the next change; nothing in this repository should be adjusted to make
