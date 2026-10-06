@@ -257,7 +257,7 @@ func TestHostJSONReportsRequiredInterfaces(t *testing.T) {
 	}
 	ready := host.EvaluateReadiness(d, host.ReadinessRequest{RequiredInterfaces: opts.Requires})
 
-	out := hostJSON(d, false, ready, opts.Requires)
+	out := hostJSON(d, false, ready, opts.Requires, host.HardwareIntelligence{}, false)
 	got, ok := out["readiness"].(map[string]any)["required_interfaces"]
 	if !ok {
 		t.Fatal("JSON readiness block has no required_interfaces")
@@ -279,7 +279,7 @@ func TestHostRendersObservedHostname(t *testing.T) {
 	d := deviceWithPorts(2)
 	ready := host.EvaluateReadiness(d, host.ReadinessRequest{RequiredInterfaces: 2})
 
-	out := RenderHost(d, false, ready)
+	out := RenderHost(d, false, ready, host.HardwareIntelligence{}, false)
 
 	if !strings.Contains(out, "hostname test-gateway") {
 		t.Errorf("host report does not report the observed hostname:\n%s", out)
@@ -340,7 +340,7 @@ func TestHostnameIsOmittedWhenUnobserved(t *testing.T) {
 	d.Hostname = ""
 	ready := host.EvaluateReadiness(d, host.ReadinessRequest{RequiredInterfaces: 1})
 
-	out := RenderHost(d, false, ready)
+	out := RenderHost(d, false, ready, host.HardwareIntelligence{}, false)
 
 	if strings.Contains(out, "hostname") {
 		t.Errorf("a host with no observed hostname rendered one:\n%s", out)
@@ -353,7 +353,7 @@ func TestHostJSONPreservesHostname(t *testing.T) {
 	d := deviceWithPorts(2)
 	ready := host.EvaluateReadiness(d, host.ReadinessRequest{RequiredInterfaces: 2})
 
-	out := hostJSON(d, false, ready, 2)
+	out := hostJSON(d, false, ready, 2, host.HardwareIntelligence{}, false)
 
 	if got := out["hostname"]; got != "test-gateway" {
 		t.Errorf("JSON hostname = %v, want %q", got, "test-gateway")

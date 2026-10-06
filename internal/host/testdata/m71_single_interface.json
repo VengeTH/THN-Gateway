@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "M7.1 fixture: the single-interface host.",
+    "",
+    "One physical Ethernet port carrying the default route, plus loopback and a",
+    "bridge. It is a perfectly good host, and it is not a two-port gateway.",
+    "",
+    "The distinction this fixture protects is the one the M7.1 brief is most",
+    "emphatic about: 'not a conventional two-port gateway' is a statement about",
+    "a topology, not a verdict on the machine. Reporting this host as unusable",
+    "would be wrong, and reporting it as gateway-ready would be worse."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "onlyport0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "ee:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "br0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "ee:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "bridge", "info_slave_kind": "ether" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "192.0.2.40/24", "scope": "global", "interface": "onlyport0" },
+    { "family": "inet", "cidr": "10.5.0.1/24", "scope": "global", "interface": "br0" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "192.0.2.1", "dev": "onlyport0", "protocol": "dhcp", "metric": 100 },
+    { "dst": "192.0.2.0/24", "dev": "onlyport0", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "10.5.0.0/24", "dev": "br0", "protocol": "kernel", "scope": "link", "metric": 100 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "0" }],
+  "system": {
+    "distribution": "alpine",
+    "version": "3.20",
+    "pretty_name": "Alpine Linux v3.20",
+    "kernel": "6.6.21-0-lts",
+    "architecture": "x86_64",
+    "hostname": "single-port"
+  }
+}

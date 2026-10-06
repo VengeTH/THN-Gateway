@@ -1,0 +1,83 @@
+{
+  "_comment": [
+    "M7.1 fixture: the wireless uplink.",
+    "",
+    "One physical radio in CLIENT mode, associated and carrying the default",
+    "route, plus one unused Ethernet port.",
+    "",
+    "The point of this fixture is the asymmetry: a wireless client is a",
+    "perfectly reasonable uplink and a poor LAN, and an analysis that treated",
+    "radio and wired NIC as interchangeable would get one of those two wrong.",
+    "",
+    "The radio 'wlp9s2' carries a `wireless` object with no mode in it, which",
+        "is what a host looks like when the mode could not be read. That is the",
+        "case the rule against inferring access-point capability is tested against:",
+        "with the mode unobserved, THN must say so rather than assume either way."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "wlp9s1",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "bb:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 866,
+      "wireless": { "genid": 9, "wiphy": 1, "mode": "managed", "iftype": "managed", "ssid": "not-a-real-network" },
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "wlp9s2",
+      "flags": ["BROADCAST", "MULTICAST", "UP"],
+      "mtu": 1500,
+      "operstate": "DOWN",
+      "link_type": "ether",
+      "address": "bb:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+          "wireless": { "genid": 7, "wiphy": 1 },
+          "linkinfo": { "info_kind": "ether" }
+        },
+    {
+      "ifindex": 4,
+      "ifname": "ethspare0",
+      "flags": ["BROADCAST", "MULTICAST", "UP"],
+      "mtu": 1500,
+      "operstate": "DOWN",
+      "link_type": "ether",
+      "address": "bb:00:00:00:00:03",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "ether" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "198.51.100.15/24", "scope": "global", "interface": "wlp9s1" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "198.51.100.1", "dev": "wlp9s1", "protocol": "dhcp", "metric": 600 },
+    { "dst": "198.51.100.0/24", "dev": "wlp9s1", "protocol": "kernel", "scope": "link", "metric": 600 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "0" }],
+  "system": {
+    "distribution": "fedora",
+    "version": "40",
+    "pretty_name": "Fedora Linux 40 (Workstation Edition)",
+    "kernel": "6.8.0-45.fc40.x86_64",
+    "architecture": "x86_64",
+    "hostname": "wireless-uplink"
+  }
+}

@@ -1,6 +1,7 @@
 package cli
 
-// `thn host` — what this machine is, and whether it could be a gateway.
+// `thn host` — what this machine is, whether it could be a gateway, and what
+// its hardware could reasonably be used for.
 //
 // # Why this exists alongside `thn discover`
 //
@@ -21,12 +22,28 @@ package cli
 // and `host` does not. Keeping them apart means each output is a fixed shape
 // for a given host, which is what a monitoring agent or a CI job needs.
 //
+// # Why --analyze is a flag and not a command
+//
+// M7.1 answers a different question from M7.0. M7.0 is "what exists"; M7.1 is
+// "what could this be used for". They belong on the same surface because they
+// are read together — an operator looking at an interface wants the
+// observation and the suitability verdict side by side, not in two commands
+// whose outputs they have to correlate by hand.
+//
+// It is opt-in rather than default because the analysis is long, it is a
+// milestone's worth of extra output on a command that CI and monitoring agents
+// already consume, and adding output to a stable command shape without being
+// asked is how a script starts having to skip lines it did not used to skip.
+// `thn host` with no flags prints exactly what it printed before M7.1.
+//
 // # Read-only, and it says so
 //
 // Like every other command in this CLI, it observes and reports. It cannot
-// change a route, install a qdisc, or assign a role. The last line of the
-// human output says so, because an operator running discovery on a live
-// gateway for the first time is exactly the person who needs telling.
+// change a route, install a qdisc, or assign a role — and `--analyze` does not
+// add one, because analysing an interface and assigning a role are different
+// acts and the second is not THN's to take. The last line of the human output
+// says so, because an operator running discovery on a live gateway for the
+// first time is exactly the person who needs telling.
 
 import (
 	"fmt"
@@ -51,6 +68,15 @@ type hostOptions struct {
 	// verdict rather than only the rendering.
 	Requires int
 
+	// Analyze asks for the M7.1 hardware suitability analysis to be rendered
+	// alongside the observation.
+	//
+	// It is off by default and changes no verdict when on. An interface
+	// being a strong WAN candidate does not make the host readier, assign a
+	// role, or move the readiness status by one word — and a test asserting
+	// exactly that is the only thing keeping it that way.
+	Analyze bool
+
 	// Help asks for the usage text instead of a report.
 	Help bool
 }
@@ -67,6 +93,7 @@ func parseHostOptions(args []string) (hostOptions, error) {
 	fs.Bool("mac", false)
 	fs.String("config", "")
 	requires := fs.Int("requires", 2)
+	fs.Bool("analyze", false)
 	fs.Bool("help", false)
 
 	if _, err := fs.Parse(args); err != nil {
@@ -76,6 +103,7 @@ func parseHostOptions(args []string) (hostOptions, error) {
 		ShowMAC:    *fs.bools["mac"],
 		ConfigPath: *fs.strings["config"],
 		Requires:   *requires,
+		Analyze:    *fs.bools["analyze"],
 		Help:       *fs.bools["help"],
 	}
 	if !opts.Help && opts.Requires < 1 {
@@ -120,15 +148,24 @@ func runHost(env *Env, args []string) ExitCode {
 		Resolutions:        resolutions,
 	})
 
+	// The analysis is computed from the same Device readiness was computed
+	// from, and from nothing else. It takes no different snapshot, runs no
+	// extra probe, and is never consulted for a verdict — which is what keeps
+	// `thn host --analyze` a rendering change rather than a behavioural one.
+	var intel host.HardwareIntelligence
+	if opts.Analyze {
+		intel = host.AnalyzeHardware(d)
+	}
+
 	if env.IsJSON {
-		if err := env.printJSON(hostJSON(d, opts.ShowMAC, ready, opts.Requires)); err != nil {
+		if err := env.printJSON(hostJSON(d, opts.ShowMAC, ready, opts.Requires, intel, opts.Analyze)); err != nil {
 			env.errorf("thn host: %v\n", err)
 			return ExitProblems
 		}
 		return hostExit(ready, d)
 	}
 
-	env.printf("%s", RenderHost(d, opts.ShowMAC, ready))
+	env.printf("%s", RenderHost(d, opts.ShowMAC, ready, intel, opts.Analyze))
 	return hostExit(ready, d)
 }
 
@@ -142,10 +179,13 @@ func runHost(env *Env, args []string) ExitCode {
 func hostUsage() string {
 	return `thn host - report this host's platform, subsystems, capabilities and readiness
 
-Usage: thn host [flags]
+Usage: thn host [--analyze] [flags]
 
 Flags:
   --requires <n>   physical interfaces the intended topology needs (default 2)
+  --analyze        add the hardware suitability analysis: which interfaces
+                   could serve as WAN, LAN or MGMT, on what observed
+                   evidence, and which gateway shapes the host could take
   --mac            include hardware addresses in the output
   --config <path>  configuration file to resolve roles against (optional)
   --json           emit machine-readable JSON
@@ -155,6 +195,11 @@ Exit codes:
   0  ready, or ready with warnings
   1  blocked, or something could not be observed
   2  usage error
+
+--analyze reports SUITABILITY, not assignment. "strong WAN candidate" means
+the observed evidence looks like an uplink; it does not mean the interface has
+been given the WAN role, and this command never gives it one. Assigning a role
+is a separate, explicit act.
 
 This command is read-only. It observes and reports; it cannot change a route,
 install a qdisc, assign a role, or modify host networking in any way.
@@ -191,7 +236,15 @@ func hostExit(ready host.Readiness, d *host.Device) ExitCode {
 }
 
 // hostJSON renders the host report for a machine consumer.
-func hostJSON(d *host.Device, showMAC bool, ready host.Readiness, required int) map[string]any {
+//
+// The analysis is added as a single optional key rather than merged into the
+// existing interface objects. Merging would duplicate every observed field
+// into the suitability section — where a consumer would then have two places
+// to read "is this physical" and no rule about which is authoritative. The
+// analysis references interfaces by their existing id and system_name, so
+// joining is the consumer's job and it is a join it already has the keys for.
+func hostJSON(d *host.Device, showMAC bool, ready host.Readiness, required int,
+	intel host.HardwareIntelligence, analyze bool) map[string]any {
 	ifaces := make([]map[string]any, 0, len(d.Interfaces))
 	for _, i := range d.Interfaces {
 		m := map[string]any{
@@ -263,7 +316,7 @@ func hostJSON(d *host.Device, showMAC bool, ready host.Readiness, required int) 
 		})
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"supported":    d.Supported,
 		"hostname":     d.Hostname,
 		"platform":     d.System,
@@ -291,6 +344,14 @@ func hostJSON(d *host.Device, showMAC bool, ready host.Readiness, required int) 
 		"network_untouched": true,
 		"statement":         "Current network remains untouched. This command is read-only.",
 	}
+
+	// Absent rather than empty unless it was asked for, so a consumer can
+	// tell "not requested" from "requested, and there was nothing to say" —
+	// the same distinction the rest of this model makes everywhere.
+	if analyze {
+		out["hardware"] = hardwareJSON(intel)
+	}
+	return out
 }
 
 // RenderHost renders the human-readable host report.
@@ -298,7 +359,8 @@ func hostJSON(d *host.Device, showMAC bool, ready host.Readiness, required int) 
 // Exported for the same reason RenderDiscovery is: a test asserts on what an
 // operator actually sees, and a renderer that only exists inside a command
 // function cannot be tested without running the whole CLI.
-func RenderHost(d *host.Device, showMAC bool, ready host.Readiness) string {
+func RenderHost(d *host.Device, showMAC bool, ready host.Readiness,
+	intel host.HardwareIntelligence, analyze bool) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
@@ -310,6 +372,9 @@ func RenderHost(d *host.Device, showMAC bool, ready host.Readiness) string {
 		w("────────\n")
 		w("  host inspection is not available on this platform\n")
 		w("  no interfaces, capabilities or readiness facts were observed\n")
+		if analyze {
+			w("\n%s", RenderHardwareAnalysis(intel))
+		}
 		w("\nCurrent network remains untouched. This command is read-only.\n")
 		return b.String()
 	}
@@ -407,6 +472,10 @@ func RenderHost(d *host.Device, showMAC bool, ready host.Readiness) string {
 	}
 	for _, f := range ready.Notes() {
 		w("\n  NOTE     %s\n", f.Message)
+	}
+
+	if analyze {
+		w("\n%s", RenderHardwareAnalysis(intel))
 	}
 
 	w("\nCurrent network remains untouched. This command is read-only.\n")

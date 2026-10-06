@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "M7.1 fixture: the current validation host, roughly as observed.",
+    "",
+    "Three physical interfaces (two Ethernet, one wireless client), an Ethernet",
+    "uplink currently carrying the default route, a spare Ethernet port with no",
+    "carrier and no address, plus Docker, Tailscale and container veth",
+    "infrastructure.",
+    "",
+    "Every property M7.1 reasons about is present here: physicality, link kind,",
+    "carrier, speed (and the ABSENCE of speed on the spare port), addresses,",
+    "route usage and bridge/veth membership. The spare port deliberately has no",
+    "'speed' field, because the real host reports none and an analysis that",
+    "invented one would be untestable against it.",
+    "",
+    "Routes live in this same file so link state and routing cannot drift apart:",
+    "a fixture with a default route over an interface that has no link would be",
+    "testing a host nobody has.",
+    "",
+    "The IPv6 link-local addresses are here deliberately. Every IPv6-capable host",
+    "auto-assigns fe80::/64 on every interface, and an analysis that counted",
+    "those as occupancy would report every NIC in the world as in use."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "enp0s31f6",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "3c:ec:ef:11:22:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "wlp2s0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "3c:ec:ef:11:22:03",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 433,
+      "wireless": { "genid": 4, "wiphy": 0, "mode": "managed", "iftype": "managed", "ssid": "not-a-real-network" },
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 4,
+      "ifname": "enx00e099001812",
+      "flags": ["BROADCAST", "MULTICAST", "UP"],
+      "mtu": 1500,
+      "operstate": "DOWN",
+      "link_type": "ether",
+      "address": "3c:ec:ef:11:22:04",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 5,
+      "ifname": "docker0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "02:42:8a:1b:2c:3d",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "bridge", "info_slave_kind": "ether" }
+    },
+    {
+      "ifindex": 6,
+      "ifname": "veth9f3c1a@if12",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "9a:1b:2c:3d:4e:5f",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "master": "docker0",
+      "linkinfo": { "info_kind": "veth" }
+    },
+    {
+      "ifindex": 7,
+      "ifname": "tailscale0",
+      "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP", "LOWER_UP"],
+      "mtu": 1280,
+      "operstate": "UNKNOWN",
+      "link_type": "none",
+      "txqueuelen": 500,
+      "linkinfo": { "info_kind": "tun", "info_data": { "type": "tun", "kind": "tun" } }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet6", "cidr": "::1/128", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "192.168.1.50/24", "scope": "global", "interface": "enp0s31f6" },
+    { "family": "inet6", "cidr": "fd00:77::1/64", "scope": "global", "interface": "enp0s31f6" },
+    { "family": "inet6", "cidr": "fe80::3cec:eff:fe11:2201/64", "scope": "link", "interface": "enp0s31f6" },
+    { "family": "inet", "cidr": "192.168.7.40/24", "scope": "global", "interface": "wlp2s0" },
+    { "family": "inet6", "cidr": "fe80::3cec:eff:fe11:2203/64", "scope": "link", "interface": "wlp2s0" },
+    { "family": "inet", "cidr": "172.18.0.1/16", "scope": "global", "interface": "docker0" },
+    { "family": "inet", "cidr": "100.65.0.2/32", "scope": "global", "interface": "tailscale0" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "192.168.1.1", "dev": "enp0s31f6", "protocol": "dhcp", "metric": 100 },
+    { "dst": "192.168.1.0/24", "dev": "enp0s31f6", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "192.168.7.0/24", "dev": "wlp2s0", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "172.18.0.0/16", "dev": "docker0", "protocol": "kernel", "scope": "link", "metric": 100 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "1" }],
+  "system": {
+    "distribution": "ubuntu",
+    "version": "24.04",
+    "pretty_name": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.8.0-142-generic",
+    "architecture": "amd64",
+    "hostname": "thn-gateway"
+  },
+  "nftables": {
+    "checked": true,
+    "available": true,
+    "query_succeeded": true,
+    "tables": [
+      { "family": "ip", "name": "filter" },
+      { "family": "ip", "name": "docker-bridges" }
+    ]
+  },
+  "traffic_control": {
+    "checked": true,
+    "available": true,
+    "query_succeeded": true,
+    "qdiscs": [
+      { "kind": "fq_codel", "handle": "0:", "device": "wlp2s0" },
+      { "kind": "noqueue", "handle": "0:", "device": "docker0" }
+    ]
+  },
+  "dns": {
+    "mechanism": "systemd-resolved",
+    "nameservers": ["127.0.0.53"],
+    "authoritative": false,
+    "reason": "/etc/resolv.conf is a systemd-resolved stub"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "M7.1 fixture: the clean two-port wired gateway.",
+    "",
+    "Two physical Ethernet ports, both connected, one carrying the default",
+    "route. This is the shape the canonical profile describes, so it is the",
+    "fixture that most directly tests whether M7.1 can recognise a textbook",
+    "gateway without also being distracted by infrastructure.",
+    "",
+    "Both ports report a speed. The LAN candidate deliberately does NOT carry a",
+    "default route, because that relationship is what distinguishes it from the",
+    "uplink and the analysis must not be able to tell them apart by position."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "wanport0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "aa:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "lanport0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "aa:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "203.0.113.20/24", "scope": "global", "interface": "wanport0" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "203.0.113.1", "dev": "wanport0", "protocol": "dhcp", "metric": 100 },
+    { "dst": "203.0.113.0/24", "dev": "wanport0", "protocol": "kernel", "scope": "link", "metric": 100 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "0" }],
+  "system": {
+    "distribution": "debian",
+    "version": "12",
+    "pretty_name": "Debian GNU/Linux 12 (bookworm)",
+    "kernel": "6.1.0-25-amd64",
+    "architecture": "amd64",
+    "hostname": "two-port"
+  }
+}

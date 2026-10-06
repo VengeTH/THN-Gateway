@@ -1,0 +1,140 @@
+{
+  "_comment": [
+    "M7.1 fixture: the virtual-heavy host.",
+    "",
+    "Two physical Ethernet ports buried under Docker bridges, a Tailscale",
+    "tunnel, WireGuard and a pile of container veth endpoints.",
+    "",
+    "The Docker bridge and tailscale0 carry routable addresses and the tunnel",
+    "carries a default route, which is exactly the combination that makes a",
+    "naive analyser offer 'docker0' as the uplink. Everything that would fool a",
+    "name-based or address-based rule is present here on purpose.",
+    "",
+    "Note the two default routes: the physical uplink and the tunnel. A host",
+    "with more than one default route is an ordinary host, so the analysis must",
+    "record the fact without calling it broken."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "uplink0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "cc:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 10000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "downlink0",
+      "flags": ["BROADCAST", "MULTICAST", "UP"],
+      "mtu": 1500,
+      "operstate": "DOWN",
+      "link_type": "ether",
+      "address": "cc:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 4,
+      "ifname": "br-7a3f1c2d",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "02:42:aa:bb:cc:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "bridge", "info_slave_kind": "ether" }
+    },
+    {
+      "ifindex": 5,
+      "ifname": "veth1a2b3c@if4",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "11:22:33:44:55:66",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "master": "br-7a3f1c2d",
+      "linkinfo": { "info_kind": "veth" }
+    },
+    {
+      "ifindex": 6,
+      "ifname": "veth4d5e6f@if7",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "11:22:33:44:55:77",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "master": "br-7a3f1c2d",
+      "linkinfo": { "info_kind": "veth" }
+    },
+    {
+      "ifindex": 7,
+      "ifname": "tailscale0",
+      "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP", "LOWER_UP"],
+      "mtu": 1280,
+      "operstate": "UNKNOWN",
+      "link_type": "none",
+      "linkinfo": { "info_kind": "tun", "info_data": { "type": "tun", "kind": "tun" } }
+    },
+    {
+      "ifindex": 8,
+      "ifname": "wg0",
+      "flags": ["POINTOPOINT", "MULTICAST", "NOARP", "UP", "LOWER_UP"],
+      "mtu": 1420,
+      "operstate": "UNKNOWN",
+      "link_type": "none",
+      "linkinfo": { "info_kind": "wireguard" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "10.10.0.5/24", "scope": "global", "interface": "uplink0" },
+    { "family": "inet", "cidr": "172.19.0.1/16", "scope": "global", "interface": "br-7a3f1c2d" },
+    { "family": "inet", "cidr": "100.101.102.103/32", "scope": "global", "interface": "tailscale0" },
+    { "family": "inet", "cidr": "10.99.0.2/24", "scope": "global", "interface": "wg0" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "10.10.0.1", "dev": "uplink0", "protocol": "dhcp", "metric": 100 },
+    { "dst": "default", "dev": "tailscale0", "protocol": "boot", "metric": 32766 },
+    { "dst": "10.10.0.0/24", "dev": "uplink0", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "172.19.0.0/16", "dev": "br-7a3f1c2d", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "10.99.0.0/24", "dev": "wg0", "protocol": "kernel", "scope": "link", "metric": 100 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "1" }],
+  "system": {
+    "distribution": "ubuntu",
+    "version": "22.04",
+    "pretty_name": "Ubuntu 22.04.4 LTS",
+    "kernel": "5.15.0-119-generic",
+    "architecture": "amd64",
+    "hostname": "virtual-heavy"
+  },
+  "nftables": {
+    "checked": true,
+    "available": true,
+    "query_succeeded": true,
+    "tables": [
+      { "family": "ip", "name": "filter" },
+      { "family": "ip", "name": "docker-bridges" },
+      { "family": "inet", "name": "ts-forward" }
+    ]
+  }
+}

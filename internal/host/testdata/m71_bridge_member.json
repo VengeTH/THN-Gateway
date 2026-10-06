@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "M7.1 fixture: three physical ports, one enslaved to an existing bridge.",
+    "",
+    "This fixture exists to separate two conditions that are easy to conflate:",
+    "an interface that is merely not in use, and an interface that has already",
+    "been given to something. A free port can be offered; an enslaved one has",
+    "to be un-enslaved by a person first.",
+    "",
+    "port_a is physical Ethernet with a master. It is real hardware and it is",
+    "not available for a new role until somebody resolves the bridge. The",
+    "analysis must say both things and must not quietly pick it."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "port_a",
+      "flags": ["BROADCAST", "MULTICAST", "SLAVE", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "dd:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "master": "br-lan",
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "port_b",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "dd:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 4,
+      "ifname": "port_c",
+      "flags": ["BROADCAST", "MULTICAST", "UP"],
+      "mtu": 1500,
+      "operstate": "DOWN",
+      "link_type": "ether",
+      "address": "dd:00:00:00:00:03",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 5,
+      "ifname": "br-lan",
+      "flags": ["BROADCAST", "MULTICAST", "MASTER", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "dd:00:00:00:00:99",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "linkinfo": { "info_kind": "bridge", "info_slave_kind": "ether" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "203.0.113.9/24", "scope": "global", "interface": "port_b" },
+    { "family": "inet", "cidr": "10.77.0.1/24", "scope": "global", "interface": "br-lan" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "203.0.113.1", "dev": "port_b", "protocol": "dhcp", "metric": 100 },
+    { "dst": "203.0.113.0/24", "dev": "port_b", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "10.77.0.0/24", "dev": "br-lan", "protocol": "kernel", "scope": "link", "metric": 100 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "1" }],
+  "system": {
+    "distribution": "ubuntu",
+    "version": "24.04",
+    "pretty_name": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.8.0-142-generic",
+    "architecture": "amd64",
+    "hostname": "bridged-host"
+  }
+}

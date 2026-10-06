@@ -42,7 +42,7 @@ thn config   show [--desired] [path]
 thn schema   [--mutating]
 thn status   [--local]
 thn diagnostics [--local]
-thn host     [--requires <n>] [--mac] [--config <path>] [--json]
+thn host     [--analyze] [--requires <n>] [--mac] [--config <path>] [--json]
 thn activate        # always refuses
 ```
 
@@ -117,8 +117,8 @@ Readiness
 `--json` emits the same model for automation. `--requires <n>` sets how many
 physical ports the intended topology needs (default 2), and changes the
 readiness verdict accordingly: the same host can be reported ready at
-`--requires 1` and blocked at `--requires 3`. `thn host --help` lists every
-option.
+`--requires 1` and blocked at `--requires 3`. `--analyze` adds the hardware
+suitability analysis described below. `thn host --help` lists every option.
 
 ### What is observed
 
@@ -205,6 +205,232 @@ understands less is not a host an operator can use less. Foreign infrastructure
 is a **note**, not a warning — Docker bridges are normal, and treating them as
 a problem would invite an operator to delete working infrastructure.
 
+## Hardware suitability (`thn host --analyze`)
+
+Observation answers *what exists on this host*. Suitability answers the next
+question: *given what exists, what could this host reasonably be used for as a
+gateway?* It is an explanation, not a configuration, and not a decision.
+
+```
+$ thn host --analyze
+Hardware suitability
+─────────────────────
+  3 physical port(s): 2 Ethernet, 1 wireless
+  default routes: 1 via enp0s31f6
+  virtual infrastructure: br-7a3f1c2d, tailscale0, veth9f3c1a@if12 (recorded, not modified)
+
+  enp0s31f6  [physical Ethernet]
+      current:  in use, carries the default route, addressed
+      link:    1000 Mbps
+         + the host reports this as real hardware
+         + Ethernet link kind
+         + a carrier is present
+         + 1000 Mbps observed
+         + an IPv4 address is assigned
+         + an observed default route uses this interface
+      WAN    strong candidate observed
+         ! currently in use: the interface carries observed addresses or routes
+      LAN    limited candidate observed
+         ! an observed default route currently uses this interface; using it
+           for a downstream network would change the host's current path
+      MGMT   candidate        observed
+
+  enx00e099001812  [physical Ethernet]
+      current:  idle
+      link:    speed unknown (the host reported none); this is not a
+               measurement of zero
+      WAN    limited candidate observed
+         ! no carrier is present, so the link is not currently connected
+      LAN    candidate        observed
+         ! no carrier is present, so the link is not currently connected
+
+  Gateway profiles
+  ────────────────
+
+  Two-port wired gateway
+    POSSIBLE
+    + 2 physical Ethernet interfaces observed
+    WAN    candidate: enp0s31f6
+    LAN    candidate: enx00e099001812
+    ! the WAN candidate enp0s31f6 is currently in use
+    ! the LAN candidate enx00e099001812 is idle and has no carrier
+
+  Suitability is not assignment: no role was given to any interface.
+```
+
+`thn host` without `--analyze` prints exactly what it printed before M7.1.
+The flag changes no verdict and no exit code.
+
+### Observed ≠ suitable ≠ assigned ≠ activated
+
+THN keeps four states apart, and M7.1 owns exactly one arrow between them:
+
+```
+OBSERVED ──▶ SUITABLE ──▶ ASSIGNED ──▶ ACTIVATED
+ (M7.0)      (M7.1)       (later)      (later)
+```
+
+| State | Means | Set by |
+|---|---|---|
+| **Observed** | THN queried the host and the host answered | `thn host` |
+| **Suitable** | this link could reasonably serve that role, on stated evidence | `thn host --analyze` |
+| **Assigned** | an operator explicitly gave the interface that role | `thn interface assign`, in configuration |
+| **Activated** | the configuration was applied to the host | not implemented; `apply` is absent from this build |
+
+Collapsing any two of these produces a failure that looks correct while it
+happens. An interface carrying the default route looks like an uplink — but
+"looks like" is not "has been told to be", and only the operator decides. So
+the analysis reports:
+
+```
+enp0s31f6
+  current:  in use, carries the default route   ← what the host is doing now
+  WAN:     strong candidate                      ← what it could reasonably be
+```
+
+and never a third line naming a role it has given. `RoleAssignments()` is
+empty after analysis, the device is byte-for-byte unchanged, and the readiness
+verdict does not move — each of those is a test.
+
+### Suitability classifications
+
+| Classification | Meaning |
+|---|---|
+| `strong_candidate` | the observed evidence is the shape that role normally has |
+| `candidate` | plausible for the role, nothing observed arguing against it |
+| `limited_candidate` | the right kind of hardware, but something observed restricts it — no carrier, a bridge relationship, a medium that cannot carry the role conventionally |
+| `unsuitable` | something observed rules it out: virtual infrastructure, loopback, enslaved, or a mode that carries no gateway traffic |
+| `unknown` | THN could not classify it. Never rounded down to `unsuitable` |
+
+A disconnected Ethernet port is a `limited_candidate`, not an unsuitable one.
+Plugging the cable in is the normal order of operations, and refusing to offer
+the port until it is plugged in would make the tool useless for exactly the
+setup it exists for.
+
+**Occupancy is not a classification.** It is a separate `current` state —
+`idle`, `in use`, `enslaved`, or `virtual infrastructure` — because the
+interface carrying the default route is usually the *best* uplink evidence on
+the machine. Folding "busy" into the suitability scale would report a real
+gateway's best uplink as its worst, which is how a tool talks an operator out
+of the correct configuration.
+
+### What counts as evidence, and what does not
+
+Every classification carries the observations it rests on, and a verdict with
+no evidence attached cannot be answered for. There is no opaque score — the
+question an operator asks is "why?", and a number does not answer it.
+
+Rules the analysis is written against, each with a test that defeats the
+shortcut:
+
+| Shortcut | Why it fails |
+|---|---|
+| Interface name | `eth0` and `docker0` are both names, and they are opposite ends of the question |
+| Address range | `192.168.x.x` is as likely to be a Docker bridge as a NIC |
+| Carrier alone | a Docker bridge with carrier is not a physical port |
+| Speed alone | a 10 Gbps veth is not a better gateway port than a 1 Gbps NIC |
+| Position in a list | "the first NIC is the uplink" is a guess, and on a laptop it is a wrong one |
+| Unreported speed | `speed: 0` is an absence of a measurement, never reported as `0 Mbps` |
+| Unobserved wireless mode | a radio is not an access point unless the host said it was |
+
+Evidence is reported at `observed` confidence and is never silently upgraded.
+Suitability is built entirely from observed facts, so it is `observed`; a host
+THN could not inspect produces `unknown` throughout rather than a verdict
+nobody reached.
+
+### Gateway profiles
+
+Three shapes, always reported whether or not they fit, because "not a
+multi-interface host" and "three ports would be possible here and you are one
+short" are different answers:
+
+| Profile | Requires | Verdict |
+|---|---|---|
+| Single-interface host | exactly 1 physical port | `POSSIBLE` / `NOT POSSIBLE` |
+| Two-port wired gateway | 2+ **physical Ethernet** ports | `POSSIBLE` / `NOT POSSIBLE` |
+| Multi-interface gateway | 3+ physical ports | `POSSIBLE` / `NOT POSSIBLE` |
+
+A Wi-Fi radio is hardware and it is not a wired port, so the two-port profile
+counts Ethernet specifically — otherwise a host with one NIC and one adapter
+would report itself as a wired gateway.
+
+The verdict is `POSSIBLE` or `NOT POSSIBLE`, never `READY`. A hardware shape
+being present says nothing about whether DHCP, DNS, VLAN, firewall, shaping or
+AP capability works, and a readiness verdict here would be a claim about
+capabilities this analysis has no standing to make.
+
+`NOT POSSIBLE` is always specific about what was counted and never generalises
+to a verdict on the machine. A host with no Ethernet ports may have a perfectly
+good wireless uplink; "not a two-port wired gateway" is not "unusable", and
+collapsing the two is the generalisation an operator would quote back at THN
+when it is wrong about a machine they can see.
+
+### Existing infrastructure is described, never judged
+
+Docker bridges, container veths, Tailscale tunnels, WireGuard links and
+bridges on a host all get read out, explained by kind, and left alone:
+
+```
+veth9f3c1a@if12  [virtual infrastructure]
+    WAN/LAN/MGMT  unsuitable    observed
+    x a container endpoint attached to br-7a3f1c2d is virtual infrastructure
+      and does not outlive its container
+```
+
+They are recorded, counted, and reported in gateway-profile constraints, so an
+operator sees them. They are never a warning, never a fault, and never a
+suggestion to remove them. Two default routes are reported the same way — as a
+fact about the host, not an error. A machine with a wired and a wireless uplink
+is a laptop, and a report that called it broken would be teaching the operator
+to distrust everything else it says.
+
+### JSON
+
+`--analyze --json` adds a `hardware` key alongside the existing observation
+model. It is structured, not prose — every field a consumer needs is a value:
+
+```json
+{
+  "hardware": {
+    "physical_ethernet": 2,
+    "physical_wireless": 1,
+    "default_route_count": 1,
+    "default_route_ifaces": ["enp0s31f6"],
+    "assignment_made": false,
+    "network_untouched": true,
+    "is_readiness_verdict": false,
+    "interfaces": [
+      {
+        "system_name": "enp0s31f6",
+        "class": "physical-wired",
+        "speed_known": true,
+        "speed_mbps": 1000,
+        "current": { "state": "occupied", "default_route": true, "addressed": true },
+        "suitability": {
+          "wan": {
+            "classification": "strong_candidate",
+            "confidence": "observed",
+            "candidate": true,
+            "evidence": [{ "code": "default-route", "detail": "...", "confidence": "observed" }],
+            "blockers": [],
+            "limitations": ["currently in use: the interface carries observed addresses or routes"]
+          }
+        }
+      }
+    ],
+    "profiles": [
+      { "id": "two-port-wired", "verdict": "POSSIBLE",
+        "candidates": { "wan": "enp0s31f6", "lan": "enx00e099001812" } }
+    ]
+  }
+}
+```
+
+The key is `candidates`, never `roles` — a consumer reading a key called
+`roles` will reasonably assume THN decided something. `speed_mbps` is omitted
+entirely when the host reported no speed, and `speed_known` says so, so a zero
+is never mistaken for a measurement.
+
 ## Why it cannot change networking
 
 Three independent layers. Any one alone would be a convention; all three must be
@@ -233,6 +459,15 @@ and no transition out of `PREPARED`.
 
 Plans render the commands they *would* run, as text, for review. Rendering a
 command is not the same as running it, and nothing crosses that line.
+
+**4. An analysis layer that cannot speak.** M7.1's suitability engine is a pure
+function from an observed `Device` to an explanation. It imports no `os/exec`,
+does not reach `internal/guard`, runs no command of its own, and takes no
+parameter through which a role could be returned. `TestM71AnalysisHasNoExecutionOrObservationPath`
+scans its source for all of those, and the point is structural: adding a probe
+"just to check one more thing" would be a second observation path — and a
+second chance to mutate a live gateway — so it has to be a deliberate act that
+breaks a visible test.
 
 ## How planning works
 
@@ -306,7 +541,8 @@ internal/
   activation/         state machine; Disabled applier
   network/            read-only host inspection (links, routes, sysctls,
                         nftables, tc, DNS, platform)
-    host/               observed device model, capability confidence, readiness
+    host/               observed device model, capability confidence, readiness,
+                        and the M7.1 hardware suitability analyzer (pure)
     firewall/           read-only nftables/tc inspection
       execution/          transactions, drivers, rollback, lab authorization
       netns/              isolated network namespaces for tests that need a kernel
@@ -354,12 +590,60 @@ ls -l /etc/resolv.conf
 # then, and still read-only:
 thn host
 thn host --json
+thn host --analyze
+thn host --analyze --json
 ```
 
 Compare against what `thn host` reported. Differences are expected on some
 axes and worth reporting either way — particularly if THN classifies an
 interface as physical that you expected to be virtual, or reports a capability
 you know to be present as `unknown`.
+
+### Validating M7.1 hardware suitability
+
+`--analyze` is read-only and derives everything from the snapshot `thn host`
+already collected, so the same comparison applies. Worth checking specifically:
+
+```sh
+# the uplink should be a strong WAN candidate and the spare port a LAN
+# candidate — with no carrier and, if the driver reports none, unknown speed
+thn host --analyze
+
+# machine-readable; check the structured fields, not the prose
+thn host --analyze --json | jq '.hardware | {
+  ethernet: .physical_ethernet,
+  defaults: .default_route_count,
+  assigned: .assignment_made,
+  untouched: .network_untouched
+}'
+
+# per-interface verdicts
+thn host --analyze --json | jq '.hardware.interfaces[]
+  | {name: .system_name, class: .class, speed: .speed_known,
+     wan: .suitability.wan.classification,
+     lan: .suitability.lan.classification}'
+```
+
+What a correct report looks like on a host with one wired uplink, one unused
+Ethernet port, and a Wi-Fi adapter:
+
+| Interface | Expected |
+|---|---|
+| the port carrying the default route | `strong candidate` for WAN, `current` = in use |
+| the unused Ethernet port | `candidate` for LAN, limitation "no carrier", speed unknown unless reported |
+| the Wi-Fi adapter in client mode | plausible WAN candidate; **not** a normal wired LAN port; AP capability not inferred |
+| Docker bridges, veths, Tailscale | `unsuitable`, named by kind, left alone |
+| the virtual tunnel | `unsuitable`, including when it carries a default route |
+
+If any of those differ, the most likely cause is in the observation layer
+rather than the analysis — `ip -j -d link show` above is the command to
+compare against, and `thn host` prints each interface's kind and physicality
+directly.
+
+Do **not** bring an interface down, change an address or route, flush
+nftables, restart networking, or stop Docker or Tailscale to make a test
+pass. The host is a live server and has to stay reachable. A disagreement is
+information about the code, not about the machine.
 
 ## Building
 

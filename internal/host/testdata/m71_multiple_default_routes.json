@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "M7.1 fixture: two default routes, over Ethernet and over Wi-Fi.",
+    "",
+    "This is what a laptop with both a wired and a wireless uplink looks like.",
+    "Both links are real hardware, both are connected, both carry a default",
+    "route, and both addresses are RFC1918.",
+    "",
+    "Two things are being defended here. First, this is a FACT and not a FAULT:",
+    "an analysis that reported it as a broken configuration would be teaching",
+    "the operator to ignore everything else the report says. Second, both",
+    "current-route relationships must be visible — neither default route is",
+    "more real than the other, and picking one of them would be picking for the",
+    "operator.",
+    "",
+    "Addresses are chosen to defeat the other two shortcuts as well: the wired",
+    "side carries 10.x and the wireless side carries 192.168.x, so classifying",
+    "by address range would get both wrong."
+  ],
+  "links": [
+    {
+      "ifindex": 1,
+      "ifname": "lo",
+      "flags": ["LOOPBACK", "UP", "LOWER_UP"],
+      "mtu": 65536,
+      "operstate": "UNKNOWN",
+      "link_type": "loopback",
+      "address": "00:00:00:00:00:00",
+      "broadcast": "00:00:00:00:00:00",
+      "linkinfo": { "info_kind": "loopback" }
+    },
+    {
+      "ifindex": 2,
+      "ifname": "wired0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "ff:00:00:00:00:01",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 1000,
+      "linkinfo": { "info_kind": "ether" }
+    },
+    {
+      "ifindex": 3,
+      "ifname": "radio0",
+      "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
+      "mtu": 1500,
+      "operstate": "UP",
+      "link_type": "ether",
+      "address": "ff:00:00:00:00:02",
+      "broadcast": "ff:ff:ff:ff:ff:ff",
+      "speed": 300,
+      "wireless": { "genid": 2, "wiphy": 0, "mode": "managed", "iftype": "managed", "ssid": "not-a-real-network" },
+      "linkinfo": { "info_kind": "ether" }
+    }
+  ],
+  "addresses": [
+    { "family": "inet", "cidr": "127.0.0.1/8", "scope": "host", "interface": "lo" },
+    { "family": "inet", "cidr": "10.20.30.40/24", "scope": "global", "interface": "wired0" },
+    { "family": "inet", "cidr": "192.168.44.50/24", "scope": "global", "interface": "radio0" },
+    { "family": "inet6", "cidr": "fe80::ff00:ff:fe00:1/64", "scope": "link", "interface": "wired0" },
+    { "family": "inet6", "cidr": "fe80::ff00:ff:fe00:2/64", "scope": "link", "interface": "radio0" }
+  ],
+  "routes": [
+    { "dst": "default", "gateway": "10.20.30.1", "dev": "wired0", "protocol": "dhcp", "metric": 100 },
+    { "dst": "default", "gateway": "192.168.44.1", "dev": "radio0", "protocol": "dhcp", "metric": 600 },
+    { "dst": "10.20.30.0/24", "dev": "wired0", "protocol": "kernel", "scope": "link", "metric": 100 },
+    { "dst": "192.168.44.0/24", "dev": "radio0", "protocol": "kernel", "scope": "link", "metric": 600 }
+  ],
+  "sysctl": [{ "key": "net.ipv4.ip_forward", "value": "0" }],
+  "system": {
+    "distribution": "arch",
+    "kernel": "6.8.9-arch1-1",
+    "architecture": "x86_64",
+    "hostname": "dual-default"
+  }
+}
