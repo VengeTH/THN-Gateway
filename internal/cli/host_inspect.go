@@ -37,19 +37,62 @@ import (
 	"github.com/venth/thn-gateway/internal/network"
 )
 
-// runHost implements `thn host`.
-func runHost(env *Env, args []string) ExitCode {
+// hostOptions are the parsed options for `thn host`.
+type hostOptions struct {
+	// ShowMAC includes hardware addresses in the output.
+	ShowMAC bool
+
+	// ConfigPath is the configuration to resolve roles against. Empty means
+	// no configuration was named.
+	ConfigPath string
+
+	// Requires is how many physical interfaces the intended topology needs.
+	// It is passed straight to readiness evaluation, so it changes the
+	// verdict rather than only the rendering.
+	Requires int
+
+	// Help asks for the usage text instead of a report.
+	Help bool
+}
+
+// parseHostOptions parses the arguments of `thn host`.
+//
+// It is separated from the command body because everything after parsing
+// observes the real host, and a test cannot assert that a flag reached
+// readiness evaluation on a machine that is not a gateway. Parsing on its own
+// is also where the flag kinds are declared, which makes it obvious that
+// `--requires` is an int flag and not a string one parsed by hand.
+func parseHostOptions(args []string) (hostOptions, error) {
 	fs := newFlagSet()
 	fs.Bool("mac", false)
 	fs.String("config", "")
 	requires := fs.Int("requires", 2)
+	fs.Bool("help", false)
 
 	if _, err := fs.Parse(args); err != nil {
+		return hostOptions{}, err
+	}
+	opts := hostOptions{
+		ShowMAC:    *fs.bools["mac"],
+		ConfigPath: *fs.strings["config"],
+		Requires:   *requires,
+		Help:       *fs.bools["help"],
+	}
+	if !opts.Help && opts.Requires < 1 {
+		return hostOptions{}, fmt.Errorf("--requires must be at least 1, got %d", opts.Requires)
+	}
+	return opts, nil
+}
+
+// runHost implements `thn host`.
+func runHost(env *Env, args []string) ExitCode {
+	opts, err := parseHostOptions(args)
+	if err != nil {
 		return env.fatalf("thn host: %v\n", err)
 	}
-	showMAC := *fs.bools["mac"]
-	if *requires < 1 {
-		return env.fatalf("thn host: --requires must be at least 1, got %d\n", *requires)
+	if opts.Help {
+		env.printf("%s", hostUsage())
+		return ExitOK
 	}
 
 	// The same discovery seam `thn discover` and `thn readiness` use. Three
@@ -68,25 +111,54 @@ func runHost(env *Env, args []string) ExitCode {
 	// how an operator finds out whether this box could be a gateway before
 	// they have decided that it should be.
 	var resolutions map[host.Role]host.Resolution
-	if cfg, cerr := loadConfigIfPresent(env, *fs.strings["config"]); cerr == nil {
+	if cfg, cerr := loadConfigIfPresent(env, opts.ConfigPath); cerr == nil {
 		resolutions = roleResolutions(d, cfg)
 	}
 
 	ready := host.EvaluateReadiness(d, host.ReadinessRequest{
-		RequiredInterfaces: *requires,
+		RequiredInterfaces: opts.Requires,
 		Resolutions:        resolutions,
 	})
 
 	if env.IsJSON {
-		if err := env.printJSON(hostJSON(d, showMAC, ready, *requires)); err != nil {
+		if err := env.printJSON(hostJSON(d, opts.ShowMAC, ready, opts.Requires)); err != nil {
 			env.errorf("thn host: %v\n", err)
 			return ExitProblems
 		}
 		return hostExit(ready, d)
 	}
 
-	env.printf("%s", RenderHost(d, showMAC, ready))
+	env.printf("%s", RenderHost(d, opts.ShowMAC, ready))
 	return hostExit(ready, d)
+}
+
+// hostUsage renders the help text for `thn host`.
+//
+// It is written out rather than generated from the flagSet, because the
+// generated form of a flag says what type it is and not what it means. The
+// meaning of `--requires` — how many physical ports the intended topology
+// needs, and that it changes only the readiness verdict — is the part an
+// operator has to get right.
+func hostUsage() string {
+	return `thn host - report this host's platform, subsystems, capabilities and readiness
+
+Usage: thn host [flags]
+
+Flags:
+  --requires <n>   physical interfaces the intended topology needs (default 2)
+  --mac            include hardware addresses in the output
+  --config <path>  configuration file to resolve roles against (optional)
+  --json           emit machine-readable JSON
+  --help           show this help
+
+Exit codes:
+  0  ready, or ready with warnings
+  1  blocked, or something could not be observed
+  2  usage error
+
+This command is read-only. It observes and reports; it cannot change a route,
+install a qdisc, assign a role, or modify host networking in any way.
+`
 }
 
 // roleResolutions resolves every configured role separately.

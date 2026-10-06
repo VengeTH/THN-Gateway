@@ -68,6 +68,20 @@ type System struct {
 	// by executing `uname` â€” one fewer binary to allowlist, and the answer is
 	// identical because both read the same kernel variable.
 	Kernel string `json:"kernel,omitempty"`
+
+	// Hostname is the machine's hostname, e.g. "heedful-dev".
+	//
+	// It is its own field rather than being derived from an interface
+	// address, because it is a different fact. 127.0.0.1/8 is an address the
+	// loopback interface has on every Linux host; it identifies nothing and
+	// answers no question an operator asks. The hostname is what an operator
+	// recognises the machine by, and it is the only one of the two that
+	// differs between two machines on the same desk.
+	//
+	// Read through os.Hostname, which queries the kernel's own name cache.
+	// That is the same value the `hostname` binary prints, reached without
+	// spawning a process and so with nothing to allowlist.
+	Hostname string `json:"hostname,omitempty"`
 }
 
 // Describe renders a one-line human description of the platform.
@@ -127,6 +141,12 @@ func readSystem() System {
 	}
 	if b, err := os.ReadFile(kernelReleasePath); err == nil {
 		p.Kernel = strings.TrimSpace(string(b))
+	}
+	// A host that cannot report its own name is described without one. An
+	// empty Hostname means "not established", never "unnamed": the renderer
+	// omits the line rather than printing a blank one.
+	if h, err := os.Hostname(); err == nil {
+		p.Hostname = strings.TrimSpace(h)
 	}
 	return p
 }

@@ -344,7 +344,7 @@ func RenderDiscovery(d *host.Device, showMAC bool) string {
 	w("────────\n")
 	w("  OS:           %s/%s\n", d.OS, d.Arch)
 	if d.Hostname != "" {
-		w("  Loopback:     %s\n", d.Hostname)
+		w("  Hostname:     %s\n", d.Hostname)
 	}
 	w("  Observed:     %s\n", d.ObservedAt.Format("2006-01-02T15:04:05Z"))
 	w("  Inspection:   %s\n", supportedWord(d.Supported))

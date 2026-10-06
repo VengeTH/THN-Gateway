@@ -307,6 +307,90 @@ func TestFlagSetRejectsMissingValue(t *testing.T) {
 	}
 }
 
+// TestFlagSetParsesIntegers covers the int flag kind at the parser level.
+//
+// This kind existed before `thn host --requires` used it, but Parse never
+// consulted the ints map, so a registered int flag was indistinguishable from
+// an unregistered one and the command reported "unknown flag". The case below
+// is the generic form of that defect: any command adding an Int flag would
+// have hit it.
+func TestFlagSetParsesIntegers(t *testing.T) {
+	cases := []struct {
+		args []string
+		want int
+	}{
+		{nil, 7},
+		{[]string{"--requires", "2"}, 2},
+		{[]string{"--requires=3"}, 3},
+		{[]string{"--requires", "-4"}, -4},
+		{[]string{"--requires", "5", "--mac"}, 5},
+	}
+
+	for _, c := range cases {
+		fs := newFlagSet()
+		fs.Bool("mac", false)
+		n := fs.Int("requires", 7)
+
+		if _, err := fs.Parse(c.args); err != nil {
+			t.Errorf("Parse(%v) = %v, want no error", c.args, err)
+			continue
+		}
+		if *n != c.want {
+			t.Errorf("Parse(%v): --requires = %d, want %d", c.args, *n, c.want)
+		}
+		if fs.Seen("requires") != (c.args != nil) {
+			t.Errorf("Parse(%v): Seen(requires) = %t, want %t",
+				c.args, fs.Seen("requires"), c.args != nil)
+		}
+	}
+}
+
+// TestFlagSetRejectsMalformedIntegers proves a bad value errors rather than
+// silently becoming zero.
+func TestFlagSetRejectsMalformedIntegers(t *testing.T) {
+	for _, args := range [][]string{
+		{"--requires", "abc"},
+		{"--requires", "2.5"},
+		{"--requires", ""},
+		{"--requires"},
+	} {
+		fs := newFlagSet()
+		fs.Int("requires", 2)
+
+		if _, err := fs.Parse(args); err == nil {
+			t.Errorf("Parse(%v) was accepted; a malformed integer must be a usage error", args)
+		}
+	}
+}
+
+// TestFlagSetHandlesEveryRegisteredKind is the structural guard.
+//
+// Parse consults the bools, strings and ints maps by hand. Registering a kind
+// and forgetting to add its branch produces a flag that is silently rejected
+// at runtime, which is exactly what happened to `thn host --requires`.
+// Exercising all three in one flag set keeps that failure from recurring.
+func TestFlagSetHandlesEveryRegisteredKind(t *testing.T) {
+	fs := newFlagSet()
+	flag := fs.Bool("mac", false)
+	path := fs.String("config", "")
+	count := fs.Int("requires", 2)
+
+	args := []string{"--mac", "--config", "/etc/thn/config.yaml", "--requires", "4"}
+	if _, err := fs.Parse(args); err != nil {
+		t.Fatalf("Parse(%v) = %v", args, err)
+	}
+
+	if !*flag {
+		t.Error("--mac did not take effect")
+	}
+	if *path != "/etc/thn/config.yaml" {
+		t.Errorf("--config = %q", *path)
+	}
+	if *count != 4 {
+		t.Errorf("--requires = %d, want 4", *count)
+	}
+}
+
 func TestConfigPathPrecedence(t *testing.T) {
 	env := &Env{Getenv: func(k string) string {
 		if k == "THN_CONFIG" {

@@ -232,21 +232,23 @@ func forwardingFrom(snap *network.Snapshot) (enabled, known bool) {
 	return false, false
 }
 
-// hostnameOf finds the loopback hostname, which is the one the observer saw.
+// hostnameOf returns the observed system hostname.
+//
+// It reads the hostname the platform observer recorded, which is the machine's
+// own name. It deliberately does not synthesise one from an interface address:
+// an earlier version returned the loopback CIDR, which rendered as
+// "hostname 127.0.0.1/8" — an address presented under a hostname label,
+// identical on every Linux host and therefore carrying no information.
+//
+// The observation layer owns reading the host, so this is a copy of a fact
+// already gathered rather than a second, divergent way to establish one. An
+// empty result means the platform could not report a hostname, never that the
+// machine has none.
 func hostnameOf(snap *network.Snapshot) string {
 	if snap == nil {
 		return ""
 	}
-	for _, i := range snap.Interfaces {
-		if i.Kind == "loopback" || i.Name == "lo" {
-			for _, a := range i.Addresses {
-				if strings.HasPrefix(a.CIDR, "127.") {
-					return a.CIDR
-				}
-			}
-		}
-	}
-	return ""
+	return snap.System.Hostname
 }
 
 // capabilitiesFor derives what the host can do.

@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -217,6 +218,11 @@ func (f *flagSet) String(name, def string) *string {
 // Both "--name value" and "--name=value" are accepted. A bare "--" stops flag
 // parsing, which lets a future command pass through arguments that begin with
 // a dash.
+//
+// Every registered flag kind is consulted — bool, string and int. A kind that
+// is registered but not handled here is indistinguishable, to the user, from a
+// flag the command does not have, which is how `thn host --requires` ended up
+// reporting "unknown flag" while `--mac` on the same command worked.
 func (f *flagSet) Parse(args []string) ([]string, error) {
 	var positional []string
 
@@ -266,6 +272,27 @@ func (f *flagSet) Parse(args []string) ([]string, error) {
 				value = args[i]
 			}
 			*p = value
+			f.seen[name] = true
+			continue
+		}
+
+		if p, ok := f.ints[name]; ok {
+			if !hasInline {
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("flag --%s requires a value", name)
+				}
+				i++
+				value = args[i]
+			}
+			// Parsed here rather than at the call site so that every integer
+			// flag reports a malformed value identically. A caller that had to
+			// strconv itself would either skip the check and silently read 0,
+			// or invent a second, differently-worded error.
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return nil, fmt.Errorf("flag --%s expects a whole number, got %q", name, value)
+			}
+			*p = n
 			f.seen[name] = true
 			continue
 		}

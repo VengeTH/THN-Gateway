@@ -115,7 +115,10 @@ Readiness
 ```
 
 `--json` emits the same model for automation. `--requires <n>` sets how many
-physical ports the intended topology needs (default 2).
+physical ports the intended topology needs (default 2), and changes the
+readiness verdict accordingly: the same host can be reported ready at
+`--requires 1` and blocked at `--requires 3`. `thn host --help` lists every
+option.
 
 ### What is observed
 
