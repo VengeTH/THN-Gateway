@@ -27,5 +27,9 @@ func newHostInfo(ctx context.Context) HostInfo {
 	return &sysfsHostInfo{
 		describe: "host facts are unavailable on " + runtime.GOOS +
 			"; /sys/class/net and nl80211 are Linux interfaces",
+		// Recorded as not-checked rather than left blank, so that a report
+		// from a non-Linux host says plainly that nothing was looked at
+		// instead of carrying an empty list that reads as "nothing to say".
+		probes: []Probe{NotChecked("host-info", "sysfs-and-nl80211")},
 	}
 }

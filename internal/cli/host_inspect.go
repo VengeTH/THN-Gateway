@@ -77,6 +77,14 @@ type hostOptions struct {
 	// exactly that is the only thing keeping it that way.
 	Analyze bool
 
+	// Debug asks for the structured diagnostic record on stderr.
+	//
+	// Off by default, and it only ever writes to stderr. That is the whole
+	// design constraint: `--json` output goes to stdout and a consumer parses
+	// it, so a diagnostic line printed there would corrupt a document for
+	// every consumer except a human reading a terminal.
+	Debug bool
+
 	// Help asks for the usage text instead of a report.
 	Help bool
 }
@@ -94,6 +102,7 @@ func parseHostOptions(args []string) (hostOptions, error) {
 	fs.String("config", "")
 	requires := fs.Int("requires", 2)
 	fs.Bool("analyze", false)
+	fs.Bool("debug", false)
 	fs.Bool("help", false)
 
 	if _, err := fs.Parse(args); err != nil {
@@ -104,6 +113,7 @@ func parseHostOptions(args []string) (hostOptions, error) {
 		ConfigPath: *fs.strings["config"],
 		Requires:   *requires,
 		Analyze:    *fs.bools["analyze"],
+		Debug:      *fs.bools["debug"],
 		Help:       *fs.bools["help"],
 	}
 	if !opts.Help && opts.Requires < 1 {
@@ -157,6 +167,13 @@ func runHost(env *Env, args []string) ExitCode {
 		intel = host.AnalyzeHardware(d)
 	}
 
+	// Diagnostics go to stderr, before anything is printed, so that an
+	// operator watching a hung command sees why it is hung rather than
+	// waiting for output that will never come.
+	if opts.Debug {
+		writeHostDiagnostics(env, d, intel, opts.Analyze)
+	}
+
 	if env.IsJSON {
 		if err := env.printJSON(hostJSON(d, opts.ShowMAC, ready, opts.Requires, intel, opts.Analyze)); err != nil {
 			env.errorf("thn host: %v\n", err)
@@ -186,6 +203,9 @@ Flags:
   --analyze        add the hardware suitability analysis: which interfaces
                    could serve as WAN, LAN or MGMT, on what observed
                    evidence, and which gateway shapes the host could take
+  --debug          write the structured diagnostic record to stderr, naming
+                   every probe that was run and where it stopped. Never
+                   writes to stdout, so --json stays valid JSON
   --mac            include hardware addresses in the output
   --config <path>  configuration file to resolve roles against (optional)
   --json           emit machine-readable JSON

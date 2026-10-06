@@ -36,6 +36,7 @@ package network
 // the tool installed, which is never the machine running the tests.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,7 +90,19 @@ type NFTablesState struct {
 	// talked to — usually insufficient privilege. That is a different
 	// diagnostic from "nft is not installed", and conflating them would tell
 	// an operator to install a package they already have.
+	//
+	// It is also false when the output could not be parsed, which the Probe
+	// below distinguishes. Reporting a parse failure as a successful empty
+	// inventory would be a claim about somebody else's firewall.
 	QuerySucceeded bool `json:"query_succeeded"`
+
+	// Probe records how this state was determined, structurally.
+	//
+	// Reason is the human sentence; Probe is the field that names the failing
+	// stage. "nft is installed but the ruleset could not be read" covers three
+	// unrelated problems — not installed, no privilege, unreadable output —
+	// and only Probe separates them.
+	Probe Probe `json:"probe"`
 
 	// Tables are the nftables tables observed on this host, whatever created
 	// them.
@@ -156,10 +169,37 @@ type nftTablesJSON struct {
 // attributing a chain to the wrong table is worse than not reporting it, and
 // an unrecognised output shape should be visible as a missing chain rather
 // than as a wrong one.
-func ParseNFTablesTables(raw []byte) []NftTable {
+//
+// # Why this returns an error
+//
+// It used to return nil and say nothing. That made "nft printed JSON THN
+// cannot read" and "nft printed an empty ruleset" the same value, and the
+// caller set QuerySucceeded=true either way — so a parse failure was reported
+// to the operator as a host with no nftables tables, which is a confident
+// wrong answer about somebody else's firewall.
+//
+// The two are now separable: an empty inventory is a successful parse of an
+// empty document, and a parse failure is an error naming the stage.
+func ParseNFTablesTables(raw []byte) ([]NftTable, error) {
+	if jsonIsNull(raw) {
+		return []NftTable{}, nil
+	}
+
 	var doc nftTablesJSON
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil
+		return nil, fmt.Errorf(
+			"nftables table inventory: the output was not the expected JSON shape: %w", err)
+	}
+
+	// A document that parsed but carried no nftables key is almost certainly a
+	// shape THN does not recognise yet, rather than a host with no ruleset —
+	// `nft` always emits the key. Reporting it as an empty inventory would
+	// repeat the exact confusion this function's error return exists to
+	// prevent, one layer up.
+	if doc.Nftables == nil {
+		return nil, fmt.Errorf(
+			"nftables table inventory: the output parsed but carried no %q element; "+
+				"this is not a shape THN recognises", "nftables")
 	}
 
 	type key struct{ family, name string }
@@ -192,7 +232,8 @@ func ParseNFTablesTables(raw []byte) []NftTable {
 		}
 		return out[a].Name < out[b].Name
 	})
-	return out
+
+	return out, nil
 }
 
 // ObserveNFTables reports what nftables this host exposes, without touching it.
@@ -207,9 +248,13 @@ func ParseNFTablesTables(raw []byte) []NftTable {
 // prevent: an operator told "nftables unavailable" who then installs a package
 // they already had has been actively misled by the tool.
 func ObserveNFTables(ctx context.Context) NFTablesState {
-	st := NFTablesState{Checked: true}
+	st := NFTablesState{
+		Checked: true,
+		Probe:   NotChecked("nftables", "list-tables"),
+	}
 
 	out, err := guard.Exec(ctx, "nft", "-j", "list", "tables")
+	st.Probe = ExecProbe("nftables", "list-tables", "nft", []string{"-j", "list", "tables"}, out, err)
 	if err != nil {
 		if isMissingTool(err) {
 			st.Reason = "the nft binary is not installed on this host"
@@ -223,8 +268,21 @@ func ObserveNFTables(ctx context.Context) NFTablesState {
 	}
 
 	st.Available = true
+
+	tables, perr := ParseNFTablesTables([]byte(out.Stdout))
+	if perr != nil {
+		// Same reasoning as traffic control: the tool is present and the
+		// answer is unreadable. Recording that as an empty inventory would
+		// tell an operator their firewall has no tables, which is a
+		// statement about somebody else's security that THN has no basis for.
+		st.Probe = failed(st.Probe, StageParse, ProbeParseFailed,
+			"nft ran and produced output THN could not parse", perr)
+		st.Reason = fmt.Sprintf("nft is installed but its output could not be parsed: %v", perr)
+		return st
+	}
+
 	st.QuerySucceeded = true
-	st.Tables = ParseNFTablesTables([]byte(out.Stdout))
+	st.Tables = tables
 	st.Managed = true
 
 	for _, t := range st.Tables {
@@ -235,6 +293,16 @@ func ObserveNFTables(ctx context.Context) NFTablesState {
 			st.Managed = false
 		}
 	}
+
+	// An empty table list is a working probe and a fact about the host, so it
+	// is recorded as no-evidence rather than as a failure. That distinction
+	// is what lets a reader tell "this host has no nftables tables" from "we
+	// could not find out".
+	detail := "the query succeeded"
+	if len(st.Tables) == 0 {
+		detail = "the query succeeded and no nftables tables are present"
+	}
+	st.Probe = Succeeded(st.Probe, detail, len(st.Tables))
 	return st
 }
 
@@ -270,7 +338,20 @@ type TCState struct {
 	Available bool `json:"available"`
 
 	// QuerySucceeded reports whether a qdisc query completed.
+	//
+	// It is false when the parse failed, which is what makes this field
+	// trustworthy: previously a malformed `tc` output produced
+	// QuerySucceeded=true over an empty discipline list, and that is
+	// indistinguishable from a host with no shaping configured.
 	QuerySucceeded bool `json:"query_succeeded"`
+
+	// Probe records how this state was determined.
+	//
+	// Reason is a human sentence; Probe is the structured form, and it is the
+	// one that answers "which stage failed and why" — tool unavailable,
+	// execution failed, or output could not be parsed are three different
+	// operator problems that Reason alone blurred together.
+	Probe Probe `json:"probe"`
 
 	// Qdiscs are the root queue disciplines observed, in the order tc reports
 	// them.
@@ -303,7 +384,24 @@ type Qdisc struct {
 // disagreeing with the tool it is standing in for. Where a field is absent the
 // entry is still reported with an empty handle: an unrecognised discipline is
 // still a discipline, and dropping it would under-report.
-func ParseQdiscs(raw []byte) []Qdisc {
+//
+// # Why this returns an error
+//
+// The failure this prevents is specific and was live. Returning nil on
+// malformed JSON meant the caller could not distinguish it from a host with
+// no queue disciplines attached, and set QuerySucceeded=true over either. That
+// is the shape of "this host has no shaping configured" — so a tc that had
+// started emitting a format THN could not read would be reported, with
+// confidence, as a host that needs no shaping.
+func ParseQdiscs(raw []byte) ([]Qdisc, error) {
+	// A literal null is an empty answer, matching ParseNFTablesTables. It is
+	// the one value that decodes into a Go nil without error, and treating it
+	// as a format fault would report a tool's correct "nothing here" as a
+	// parser problem.
+	if jsonIsNull(raw) {
+		return []Qdisc{}, nil
+	}
+
 	var parsed []struct {
 		Kind   string `json:"kind"`
 		Handle string `json:"handle"`
@@ -311,7 +409,8 @@ func ParseQdiscs(raw []byte) []Qdisc {
 		Dev    string `json:"dev"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil
+		return nil, fmt.Errorf(
+			"traffic control: `tc -j qdisc show` output was not the expected JSON array: %w", err)
 	}
 
 	out := make([]Qdisc, 0, len(parsed))
@@ -326,7 +425,7 @@ func ParseQdiscs(raw []byte) []Qdisc {
 			Root:   q.Root,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // ObserveTrafficControl reports what traffic control this host exposes.
@@ -338,9 +437,13 @@ func ParseQdiscs(raw []byte) []Qdisc {
 // CAKE on a host with no CAKE qdisc stays unknown rather than becoming
 // available.
 func ObserveTrafficControl(ctx context.Context) TCState {
-	st := TCState{Checked: true}
+	st := TCState{
+		Checked: true,
+		Probe:   NotChecked("traffic-control", "qdisc-show"),
+	}
 
 	out, err := guard.Exec(ctx, "tc", "-j", "qdisc", "show")
+	st.Probe = ExecProbe("traffic-control", "qdisc-show", "tc", []string{"-j", "qdisc", "show"}, out, err)
 	if err != nil {
 		if isMissingTool(err) {
 			st.Reason = "the tc binary is not installed on this host"
@@ -352,13 +455,39 @@ func ObserveTrafficControl(ctx context.Context) TCState {
 	}
 
 	st.Available = true
+
+	qdiscs, perr := ParseQdiscs([]byte(out.Stdout))
+	if perr != nil {
+		// Available is true and QuerySucceeded is false, which is the honest
+		// combination: the tool is there, and THN could not read it. The
+		// previous code set QuerySucceeded here regardless, which reported a
+		// format change as an absence of shaping.
+		st.Probe = failed(st.Probe, StageParse, ProbeParseFailed,
+			"tc ran and produced output THN could not parse", perr)
+		st.Reason = fmt.Sprintf("tc is installed but its output could not be parsed: %v", perr)
+		return st
+	}
+
 	st.QuerySucceeded = true
-	st.Qdiscs = ParseQdiscs([]byte(out.Stdout))
+	st.Qdiscs = qdiscs
 
 	for _, q := range st.Qdiscs {
 		if strings.EqualFold(q.Kind, "cake") {
 			st.CakeObserved = true
 		}
+	}
+
+	// Cake is the capability most likely to be wrong on a real host, so the
+	// probe records which of the two "not available" reasons applies: a
+	// working probe that found none, versus a probe that never ran.
+	detail := "the query succeeded"
+	if !st.CakeObserved {
+		detail = "the query succeeded and no CAKE discipline is attached; " +
+			"sch_cake is a kernel module and cannot be established without mutation"
+	}
+	st.Probe = Succeeded(st.Probe, detail, len(qdiscs))
+	if !st.CakeObserved {
+		st.Probe.Operation = "qdisc-show/cake"
 	}
 	return st
 }
@@ -399,6 +528,15 @@ type DNSState struct {
 
 	// Reason explains why the mechanism could not be determined.
 	Reason string `json:"reason,omitempty"`
+
+	// Probe records how the mechanism was determined.
+	//
+	// DNS is the subsystem most likely to be read from a file that is not
+	// what it appears to be — a systemd-resolved stub rewritten at runtime,
+	// a container's bind-mount, a symlink to nowhere — so the record names
+	// which file was read and whether the answer came from it or from a
+	// fallback.
+	Probe Probe `json:"probe"`
 }
 
 // DNS mechanisms.
@@ -468,7 +606,9 @@ func ParseResolvConf(content string) DNSState {
 func ObserveDNS() DNSState {
 	b, err := os.ReadFile(resolvConfPath)
 	if err != nil {
-		return observeDNSAlternate()
+		st, alt := observeDNSAlternate(err)
+		st.Probe = alt
+		return st
 	}
 
 	st := ParseResolvConf(string(b))
@@ -476,12 +616,30 @@ func ObserveDNS() DNSState {
 	// Detect a systemd-resolved stub. Both the symlink and the file's own
 	// banner are checked: the symlink is the reliable signal, and the banner
 	// is what a copied or bind-mounted resolv.conf leaves behind.
+	detail := "the resolver configuration was read from the authoritative file"
 	if isSystemdResolvedStub(resolvConfPath, string(b)) {
 		st.Mechanism = DNSMechanismSystemdResolved
 		st.Authoritative = false
 		st.Reason = "/etc/resolv.conf is a systemd-resolved stub; " +
 			"the local resolver owns DNS on this host and this file's " +
 			"contents are rewritten at runtime"
+		detail = "the file was read and is a systemd-resolved stub, so it is not the authoritative configuration"
+	}
+
+	// The read succeeded, so this is a working probe with a positive result
+	// even when the answer is "this file is not the real configuration" —
+	// which is itself a fact THN established rather than a failure.
+	st.Probe = Succeeded(Probe{
+		Subsystem: "dns",
+		Operation: "resolv-conf",
+		Path:      resolvConfPath,
+	}, detail, len(st.Nameservers))
+	if st.Mechanism == DNSMechanismSystemdResolved {
+		// No nameserver count, because the file's nameservers are not the
+		// host's nameservers and reporting a count would invite exactly the
+		// reading the Reason forbids.
+		st.Probe.Count = 0
+		st.Probe.Operation = "resolv-conf/systemd-resolved"
 	}
 	return st
 }
@@ -496,8 +654,20 @@ func isSystemdResolvedStub(path, content string) bool {
 	return strings.Contains(content, "/run/systemd/resolve/")
 }
 
-// isLiteralIP reports whether s parses as an IPv4 or IPv6 address.
+// jsonIsNull reports whether the payload is a literal JSON null.
 //
+// Checked before unmarshalling because `null` is the one value that decodes
+// into a Go nil without raising an error, which makes it indistinguishable
+// from "the element was absent" once it has been unmarshalled.
+//
+// It is treated as an EMPTY answer rather than as a shape error, and both
+// parsers here agree on that deliberately: a tool that reports nothing as
+// `null` has answered correctly, and calling that a format problem would send
+// an operator to fix a parser for behaviour that is not a fault.
+func jsonIsNull(raw []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
 // net.ParseIP rather than a regex or a hand-rolled check: it is the standard
 // library's definition of what an address is, and inventing a second one
 // creates a place for the two to disagree.
@@ -515,7 +685,18 @@ var resolvConfAlternates = []string{
 }
 
 // observeDNSAlternate is used by ObserveDNS when the primary file is missing.
-func observeDNSAlternate() DNSState {
+//
+// The primary read's error is carried through so the fallback's own record
+// can say what happened rather than only that an alternative was used. Before
+// this, a host whose resolver configuration could not be read produced a
+// "Reason" naming the alternate path and nothing about why the original read
+// failed — so the most interesting question went unasked.
+func observeDNSAlternate(primaryErr error) (DNSState, Probe) {
+	primary := FileProbe("dns", "resolv-conf", resolvConfPath, StageLocate,
+		classifyFileErrorOutcome(primaryErr),
+		fmt.Sprintf("the resolver configuration could not be read from the primary path: %v", primaryErr),
+		primaryErr)
+
 	for _, path := range resolvConfAlternates {
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -523,10 +704,30 @@ func observeDNSAlternate() DNSState {
 		}
 		st := ParseResolvConf(string(b))
 		st.Reason = fmt.Sprintf("%s was read because %s is absent", path, resolvConfPath)
-		return st
+		// The fallback succeeded, and saying so plainly is what distinguishes
+		// "this host has a resolver, read from a less usual path" from
+		// "THN could not find one".
+		return st, Succeeded(primary,
+			fmt.Sprintf("the primary path was unreadable, so the well-known alternate %s was read instead", path),
+			len(st.Nameservers))
 	}
-	return DNSState{
+
+	// Every path failed. The last error is retained because it is the one an
+	// operator would act on.
+	st := DNSState{
 		Mechanism: DNSMechanismUnknown,
 		Reason:    fmt.Sprintf("%s is not present and no alternative was found", resolvConfPath),
 	}
+	primary.Operation = "resolv-conf-and-alternates"
+	primary.Outcome = ProbeToolUnavailable
+	primary.Detail = "no resolver configuration could be read from any known path"
+	primary.Reason = strings.TrimSpace(primary.Reason + "; " + fmt.Sprintf(
+		"no alternative under %s was readable either", filepath.Dir(resolvConfAlternates[0])))
+	return st, primary
+}
+
+// classifyFileErrorOutcome reduces a file error to a probe outcome.
+func classifyFileErrorOutcome(err error) ProbeOutcome {
+	outcome, _ := classifyFileError(err)
+	return outcome
 }

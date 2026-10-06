@@ -552,6 +552,15 @@ type HardwareIntelligence struct {
 	// Notes are observations that qualify the analysis as a whole.
 	Notes []string `json:"notes,omitempty"`
 
+	// Unknowns explains every `unknown` the analysis reached.
+	//
+	// An unknown with no reason is the thing this milestone's diagnostics
+	// requirement exists to eliminate. "the host reported no link speed" is
+	// true and useless: it does not distinguish a driver that never reports
+	// one from a sysfs read that was refused, and those are different
+	// problems on different machines.
+	Unknowns []Unknown `json:"unknowns,omitempty"`
+
 	// AssignmentMade is always false.
 	//
 	// It exists so a machine consumer reading this document is told so in a
@@ -567,6 +576,179 @@ type HardwareIntelligence struct {
 // imply the others had been considered and found equivalent.
 func IntelligenceRoles() []Role { return []Role{RoleWAN, RoleLAN, RoleMGMT} }
 
+// Unknown is one thing the analysis could not determine, and why.
+//
+// It exists because "unknown" without a cause is the single least useful
+// thing a diagnostic tool can report. Every entry answers the question an
+// operator actually has — why does THN not know this? — and names the stage
+// that stopped, so the answer points at the fix rather than at THN.
+//
+// Subject is the interface or role; Probe is the underlying record, so a
+// reader can trace it back to the command or file that produced it.
+type Unknown struct {
+	// Subject is what could not be determined: an interface name, or
+	// "host" for something with no single owner.
+	Subject string `json:"subject"`
+
+	// Question is the specific thing that is unknown, as a stable code.
+	//
+	//	link-speed      the negotiated link speed
+	//	wireless-mode   the wireless operating mode
+	//	physicality     whether the link is real hardware
+	//	host-inspection whether anything at all could be observed
+	Question string `json:"question"`
+
+	// Detail is the human sentence.
+	Detail string `json:"detail"`
+
+	// Probe is the structured cause.
+	//
+	// A zero Probe here means THN established the unknown by reasoning about
+	// what it could see, with no external read behind it — which is itself
+	// recorded rather than left blank, because "nothing was asked" is the
+	// answer to a question an operator may need to ask differently.
+	Probe network.Probe `json:"probe"`
+}
+
+// unknown builds an Unknown whose cause is a probe.
+func unknown(subject, question, detail string, p network.Probe) Unknown {
+	return Unknown{Subject: subject, Question: question, Detail: detail, Probe: p}
+}
+
+// unknownFrom builds an Unknown whose cause is already known to be an
+// absence rather than a failure.
+func unknownFrom(subject, question, detail string) Unknown {
+	return unknown(subject, question, detail, network.NotChecked("analysis", question))
+}
+
+// analyzeInterface adds the entries this interface contributed.
+//
+// The two questions worth asking about are the ones the analyzer cannot
+// answer from the observation alone, because the observation carries the
+// answer's ABSENCE and not its cause. Link speed and wireless mode are both
+// `(value, bool)` pairs where false means "unknown", and both originate in a
+// read that either failed or found nothing — and the analyzer cannot tell
+// which, because that record lives on the Device's probes.
+//
+// Linking back to it is what turns "speed unknown" into "the kernel's speed
+// attribute is absent for this interface", which is an answer.
+func analyzeInterface(d *Device, in InterfaceIntelligence, out *[]Unknown) {
+	if !in.SpeedKnown {
+		*out = append(*out, unknown(
+			in.SystemName, "link-speed",
+			"the link speed was not reported, so throughput is unknown and is not estimated",
+			speedProbeFor(d, in.SystemName)))
+	}
+
+	// A wireless interface with no observed mode is the case the brief singles
+	// out: THN must not infer AP capability, and saying why it did not is
+	// what makes that restraint legible rather than looking like an omission.
+	// A wireless radio whose mode the host did not state. Keyed on the
+	// LINK CLASS rather than on Interface.Kind, because the class is what
+	// survives the kernel's own reclassification: `ip` reports a Wi-Fi NIC's
+	// link_type as "ether" and relies on the wireless object to mark it, and
+	// the class is computed from the already-normalised kind.
+	if in.Class == LinkPhysicalWireless && wirelessModeOf(d, in.SystemName) == "" {
+		*out = append(*out, unknown(
+			in.SystemName, "wireless-mode",
+			"the host reported no wireless mode, so access-point capability is not inferred",
+			wirelessProbeFor(d, in.SystemName)))
+	}
+}
+
+// speedProbeFor finds the probe that explains an absent link speed.
+//
+// Falls back to a not-checked record rather than an empty one, so an unknown
+// always carries a record that says something — even if all it says is that
+// THN did not ask.
+func speedProbeFor(d *Device, iface string) network.Probe {
+	if p, ok := findProbe(d, "link-speed", iface); ok {
+		return p
+	}
+	p := network.NotChecked("link-speed", "sysfs-speed/"+iface)
+	p.Detail = "no probe for this interface's link speed is recorded on the device; " +
+		"the absence of a speed is unexplained by the observation itself"
+	return p
+}
+
+// wirelessProbeFor finds the probe that explains an unobserved wireless mode.
+func wirelessProbeFor(d *Device, iface string) network.Probe {
+	for _, op := range []string{"sysfs-wireless-status/" + iface, "sysfs-wireless-mode/" + iface} {
+		if p, ok := findProbe(d, "wireless", iface); ok {
+			// The operation is refined to name the interface because a host
+			// with several radios produces one record per radio, and a reader
+			// needs to know which one this is.
+			p.Operation = op
+			return p
+		}
+	}
+	if p, ok := findProbe(d, "wireless", "nl80211-modes/"+iface); ok {
+		return p
+	}
+	p := network.NotChecked("wireless", "wireless-mode/"+iface)
+	p.Detail = "no probe for this interface's wireless mode is recorded on the device; " +
+		"the absence of a mode is unexplained by the observation itself"
+	return p
+}
+
+// findProbe locates a probe by subsystem and by an interface named anywhere
+// in its operation or path.
+//
+// Matching on the interface name across both fields rather than expecting one
+// exact spelling is deliberate: the probe that explains a speed comes from
+// sysfs and names the interface in its Path, while the one that explains a
+// wireless mode names it in its Operation. Requiring one of them would make
+// half the unknowns fall back to the "unexplained" record.
+//
+// The path is matched by SEGMENT rather than by joining with the platform's
+// separator. A path built with the other platform's separator is still a path
+// that names the interface, and a check that silently stopped matching on one
+// operating system would turn every speed unknown on that host into an
+// unexplained one — the exact bug this is fixing, reproduced in a new place.
+func findProbe(d *Device, subsystem, iface string) (network.Probe, bool) {
+	if iface == "" {
+		return network.Probe{}, false
+	}
+	for _, p := range d.Probes {
+		if p.Subsystem != subsystem {
+			continue
+		}
+		if p.Operation == iface || strings.HasSuffix(p.Operation, "/"+iface) {
+			return p, true
+		}
+		if pathNamesSegment(p.Path, iface) {
+			return p, true
+		}
+	}
+	return network.Probe{}, false
+}
+
+// pathNamesSegment reports whether any path segment equals name.
+//
+// Both separators are accepted regardless of the platform, because a recorded
+// path is data rather than something this package built, and a diagnostic that
+// only resolves on the platform that produced the path is not a diagnostic.
+func pathNamesSegment(path, name string) bool {
+	for _, seg := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if seg == name {
+			return true
+		}
+	}
+	return false
+}
+
+// wirelessModeOf reads the observed mode for an interface, empty when none.
+func wirelessModeOf(d *Device, iface string) string {
+	for _, i := range d.Interfaces {
+		if i.SystemName == iface {
+			return i.WirelessMode
+		}
+	}
+	return ""
+}
+
 // AnalyzeHardware judges an observed host for gateway suitability.
 //
 // Pure and total. It never returns an error, never mutates the Device it is
@@ -577,9 +759,12 @@ func AnalyzeHardware(d *Device) HardwareIntelligence {
 		Profiles:       []GatewayProfile{},
 		Notes:          []string{},
 		Infrastructure: []string{},
+		Unknowns:       []Unknown{},
 	}
 
 	if d == nil || !d.Supported {
+		out.Unknowns = append(out.Unknowns, unknownFrom("host", "host-inspection",
+			"host inspection is not available on this machine, so no interface could be assessed"))
 		out.Notes = append(out.Notes,
 			"host inspection is not available on this machine, so no interface could be assessed; "+
 				"every classification is unknown rather than unsuitable")
@@ -599,6 +784,7 @@ func AnalyzeHardware(d *Device) HardwareIntelligence {
 	for _, i := range sortedInterfaces(d.Interfaces) {
 		in := assessInterface(i, idx)
 		intel = append(intel, in)
+		analyzeInterface(d, in, &out.Unknowns)
 
 		if !in.Physical {
 			out.Infrastructure = append(out.Infrastructure, i.SystemName)

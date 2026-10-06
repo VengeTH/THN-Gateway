@@ -56,12 +56,25 @@ import (
 //
 // Both methods are read-only and may fail. A false `ok` means "the kernel did
 // not say", which callers must carry as unknown rather than substitute.
+//
+// # Why the false answer needs a companion probe
+//
+// A false `ok` is one value standing for at least three unrelated facts: the
+// attribute is not there, it is there and could not be read, or it is there
+// and did not parse. Those lead to different conclusions — a missing
+// /sys/class/net/X/speed on a virtual link is uninteresting, while the same
+// file present-but-unreadable means the kernel is telling THN something it is
+// refusing to hear.
+//
+// Probes() returns why each read came back the way it did, so the unknown
+// survives into the report with its cause attached rather than arriving
+// unexplained.
 type HostInfo interface {
 	// LinkSpeed returns the negotiated link speed in Mbps for an interface.
 	//
 	// ok is false when the driver does not report a speed, when the link has
 	// no carrier, and when the interface is not physical. All three are the
-	// same answer: unknown.
+	// same answer: unknown. Probes says which one it was.
 	LinkSpeed(iface string) (mbps int, ok bool)
 
 	// WirelessMode returns the operating mode of a WIRELESS interface.
@@ -74,6 +87,14 @@ type HostInfo interface {
 
 	// Describe names the source, for diagnostics.
 	Describe() string
+
+	// Probes returns the structured record of every read this source made.
+	//
+	// Recorded as it goes rather than returned per call, because the two
+	// methods are called in a loop over the interface list and the whole
+	// point is to report every one of them. The zero return is legitimate:
+	// a source with nothing to say says nothing.
+	Probes() []Probe
 }
 
 // Wireless operating modes, normalised.
@@ -223,43 +244,169 @@ type sysfsHostInfo struct {
 
 	// describe is reported in diagnostics.
 	describe string
+
+	// probes accumulates every read this source made, with its cause.
+	probes []Probe
 }
 
 var _ HostInfo = (*sysfsHostInfo)(nil)
 
+// record attaches a probe, keeping the list non-nil.
+//
+// Non-nil so that a JSON consumer gets `[]` rather than `null`: "no reads
+// happened" and "the field is absent" are not the same, and this is the same
+// rule the CLI applies to its own empty lists.
+func (s *sysfsHostInfo) record(p Probe) {
+	if s.probes == nil {
+		s.probes = []Probe{}
+	}
+	s.probes = append(s.probes, p)
+}
+
+// Probes implements HostInfo.
+func (s *sysfsHostInfo) Probes() []Probe {
+	if s.probes == nil {
+		return []Probe{}
+	}
+	return append([]Probe(nil), s.probes...)
+}
+
 // LinkSpeed implements HostInfo.
 func (s *sysfsHostInfo) LinkSpeed(iface string) (int, bool) {
 	if !safeIfaceName(iface) {
+		// Refusing the name is THN's decision, not the kernel's, and the
+		// record says so — otherwise a security check reads as a missing
+		// file.
+		s.record(Probe{
+			Subsystem: "link-speed",
+			Operation: "sysfs-speed",
+			Stage:     StageLocate,
+			Outcome:   ProbeParseFailed,
+			Detail:    "the interface name was rejected as unsafe, so no file was read",
+			Reason:    "refused before reading: " + iface + " is not a plain kernel interface name",
+		})
 		return 0, false
 	}
-	b, err := os.ReadFile(filepath.Join(s.root, iface, "speed"))
+
+	path := filepath.Join(s.root, iface, "speed")
+	b, err := os.ReadFile(path)
 	if err != nil {
+		outcome, detail := classifyFileError(err)
+		s.record(FileProbe("link-speed", "sysfs-speed", path, StageLocate, outcome, detail, err))
 		return 0, false
 	}
-	return ParseSpeedFile(string(b))
+
+	mbps, ok := ParseSpeedFile(string(b))
+	if !ok {
+		s.record(Probe{
+			Subsystem: "link-speed",
+			Operation: "sysfs-speed",
+			Stage:     StageParse,
+			Outcome:   ProbeNoEvidence,
+			Path:      path,
+			Detail:    "the kernel reported no link speed for this interface",
+			// The file's own content is the reason, and it is a safe one:
+			// a sysfs speed attribute is a single integer or the literal -1,
+			// never host configuration.
+			Reason: "unparseable or negative speed attribute: " + redacted(string(b)),
+		})
+		return 0, false
+	}
+
+	s.record(Succeeded(Probe{
+		Subsystem: "link-speed",
+		Operation: "sysfs-speed",
+		Path:      path,
+	}, fmt.Sprintf("the kernel reported a link speed of %d Mbps", mbps), 1))
+	return mbps, true
+}
+
+// classifyFileError maps a file-read error onto a probe outcome.
+//
+// A missing file and an unreadable file are separated because they mean
+// opposite things about the host: absent is normal for a link with no
+// ethtool backing, while present-but-unreadable means THN was refused by the
+// kernel or the mount options.
+func classifyFileError(err error) (ProbeOutcome, string) {
+	if os.IsNotExist(err) {
+		return ProbeToolUnavailable, "the file is not present"
+	}
+	if os.IsPermission(err) {
+		return ProbeExecutionFailed, "the file is present but could not be read: permission denied"
+	}
+	return ProbeExecutionFailed, "the file is present but could not be read"
 }
 
 // WirelessMode implements HostInfo.
 func (s *sysfsHostInfo) WirelessMode(iface string) (string, bool) {
+	if !safeIfaceName(iface) {
+		s.record(Probe{
+			Subsystem: "wireless",
+			Operation: "sysfs-wireless-mode",
+			Stage:     StageLocate,
+			Outcome:   ProbeParseFailed,
+			Detail:    "the interface name was rejected as unsafe, so no file was read",
+			Reason:    "refused before reading: " + iface + " is not a plain kernel interface name",
+		})
+		return "", false
+	}
+
 	if s.modesKnown {
 		mode, ok := s.modes[iface]
+		// nl80211 answered, and this interface is not in its output. That is a
+		// working probe finding nothing — a fact about the host, not a
+		// failure — and it is recorded as such rather than as "not checked".
+		p := NotChecked("wireless", "nl80211-modes/"+iface)
+		if ok {
+			p = Succeeded(p, "nl80211 reported mode "+mode, 1)
+		} else {
+			p.Outcome = ProbeNoEvidence
+			p.Detail = "nl80211 was consulted and did not list this interface as a radio"
+		}
+		s.record(p)
 		return mode, ok
 	}
 
 	// Fall back to the Wireless Extensions view. Its mere existence is
 	// evidence the interface is a radio, so a directory read is required
 	// before the status file is trusted.
-	if !safeIfaceName(iface) {
+	wirelessDir := filepath.Join(s.root, iface, "wireless")
+	if _, err := os.Stat(wirelessDir); err != nil {
+		outcome, detail := classifyFileError(err)
+		s.record(FileProbe("wireless", "sysfs-wireless-directory", wirelessDir,
+			StageLocate, outcome, detail, err))
 		return "", false
 	}
-	if _, err := os.Stat(filepath.Join(s.root, iface, "wireless")); err != nil {
-		return "", false
-	}
-	b, err := os.ReadFile(filepath.Join(s.root, iface, "wireless", "status"))
+
+	status := filepath.Join(wirelessDir, "status")
+	b, err := os.ReadFile(status)
 	if err != nil {
+		outcome, detail := classifyFileError(err)
+		s.record(FileProbe("wireless", "sysfs-wireless-status", status,
+			StageLocate, outcome, detail, err))
 		return "", false
 	}
-	return ParseWirelessStatus(string(b))
+
+	mode, ok := ParseWirelessStatus(string(b))
+	if !ok {
+		s.record(Probe{
+			Subsystem: "wireless",
+			Operation: "sysfs-wireless-status",
+			Stage:     StageParse,
+			Outcome:   ProbeNoEvidence,
+			Path:      status,
+			Detail:    "this is a radio but no operating mode could be read from it",
+			Reason:    "unparseable wireless status: " + redacted(string(b)),
+		})
+		return "", false
+	}
+
+	s.record(Succeeded(Probe{
+		Subsystem: "wireless",
+		Operation: "sysfs-wireless-status",
+		Path:      status,
+	}, "the Wireless Extensions view reported mode "+mode, 1))
+	return mode, true
 }
 
 // Describe implements HostInfo.
@@ -371,13 +518,22 @@ func enrichLinks(ctx context.Context, ifaces []Interface, info HostInfo, diags *
 // readWirelessModes consults nl80211 through `iw`.
 //
 // A failure is not an error. `iw` is not installed on every minimal server,
-// and a host with no radio has nothing to report either way. The returned
-// flag says whether the source was successfully consulted, because "we asked
-// and there were none" and "we could not ask" are different answers.
-func readWirelessModes(ctx context.Context) (map[string]string, bool) {
+// and a host with no radio has nothing to report either way. The returned flag
+// says whether the source was successfully consulted, because "we asked and
+// there were none" and "we could not ask" are different answers.
+//
+// The probe is recorded rather than folded into the boolean: on a host where
+// nl80211 could not be reached, wireless mode for every radio falls back to
+// the Wireless Extensions view, and an operator looking at an unknown mode
+// needs to know that a weaker source was used rather than guessing which.
+func readWirelessModes(ctx context.Context) (map[string]string, bool, Probe) {
 	out, err := guard.Exec(ctx, "iw", "dev")
+	p := ExecProbe("wireless", "nl80211-modes", "iw", []string{"dev"}, out, err)
 	if err != nil {
-		return nil, false
+		return nil, false, p
 	}
-	return ParseWirelessInterfaces(out.Stdout), true
+
+	modes := ParseWirelessInterfaces(out.Stdout)
+	p = Succeeded(p, fmt.Sprintf("iw dev listed %d interface(s)", len(modes)), len(modes))
+	return modes, true, p
 }

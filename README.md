@@ -42,7 +42,7 @@ thn config   show [--desired] [path]
 thn schema   [--mutating]
 thn status   [--local]
 thn diagnostics [--local]
-thn host     [--analyze] [--requires <n>] [--mac] [--config <path>] [--json]
+thn host     [--analyze] [--debug] [--requires <n>] [--mac] [--config <path>] [--json]
 thn activate        # always refuses
 ```
 
@@ -431,6 +431,100 @@ The key is `candidates`, never `roles` — a consumer reading a key called
 entirely when the host reported no speed, and `speed_known` says so, so a zero
 is never mistaken for a measurement.
 
+## Diagnosing an unknown
+
+An `unknown` with no reason is the least useful thing a diagnostic tool can
+report, so every one of THN's carries the stage that produced it.
+
+```sh
+thn host --analyze --debug
+```
+
+`--debug` writes to **stderr** only. stdout is the report, and under `--json`
+it is a document a machine parses — so a diagnostic line printed there would
+corrupt the output for every consumer that is not a person at a terminal. JSON
+is byte-identical with and without the flag, and two tests enforce that.
+
+```
+probes       7 run, 2 did not reach a conclusion
+  [ok]  nftables/list-tables stage=classify outcome=no_evidence tool=nft args="-j list tables" count=4
+       the query succeeded
+  [!!] traffic-control/qdisc-show stage=execute outcome=execution_failed tool=tc args="-j qdisc show" exit=1
+       the tool ran but did not succeed
+       cause: tc: exit 1: RTNETLINK answers: Operation not permitted
+  [---] wireless/nl80211-modes stage=not-started outcome=not_checked
+       this probe was never run, so nothing is known about wireless
+```
+
+The marker separates three things that look alike in a long output: `ok` ran
+and concluded, `!!` ran and failed, `---` never ran. Only `ok` says anything
+about the host.
+
+### Why the outcomes are kept apart
+
+They are not a severity scale. Each is a different operator action:
+
+| Outcome | Means | What to do |
+|---|---|---|
+| `not_checked` | nobody looked | a THN-side gap; usually a missing source |
+| `tool_unavailable` | the binary or file was not found | install the package |
+| `execution_failed` | found, and running it failed | usually privilege |
+| `parse_failed` | it ran and said something THN does not understand | THN is behind the tool's output format |
+| `unexpected_output` | it parsed, but not into the expected shape | THN is behind the tool's output format |
+| `no_evidence` | success — the probe worked and found nothing | nothing; this is an answer |
+| `evidence` | success | nothing |
+
+The last two are both success, and that pair is the one most often collapsed.
+"No CAKE discipline is attached" is a working probe reporting a fact; "THN
+could not check" is a gap in THN's knowledge. Merging them produces either a
+false alarm on every healthy host or false confidence on every unhealthy one.
+
+`not_checked` is listed under "did not reach a conclusion" deliberately. A
+probe that never ran has established nothing about the host, so reporting it
+under failures is correct rather than pedantic — and it is invisible
+everywhere else, because a probe that never ran produces no error, no
+diagnostic and no log line.
+
+### Two parse failures that were previously silent
+
+`tc -j qdisc show` and `nft -j list tables` used to return an empty result on
+malformed output and say nothing. Since an empty result is also what a host
+with nothing configured prints, a `tc` that had started emitting a new format
+was reported — confidently — as a host that needs no queue shaping.
+
+Both parsers now return an error naming the tool and the expected shape, and
+`QuerySucceeded` is false on a parse failure rather than true over unparsed
+output.
+
+### Unknowables in the analysis
+
+M7.1 reaches unknowns of its own — a link speed no driver reported, a wireless
+mode the host did not state. Each names the probe that explains it:
+
+```
+unknowns     1, each with its cause
+  enx00e099001812  link-speed  the link speed was not reported, so throughput
+                    is unknown and is not estimated
+        [ok] link-speed/sysfs-speed stage=classify outcome=no_evidence
+             path=/sys/class/net/enx00e099001812/speed
+             the kernel reported no link speed for this interface
+             cause: unparseable or negative speed attribute: -1
+```
+
+The same data is in `--analyze --json` under `hardware.unknowns`, with the
+probe as a structured object rather than a sentence. A speed attribute reading
+`-1` is a kernel declining to answer; a missing one is a link with no
+ethtool backing. Both are "unknown speed" and they are not the same thing.
+
+### What is not recorded
+
+Full command output. An nftables ruleset, a `resolv.conf`, a routing table:
+these are operator configuration, and a debug log that dumps them by default is
+a log that ends up pasted into a bug report. Probes carry counts, outcomes
+and causes, truncated to one line and 200 characters. Redaction is applied in
+one constructor rather than left to each caller, because every caller would
+get it wrong eventually.
+
 ## Why it cannot change networking
 
 Three independent layers. Any one alone would be a convention; all three must be
@@ -622,6 +716,14 @@ thn host --analyze --json | jq '.hardware.interfaces[]
   | {name: .system_name, class: .class, speed: .speed_known,
      wan: .suitability.wan.classification,
      lan: .suitability.lan.classification}'
+
+# when something reads unexpected, ask why — stderr, so --json stays valid
+thn host --analyze --debug
+
+# which probes did not reach a conclusion, and where they stopped
+thn host --analyze --json | jq '.hardware.unknowns[]
+  | {subject, question, stage: .probe.stage, outcome: .probe.outcome,
+     reason: .probe.reason}'
 ```
 
 What a correct report looks like on a host with one wired uplink, one unused

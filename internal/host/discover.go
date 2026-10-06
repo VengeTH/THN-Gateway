@@ -51,6 +51,18 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 				"no interfaces and no capabilities were observed",
 				runtime.GOOS, runtime.GOARCH))
 		d.Capabilities = capabilitiesFor(d, nil)
+
+		// The probe records are collected on this path too. Nothing was read,
+		// which is exactly the case that produces no diagnostic and would
+		// otherwise be indistinguishable from "there was nothing to read" —
+		// so it has to be stated explicitly, or a report from an unsupported
+		// platform carries no trace of why it is empty.
+		d.Probes = probeRecords(snap, d)
+		if len(d.Probes) == 0 {
+			d.Probes = []network.Probe{
+				network.NotChecked("host-inspection", "observe-host"),
+			}
+		}
 		return d
 	}
 
@@ -79,7 +91,107 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 
 	d.ForwardingEnabled, d.ForwardingKnown = forwardingFrom(snap)
 	d.Capabilities = capabilitiesFor(d, snap)
+	d.Probes = probeRecords(snap, d)
 	return d
+}
+
+// probeRecords collects every probe a snapshot made.
+//
+// Assembled here rather than copied field by field because a probe that is
+// forgotten when a new subsystem is added is precisely the kind of silent gap
+// this collection exists to prevent: the subsystem would report an unknown with
+// no record of having been asked.
+//
+// Ordered so that the same host always produces the same list. The per-link
+// probes come from a map in the snapshot's source, so they are sorted by
+// interface name rather than left in whatever order iteration produced.
+func probeRecords(snap *network.Snapshot, d *Device) []network.Probe {
+	if snap == nil {
+		return []network.Probe{network.NotChecked("host-inspection", "observe-host")}
+	}
+
+	out := make([]network.Probe, 0, len(snap.Probes)+len(snap.Diagnostics))
+	out = append(out, snap.Probes...)
+
+	// The three subsystem states each carry their own probe, and they are
+	// appended unconditionally so that "the probe is missing" is itself
+	// visible: a state with a zero Probe means the observer never recorded one.
+	if snap.NFTables.Probe.Subsystem != "" {
+		out = append(out, snap.NFTables.Probe)
+	}
+	if snap.TrafficControl.Probe.Subsystem != "" {
+		out = append(out, snap.TrafficControl.Probe)
+	}
+	if snap.DNS.Probe.Subsystem != "" {
+		out = append(out, snap.DNS.Probe)
+	}
+
+	// Forwarding gets a record too, because it is the one sysctl a gateway
+	// cannot work without and it has three possible answers: enabled,
+	// disabled, and unreadable. The third is a THN problem and produces no
+	// diagnostic on its own.
+	out = append(out, forwardingProbe(snap))
+
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].Subsystem != out[b].Subsystem {
+			return out[a].Subsystem < out[b].Subsystem
+		}
+		if out[a].Operation != out[b].Operation {
+			return out[a].Operation < out[b].Operation
+		}
+		if out[a].Path != out[b].Path {
+			return out[a].Path < out[b].Path
+		}
+		return out[a].Detail < out[b].Detail
+	})
+	return out
+}
+
+// forwardingProbe records how the IPv4 forwarding setting was determined.
+func forwardingProbe(snap *network.Snapshot) network.Probe {
+	p := network.Probe{Subsystem: "forwarding", Operation: "sysctl-ipv4-forward"}
+
+	for _, s := range snap.Sysctl {
+		if s.Key != "net.ipv4.ip_forward" {
+			continue
+		}
+		if s.Error != "" {
+			// The reason is preserved verbatim. "could not read it" and "it is
+			// off" are opposite diagnoses, and an operator who has been told
+			// only that forwarding is unavailable cannot tell which they have.
+			p.Stage = network.StageExecute
+			p.Outcome = network.ProbeExecutionFailed
+			p.Detail = "the setting exists but could not be read"
+			p.Reason = s.Error
+			return p
+		}
+		if s.Value == "unknown" {
+			p.Stage = network.StageParse
+			p.Outcome = network.ProbeParseFailed
+			p.Detail = "sysctl returned no usable value for the setting"
+			p.Reason = "sysctl -n net.ipv4.ip_forward returned the literal \"unknown\""
+			return p
+		}
+		if s.Value == "1" {
+			p = network.Succeeded(p, "the setting was read and IPv4 forwarding is enabled", 1)
+			return p
+		}
+		// A successful read that found forwarding off.
+		//
+		// Count is zero on purpose. The probe asked "is forwarding on?" and the
+		// answer was no, which is no_evidence — the same classification a host
+		// with no CAKE discipline gets. Reporting it as positive evidence
+		// would make "checked and found off" indistinguishable from "checked
+		// and found on", which is the distinction the operator needs.
+		p = network.Succeeded(p, "the setting was read and IPv4 forwarding is disabled", 0)
+		return p
+	}
+
+	// The key was not observed at all, which is different from it being off
+	// and different from a failed read.
+	p = network.NotChecked("forwarding", "sysctl-ipv4-forward")
+	p.Detail = "net.ipv4.ip_forward was not present in the collected sysctl values"
+	return p
 }
 
 // interfacesFrom converts observed interfaces, assigning no roles.

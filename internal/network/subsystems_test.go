@@ -22,6 +22,7 @@ package network_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/venth/thn-gateway/internal/network"
@@ -148,7 +149,10 @@ func TestSystemDescribeFallsBack(t *testing.T) {
 // visible, because the whole point of discovery is that an operator can see
 // what is already on the machine.
 func TestParseNFTablesTablesReadsUnmanagedTables(t *testing.T) {
-	tables := network.ParseNFTablesTables(hostFixture(t, "infrastructure_nft.json"))
+	tables, err := network.ParseNFTablesTables(hostFixture(t, "infrastructure_nft.json"))
+	if err != nil {
+		t.Fatalf("ParseNFTablesTables: %v", err)
+	}
 
 	if len(tables) != 4 {
 		t.Fatalf("parsed %d tables, want 4 (ip/filter, ip/nat, inet/filter, ip/docker-forward): %+v",
@@ -206,7 +210,10 @@ func TestIsTHNTableMatchesOnlyTheOwnTable(t *testing.T) {
 // A host with nft installed and no rules is a normal host. It must not be
 // reported as an error, and must not be reported as having tables.
 func TestParseNFTablesTablesEmptyIsEmptyNotBroken(t *testing.T) {
-	tables := network.ParseNFTablesTables([]byte(`{"nftables": []}`))
+	tables, err := network.ParseNFTablesTables([]byte(`{"nftables": []}`))
+	if err != nil {
+		t.Fatalf("an empty ruleset must not be an error: %v", err)
+	}
 	if len(tables) != 0 {
 		t.Errorf("empty ruleset produced %d tables, want 0", len(tables))
 	}
@@ -217,7 +224,10 @@ func TestParseNFTablesTablesEmptyIsEmptyNotBroken(t *testing.T) {
 // TestParseQdiscsReadsRootDisciplines proves disciplines are read with their
 // kind, handle and device.
 func TestParseQdiscsReadsRootDisciplines(t *testing.T) {
-	qdiscs := network.ParseQdiscs(hostFixture(t, "tc_cake.json"))
+	qdiscs, err := network.ParseQdiscs(hostFixture(t, "tc_cake.json"))
+	if err != nil {
+		t.Fatalf("ParseQdiscs: %v", err)
+	}
 
 	if len(qdiscs) != 2 {
 		t.Fatalf("parsed %d qdiscs, want 2: %+v", len(qdiscs), qdiscs)
@@ -244,7 +254,10 @@ func TestParseQdiscsReadsRootDisciplines(t *testing.T) {
 // report the host's shaping configuration, and the operator would see a host
 // that appears unshaped when it is not.
 func TestParseQdiscsKeepsUnknownDisciplines(t *testing.T) {
-	qdiscs := network.ParseQdiscs([]byte(`[{"kind":"ethtool","handle":"8002:","root":false,"dev":"lan0"}]`))
+	qdiscs, err := network.ParseQdiscs([]byte(`[{"kind":"ethtool","handle":"8002:","root":false,"dev":"lan0"}]`))
+	if err != nil {
+		t.Fatalf("ParseQdiscs: %v", err)
+	}
 
 	if len(qdiscs) != 1 {
 		t.Fatalf("parsed %d qdiscs, want 1", len(qdiscs))
@@ -254,11 +267,23 @@ func TestParseQdiscsKeepsUnknownDisciplines(t *testing.T) {
 	}
 }
 
-// TestParseQdiscsRejectsGarbage proves unparseable output yields nothing
-// rather than a partial, wrong answer.
+// TestParseQdiscsRejectsGarbage proves unparseable output yields an ERROR,
+// not a partial, wrong answer.
+//
+// This is the behaviour the error return was added for. Returning an empty
+// slice was indistinguishable from "this host has no queue disciplines
+// attached", so ObserveTrafficControl set QuerySucceeded=true over garbage
+// output and reported a format change as an absence of shaping.
 func TestParseQdiscsRejectsGarbage(t *testing.T) {
-	if got := network.ParseQdiscs([]byte("not json")); len(got) != 0 {
-		t.Errorf("garbage input produced %d qdiscs, want 0", len(got))
+	qdiscs, err := network.ParseQdiscs([]byte("not json"))
+	if err == nil {
+		t.Fatal("malformed tc output parsed without error; a format change would be reported as an empty host")
+	}
+	if len(qdiscs) != 0 {
+		t.Errorf("garbage input produced %d qdiscs, want 0", len(qdiscs))
+	}
+	if !strings.Contains(err.Error(), "not the expected JSON array") {
+		t.Errorf("error does not say what failed: %v", err)
 	}
 }
 

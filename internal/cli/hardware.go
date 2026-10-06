@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/host"
+	"github.com/venth/thn-gateway/internal/network"
 )
 
 // RenderHardwareAnalysis renders the M7.1 report for a human.
@@ -208,6 +209,10 @@ func hardwareJSON(intel host.HardwareIntelligence) map[string]any {
 		"default_route_ifaces": intel.DefaultRouteInterfaces,
 		"infrastructure":       intel.Infrastructure,
 		"notes":                intel.Notes,
+		// Every unknown with its cause. An automation consumer hits the same
+		// wall a human does — "why is this unknown?" — and the answer has to
+		// be a field rather than a prose note somebody has to parse.
+		"unknowns": unknownsJSON(intel),
 		// The three that matter most to a consumer, reported as fields
 		// rather than only as prose: this analysis assigns nothing, changes
 		// nothing, and is not a readiness verdict.
@@ -291,6 +296,56 @@ func evidenceJSON(in []host.Evidence) []map[string]any {
 		})
 	}
 	return out
+}
+
+// unknownsJSON encodes every unexplained unknown, with the probe that caused
+// it.
+//
+// Emitted even when empty, as `[]` rather than being omitted. A consumer
+// asking "does this host have unknowns THN cannot explain?" must be able to
+// distinguish "none" from "this build does not report them", and an absent
+// field cannot carry that distinction.
+func unknownsJSON(intel host.HardwareIntelligence) []map[string]any {
+	out := make([]map[string]any, 0, len(intel.Unknowns))
+	for _, u := range intel.Unknowns {
+		out = append(out, map[string]any{
+			"subject":  u.Subject,
+			"question": u.Question,
+			"detail":   u.Detail,
+			"probe":    probeJSON(u.Probe),
+		})
+	}
+	return out
+}
+
+// probeJSON encodes one probe as a flat record.
+func probeJSON(p network.Probe) map[string]any {
+	m := map[string]any{
+		"subsystem": p.Subsystem,
+		"operation": p.Operation,
+		"stage":     string(p.Stage),
+		"outcome":   string(p.Outcome),
+		"detail":    p.Detail,
+	}
+	if p.Reason != "" {
+		m["reason"] = p.Reason
+	}
+	if p.Tool != "" {
+		m["tool"] = p.Tool
+	}
+	if len(p.Args) > 0 {
+		m["args"] = p.Args
+	}
+	if p.Path != "" {
+		m["path"] = p.Path
+	}
+	if p.Count > 0 {
+		m["count"] = p.Count
+	}
+	if p.ExitStatus != 0 {
+		m["exit_status"] = p.ExitStatus
+	}
+	return m
 }
 
 // profilesJSON encodes the gateway profiles.

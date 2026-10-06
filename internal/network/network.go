@@ -184,6 +184,53 @@ type Snapshot struct {
 	DNS DNSState `json:"dns"`
 	// Diagnostics records what could not be observed and why.
 	Diagnostics []Diagnostic `json:"diagnostics,omitempty"`
+
+	// Probes records every external observation this snapshot made, and what
+	// each one concluded.
+	//
+	// Diagnostics is for things that are wrong. Probes is for how each
+	// question was answered, including when the answer was "the probe did not
+	// run" — which produces no diagnostic, because nothing failed, and which
+	// is exactly the case an operator needs explained.
+	//
+	// Every entry answers the same questions: what was probed, with what,
+	// whether it executed, at which stage it stopped, and why.
+	Probes []Probe `json:"probes,omitempty"`
+}
+
+// ProbeFor returns the probe for a subsystem and operation.
+//
+// The lookup is by exact operation because several subsystems probe more than
+// once — traffic control runs one query and asks two questions about it — and
+// an operator reading a report needs the record for the question they are
+// actually asking about.
+//
+// The second return is false when no such probe ran, which is deliberately
+// not the same as a zero Probe: a missing record means "this was never
+// asked", and a zero record with an empty subsystem would mean nothing at all.
+func (s *Snapshot) ProbeFor(subsystem, operation string) (Probe, bool) {
+	for _, p := range s.Probes {
+		if p.Subsystem == subsystem && p.Operation == operation {
+			return p, true
+		}
+	}
+	return Probe{}, false
+}
+
+// FailedProbes returns the probes that did not reach a conclusion.
+//
+// NotChecked is included, and that is the point: a probe that never ran has
+// established nothing about the host, so listing it here is correct rather
+// than pedantic. It is the entry an operator most needs to find, because it
+// is invisible everywhere else.
+func (s *Snapshot) FailedProbes() []Probe {
+	out := make([]Probe, 0, len(s.Probes))
+	for _, p := range s.Probes {
+		if !p.Outcome.OK() {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Diagnostic is an inspection finding.
@@ -252,6 +299,7 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 	snap := &Snapshot{
 		CapturedAt: time.Now().UTC(),
 		Platform:   goos,
+		Probes:     []Probe{},
 	}
 
 	if !supported {
@@ -263,6 +311,10 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 				"network inspection is only supported on Linux; this host is %s, so no host interfaces, addresses or routes were read",
 				goos),
 		})
+		// Recorded rather than left empty. An unsupported platform produced no
+		// failures — nothing ran — and an empty probe list would read as
+		// "nothing went wrong", which is a different and wrong answer.
+		snap.Probes = append(snap.Probes, NotChecked("platform", "host-network-inspection"))
 		return snap, nil
 	}
 
@@ -294,6 +346,13 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 	// enrichment operates on a complete link list.
 	enrichLinks(ctx, snap.Interfaces, i.info, &snap.Diagnostics)
 
+	// Every read the host-facts source made, with its cause. Collected after
+	// enrichLinks because that is what triggers them, and before the
+	// subsystem probes so the list reads in the order the facts were gathered.
+	if i.info != nil {
+		snap.Probes = append(snap.Probes, i.info.Probes()...)
+	}
+
 	// Subsystem availability. Every call below is read-only: `nft list`,
 	// `tc show`, and a file read. They are gathered last so that the cheap
 	// interface facts are already in hand if a slower tool is slow.
@@ -301,6 +360,16 @@ func (i *inspector) Inspect(ctx context.Context) (*Snapshot, error) {
 	snap.NFTables = ObserveNFTables(ctx)
 	snap.TrafficControl = ObserveTrafficControl(ctx)
 	snap.DNS = ObserveDNS()
+
+	// The subsystem probes are appended last because that is when they were
+	// run. Each state carries its own Probe too — the field next to the
+	// capability it explains — and this list is the single place a report
+	// can enumerate them all in the order they happened.
+	snap.Probes = append(snap.Probes,
+		snap.NFTables.Probe,
+		snap.TrafficControl.Probe,
+		snap.DNS.Probe,
+	)
 
 	return snap, nil
 }

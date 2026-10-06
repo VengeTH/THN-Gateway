@@ -28,7 +28,7 @@ const sysfsNetClass = "/sys/class/net"
 // its wireless modes come from the same instant rather than from two reads
 // that could straddle a mode change.
 func newHostInfo(ctx context.Context) HostInfo {
-	modes, known := readWirelessModes(ctx)
+	modes, known, probe := readWirelessModes(ctx)
 
 	describe := "sysfs " + sysfsNetClass
 	if known {
@@ -44,5 +44,6 @@ func newHostInfo(ctx context.Context) HostInfo {
 		modes:      modes,
 		modesKnown: known,
 		describe:   describe + " on " + runtime.GOOS,
+		probes:     []Probe{probe},
 	}
 }

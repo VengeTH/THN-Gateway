@@ -465,6 +465,35 @@ type Device struct {
 
 	// Diagnostics records what could not be determined and why.
 	Diagnostics []string `json:"diagnostics,omitempty"`
+
+	// Probes records how each observation was made, and what it concluded.
+	//
+	// Diagnostics is for what is wrong. Probes is for how each question was
+	// answered — including when the answer is "not checked", which produces no
+	// diagnostic at all and is precisely the case an operator cannot otherwise
+	// explain.
+	//
+	// Carried whole rather than distilled, so that a capability reporting
+	// `unknown` can name the stage that failed instead of leaving the reader
+	// to guess between "nobody looked", "the tool is missing", and "the tool
+	// ran and said something we do not understand".
+	Probes []network.Probe `json:"probes,omitempty"`
+}
+
+// FailedProbes returns the probes that did not reach a conclusion.
+//
+// ProbeNotChecked is included deliberately. A probe that never ran has
+// established nothing about the host, so it belongs in the list of things a
+// reader must know about — and it is the entry that would otherwise be
+// invisible, because a probe that never ran produces no diagnostic.
+func (d *Device) FailedProbes() []network.Probe {
+	out := make([]network.Probe, 0, len(d.Probes))
+	for _, p := range d.Probes {
+		if !p.Outcome.OK() {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // DefaultRoute returns the observed default route, or nil.

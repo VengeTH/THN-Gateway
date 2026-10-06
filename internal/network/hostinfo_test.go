@@ -64,6 +64,7 @@ type fakeHostInfo struct {
 	modes  map[string]string
 	known  bool
 	descr  string
+	probes []Probe
 }
 
 func (f fakeHostInfo) LinkSpeed(iface string) (int, bool) {
@@ -78,6 +79,18 @@ func (f fakeHostInfo) WirelessMode(iface string) (string, bool) {
 	return v, ok
 }
 func (f fakeHostInfo) Describe() string { return f.descr }
+
+// Probes returns the records a test asked for, so a test can assert on the
+// diagnostic side of a read without a sysfs fixture.
+//
+// Empty by default: the fake reports facts the test put in it, and inventing
+// probe records for facts it was handed would make the probes untested.
+func (f fakeHostInfo) Probes() []Probe {
+	if f.probes == nil {
+		return []Probe{}
+	}
+	return f.probes
+}
 
 // TestCaseAWirelessEvidenceExistsRegardlessOfName is Case A.
 //
