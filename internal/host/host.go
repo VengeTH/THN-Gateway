@@ -575,6 +575,143 @@ func (d *Device) Can(c Capability) (CapabilityState, bool) {
 	return s, ok
 }
 
+// CapabilityEvidence is the complete derivation of one capability's verdict.
+//
+// # Why this exists
+//
+// A capability whose confidence is `unknown` used to be a dead end: the
+// operator saw a word and no way to get behind it. The capability table knows
+// the verdict; the observation knows why; and nothing joined them.
+//
+// That join is this type. It answers, for any capability: which observation
+// decided it, what that observation concluded, at which stage it stopped, and
+// what the underlying error was — which is the difference between "firewall
+// is unknown" and "firewall is unknown because `nft` ran, exited 1, and said
+// 'Operation not permitted'".
+//
+// It is a view over data the Device already carries. Nothing is recomputed, so
+// it cannot disagree with the verdict it is explaining.
+type CapabilityEvidence struct {
+	// Capability is the capability this explains.
+	Capability Capability `json:"capability"`
+
+	// Available and Confidence are the verdict itself.
+	Available  bool       `json:"available"`
+	Confidence Confidence `json:"confidence"`
+
+	// Reason is the verdict's own explanation.
+	Reason string `json:"reason,omitempty"`
+
+	// Source names the observation that decided it: "nftables",
+	// "traffic-control", "sysctl", "interfaces", or "" where no external
+	// observation was involved.
+	Source string `json:"source,omitempty"`
+
+	// Probe is that observation's structured record.
+	//
+	// The zero value means the capability was decided by reasoning about
+	// THN's own architecture rather than by asking the host — NAT, DHCP and
+	// DNS are the three, and they are inferred for exactly that reason.
+	Probe network.Probe `json:"probe"`
+}
+
+// EvidenceFor returns the full derivation of one capability's verdict.
+//
+// It never fails and never invents. A capability with no external source
+// returns its verdict with an empty Source, which is itself informative:
+// "this was not asked".
+func (d *Device) EvidenceFor(c Capability) CapabilityEvidence {
+	s := d.Capabilities[c]
+	ev := CapabilityEvidence{
+		Capability: c,
+		Available:  s.Available,
+		Confidence: s.Confidence,
+		Reason:     s.Reason,
+	}
+
+	switch c {
+	case CapFirewall, CapNFTables:
+		ev.Source, ev.Probe = "nftables", d.NFTables.Probe
+	case CapTC, CapCake, CapQoS:
+		ev.Source, ev.Probe = "traffic-control", d.TrafficControl.Probe
+	case CapRouting, CapForwarding:
+		ev.Source = "sysctl"
+		if p, ok := findForwardingProbe(d.Probes); ok {
+			ev.Probe = p
+		} else {
+			ev.Probe = NotCheckedProbe("forwarding", "sysctl-ipv4-forward")
+		}
+	case CapWirelessAP, CapWirelessClient, CapVeth, CapNetns:
+		ev.Source = "interfaces"
+		ev.Probe = firstProbeFor(d.Probes, "wireless", "host-info", "interfaces")
+	case CapMultipleEthernet, CapVLAN, CapBridge:
+		ev.Source = "interfaces"
+		ev.Probe = firstProbeFor(d.Probes, "interfaces", "host-info")
+	default:
+		// NAT, DHCP and DNS are structural: no probe will ever exist for
+		// them, because answering them would mean running the software.
+		ev.Source = "inferred"
+		ev.Probe = NotCheckedProbe(string(c), "structural-inference")
+	}
+	return ev
+}
+
+// UnknownCapabilitiesExplainThemselves reports whether every unknown
+// capability carries a probe that reached a conclusion.
+//
+// It is the assertion behind "no unexplained unknown", and it is checked
+// rather than assumed: a capability can be `unknown` for a legitimate reason
+// (a probe failed) or an illegitimate one (nobody recorded why), and only one
+// of those is acceptable.
+func (d *Device) UnknownCapabilitiesExplainThemselves() []Capability {
+	var out []Capability
+	for _, c := range AllCapabilities() {
+		s, ok := d.Capabilities[c]
+		if !ok || s.Confidence != ConfidenceUnknown {
+			continue
+		}
+		ev := d.EvidenceFor(c)
+		// An unknown derived from a structural inference is not an
+		// unexplained unknown: THN will never probe it, and the reason
+		// string says so. Only an unknown that claims an external source and
+		// then has no record of asking is a gap.
+		if ev.Source == "" || ev.Source == "inferred" {
+			continue
+		}
+		if ev.Probe.Subsystem == "" || ev.Probe.Detail == "" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// FalseConfidenceCapabilities returns the capabilities that claim `observed`
+// while the probe behind them produced nothing usable.
+//
+// This is the failure that matters. A gateway reporting "firewall: available,
+// observed" because a query it never completed was scored as a successful
+// absence would plan rules against a firewall it has never read — and the
+// confidence column exists precisely so that such a claim cannot pass a gate.
+//
+// It is checked rather than assumed because the mapping from probe outcome to
+// confidence is exactly where a future change would introduce one, and the
+// symptom would appear as a confidently wrong plan on a host nobody was
+// watching.
+func (d *Device) FalseConfidenceCapabilities() []Capability {
+	var out []Capability
+	for _, c := range AllCapabilities() {
+		s, ok := d.Capabilities[c]
+		if !ok || s.Confidence != ConfidenceObserved {
+			continue
+		}
+		ev := d.EvidenceFor(c)
+		if ev.Probe.Outcome.BlocksClaim() {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Has reports whether a capability is available at all, regardless of
 // confidence.
 func (d *Device) Has(c Capability) bool {

@@ -96,6 +96,8 @@ func writeHostDiagnostics(env *Env, d *host.Device, intel host.HardwareIntellige
 		}
 	}
 
+	writeCapabilityEvidence(w, d)
+
 	if !analyze {
 		return
 	}
@@ -106,6 +108,49 @@ func writeHostDiagnostics(env *Env, d *host.Device, intel host.HardwareIntellige
 		for _, u := range intel.Unknowns {
 			w("  %-16s %-16s %s", u.Subject, u.Question, u.Detail)
 			w("%s", indent(renderProbe(u.Probe), "      "))
+		}
+	}
+}
+
+// writeCapabilityEvidence prints every capability whose verdict is not
+// `observed`, with the observation that produced it.
+//
+// # Why only the non-observed ones
+//
+// A capability at `observed` with a reason attached is a finished answer. An
+// operator reading this section is looking for the ones that are not, and a
+// wall of sixteen settled verdicts buries the two that are not settled.
+//
+// The format answers the four questions that make an `unknown` actionable:
+// what was probed, with what, how it ended, and why.
+func writeCapabilityEvidence(w func(string, ...any), d *host.Device) {
+	var pending []host.CapabilityEvidence
+	for _, c := range host.AllCapabilities() {
+		ev := d.EvidenceFor(c)
+		if ev.Confidence != host.ConfidenceObserved {
+			pending = append(pending, ev)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	w("")
+	w("capabilities %d of %d are not fully established; each with its source",
+		len(pending), len(host.AllCapabilities()))
+
+	for _, ev := range pending {
+		verdict := "unavailable"
+		if ev.Available {
+			verdict = "available"
+		}
+		w("  %-18s %-12s %-9s source=%s", ev.Capability, verdict, ev.Confidence,
+			orNone(ev.Source))
+		if ev.Reason != "" {
+			w("      %s", ev.Reason)
+		}
+		if ev.Probe.Subsystem != "" {
+			w("%s", indent(renderProbe(ev.Probe), "      "))
 		}
 	}
 }

@@ -525,6 +525,50 @@ and causes, truncated to one line and 200 characters. Redaction is applied in
 one constructor rather than left to each caller, because every caller would
 get it wrong eventually.
 
+### Unknown is not one thing
+
+A capability reported `unknown` has one of three causes, and telling them
+apart is the difference between a diagnostic and a shrug:
+
+| Cause | Example | Correct response |
+|---|---|---|
+| the probe failed | `nft` installed, query refused with EPERM | fix privilege, or run as the right user |
+| no evidence exists | CAKE, with nothing to attach a discipline without mutating | accept it; it is honestly unknowable |
+| nobody looked | no probe exists for this capability | a gap in THN, worth reporting |
+
+`thn host --debug` prints each one with the probe behind it:
+
+```
+capabilities 4 of 17 are not fully established; each with its source
+  firewall            unavailable  unknown   source=nftables
+      nft is installed but the ruleset could not be read: exit 1: Operation not permitted
+        [!!] nftables/list-tables stage=execute outcome=execution_failed tool=nft exit=1
+             the tool ran and did not succeed
+             cause: nft: exit 1: netlink: cache initialization failed: Operation not permitted
+```
+
+A **confirmed absence** is not one of these. If `nft` is definitively not
+installed, THN has *established* that, and reports
+`nftables: unavailable / observed` — absence is evidence, not a gap. Scoring
+it as `unknown` would make a minimal host indistinguishable from one nobody
+examined.
+
+### A tool that ran is never scored as absent
+
+`guard.Exec` embeds a command's stderr in its error string, so the error text
+cannot distinguish "the binary is missing" from "the binary ran and said
+something". Messages like `Cannot find device "eth0"` — which `ip` prints when
+an interface vanishes mid-read — would otherwise be read as "not installed".
+
+The discriminator is structural: `guard.Exec` returns an output only when a
+process was actually created. That is a fact about what happened, available
+without reading a byte of the tool's output.
+
+Getting this wrong cuts in the dangerous direction. A confirmed absence is
+scored `observed`, so a misclassified error would have produced
+`nftables: unavailable / observed` on a host where nft was installed and
+working — a confidently wrong answer in the column that gates activation.
+
 ## Why it cannot change networking
 
 Three independent layers. Any one alone would be a convention; all three must be

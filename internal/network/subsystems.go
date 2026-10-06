@@ -248,15 +248,40 @@ func ParseNFTablesTables(raw []byte) ([]NftTable, error) {
 // prevent: an operator told "nftables unavailable" who then installs a package
 // they already had has been actively misled by the tool.
 func ObserveNFTables(ctx context.Context) NFTablesState {
+	return ObserveNFTablesWithRunner(ctx, guard.Exec)
+}
+
+// ObserveNFTablesWithRunner is ObserveNFTables with the command runner
+// supplied.
+//
+// # Why the seam exists
+//
+// Without it, every failure path in this file — tool absent, command refused,
+// output unparseable, output the wrong shape — was reachable only by running
+// on a machine with the right tools installed and the wrong privileges. Those
+// are exactly the states a developer's laptop does not have, which is why the
+// classification bug this seam now catches survived as long as it did.
+//
+// The runner is guard.Runner rather than a bespoke type, so a test cannot
+// accidentally supply something that is not a guard-validated exec. The policy
+// check lives inside guard.Exec, which the default uses; a test that injects
+// its own runner opts out of it deliberately and is testing the
+// CLASSIFICATION, not the allowlist — and TestRepoContainsNoUnguardedExec
+// still covers the allowlist.
+func ObserveNFTablesWithRunner(ctx context.Context, run guard.Runner) NFTablesState {
 	st := NFTablesState{
 		Checked: true,
 		Probe:   NotChecked("nftables", "list-tables"),
 	}
+	if run == nil {
+		run = guard.Exec
+	}
 
-	out, err := guard.Exec(ctx, "nft", "-j", "list", "tables")
-	st.Probe = ExecProbe("nftables", "list-tables", "nft", []string{"-j", "list", "tables"}, out, err)
+	args := []string{"-j", "list", "tables"}
+	out, err := run(ctx, "nft", args...)
+	st.Probe = ExecProbe("nftables", "list-tables", "nft", args, out, err)
 	if err != nil {
-		if isMissingTool(err) {
+		if toolMissing(out, err) {
 			st.Reason = "the nft binary is not installed on this host"
 			return st
 		}
@@ -306,14 +331,41 @@ func ObserveNFTables(ctx context.Context) NFTablesState {
 	return st
 }
 
-// isMissingTool reports whether an exec error means the binary is absent.
+// toolMissing reports whether a command could not be started at all.
 //
-// exec.ErrNotFound is the unambiguous case. The string test covers the case
-// where the lookup succeeded but execution failed for want of the interpreter
-// or a missing shared library, which is still "the tool is not usable here" and
-// not a permission problem.
-func isMissingTool(err error) bool {
+// # Why the output is the discriminator, not the error text
+//
+// guard.Exec formats a non-zero exit as "%s: exit %d: %s" — the last %s is
+// the command's own STDERR. So the returned error string contains whatever the
+// tool printed, and the previous implementation substring-matched that string
+// for "no such file or directory", "cannot find" and "executable file not
+// found".
+//
+// That is a false-confidence bug in the worst direction. `ip -j addr show`
+// prints "Cannot find device \"eth0\"" when an interface disappears
+// mid-read, and `nft` prints "No such file or directory" for any rule it
+// cannot resolve. Either would have been classified as "the binary is not
+// installed", leaving Available=false — and nftConfidence turns a confirmed
+// absence into ConfidenceObserved on the grounds that "we were in a position
+// to find that out".
+//
+// So THN would have reported "nftables: unavailable / observed" for a host
+// where nft is installed and working, and the confidence column — the one that
+// gates activation — would have been confidently wrong.
+//
+// A non-nil Output means a process was created and ran. That is a structural
+// fact, available without reading a single byte of the tool's output, and it
+// is the only sound discriminator. The string tests remain for the case where
+// no process was created, because that is the only case where the text is
+// about the binary rather than about the work.
+func toolMissing(out *guard.Output, err error) bool {
 	if err == nil {
+		return false
+	}
+	if out != nil {
+		// A process existed and was run. Whatever it printed, the tool is
+		// present; this is an execution failure or a non-zero exit, not a
+		// missing binary.
 		return false
 	}
 	if os.IsNotExist(err) {
@@ -322,7 +374,7 @@ func isMissingTool(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "executable file not found") ||
 		strings.Contains(msg, "no such file or directory") ||
-		strings.Contains(msg, "cannot find")
+		strings.Contains(msg, "cannot find") || strings.Contains(msg, "no such file")
 }
 
 // TCState is an observation of traffic control.
@@ -437,15 +489,31 @@ func ParseQdiscs(raw []byte) ([]Qdisc, error) {
 // CAKE on a host with no CAKE qdisc stays unknown rather than becoming
 // available.
 func ObserveTrafficControl(ctx context.Context) TCState {
+	return ObserveTrafficControlWithRunner(ctx, guard.Exec)
+}
+
+// ObserveTrafficControlWithRunner is ObserveTrafficControl with the command
+// runner supplied.
+//
+// The same seam and the same reasoning as ObserveNFTablesWithRunner: the
+// traffic-control observer's failure classification is the one most likely to
+// be wrong and the least likely to be exercised, because every reachable
+// failure needs a machine whose tc is installed and whose privileges are
+// wrong.
+func ObserveTrafficControlWithRunner(ctx context.Context, run guard.Runner) TCState {
 	st := TCState{
 		Checked: true,
 		Probe:   NotChecked("traffic-control", "qdisc-show"),
 	}
+	if run == nil {
+		run = guard.Exec
+	}
 
-	out, err := guard.Exec(ctx, "tc", "-j", "qdisc", "show")
-	st.Probe = ExecProbe("traffic-control", "qdisc-show", "tc", []string{"-j", "qdisc", "show"}, out, err)
+	args := []string{"-j", "qdisc", "show"}
+	out, err := run(ctx, "tc", args...)
+	st.Probe = ExecProbe("traffic-control", "qdisc-show", "tc", args, out, err)
 	if err != nil {
-		if isMissingTool(err) {
+		if toolMissing(out, err) {
 			st.Reason = "the tc binary is not installed on this host"
 			return st
 		}

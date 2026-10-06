@@ -125,22 +125,148 @@ func TestLiveDiscoveryOnLinux(t *testing.T) {
 		}
 	}
 
-	// 5. Every capability carries a known confidence and a reason. On a
-	//    supported host nothing may be left "unknown" — that tier means "we
-	//    did not look", and we did.
+	// 5. Every capability carries a reason, and every `unknown` carries the
+	//    observation that produced it.
+	//
+	//    # What this used to assert, and why it was wrong
+	//
+	//    The previous version required every capability on a supported host to
+	//    be `observed` or `inferred`, on the reasoning that `unknown` "means we
+	//    did not look, and we did". That premise is false, and it failed on
+	//    every unprivileged host.
+	//
+	//    `unknown` has three legitimate sources, and only the third means "we
+	//    did not look":
+	//
+	//      - the probe failed      nft is installed but the query was refused
+	//      - no evidence exists    CAKE, and nothing can establish it without
+	//                              mutating the host
+	//      - nobody looked         a gap in THN, and the only real fault
+	//
+	//    On a host running this suite as an ordinary user, `nft` and `tc` are
+	//    present and unqueryable, so firewall, nftables and cake are all
+	//    legitimately `unknown`. The observation was right and the assertion
+	//    was wrong — it passed only when the suite happened to run with
+	//    CAP_NET_ADMIN.
+	//
+	//    # What is asserted instead
+	//
+	//    The real invariant is causal, and it is STRICTLY stronger than the
+	//    proxy it replaces: a capability's confidence must follow from the
+	//    observation that decided it, in the right direction, every time. The
+	//    old test could not detect a capability that was `observed` when its
+	//    probe had failed — which is the failure mode that actually matters.
 	for _, c := range AllCapabilities() {
 		s, ok := d.Capabilities[c]
 		if !ok {
 			t.Errorf("capability %s is absent from a supported host", c)
 			continue
 		}
-		switch s.Confidence {
-		case "observed", "inferred":
-		default:
-			t.Errorf("capability %s has confidence %q on an inspected host", c, s.Confidence)
-		}
 		if s.Reason == "" {
 			t.Errorf("capability %s has no reason", c)
+		}
+	}
+
+	// 5a. No unexplained unknown. This is the assertion the old version was
+	//     reaching for, stated correctly: an unknown that does not name the
+	//     observation behind it is a gap in THN, not a fact about the host.
+	for _, c := range d.UnknownCapabilitiesExplainThemselves() {
+		ev := d.EvidenceFor(c)
+		t.Errorf("capability %s is unknown from source %q with no probe record; "+
+			"reason given was %q", c, ev.Source, ev.Reason)
+	}
+
+	// 5b. Confidence follows the observation, in the direction that is safe.
+	//
+	//     A capability whose source probe produced NOTHING USABLE must never
+	//     claim observed. This is the false-confidence direction — a gateway
+	//     reporting "firewall: available, observed" because a query it never
+	//     completed was scored as a successful absence — and it is the reason
+	//     the old assertion was worth replacing rather than deleting.
+	//
+	//     tool_unavailable is deliberately NOT in that set: a tool confirmed
+	//     absent has been established as absent, which is a finding rather
+	//     than a gap, and treating it as undetermined would make a minimal
+	//     host indistinguishable from an unexamined one.
+	for _, c := range d.FalseConfidenceCapabilities() {
+		ev := d.EvidenceFor(c)
+		t.Errorf("capability %s claims confidence %q while its %s probe ended %s at stage %s; "+
+			"a probe that did not reach a conclusion cannot establish a capability. reason: %q",
+			c, ev.Confidence, ev.Source, ev.Probe.Outcome, ev.Probe.Stage, ev.Reason)
+	}
+
+	// 5c. A tool that was found and queried successfully is classified
+	//     observed. The mirror of 5b, and the one that catches the bug this
+	//     milestone exists to fix: an authoritative observation being dropped
+	//     somewhere between the probe and the capability table.
+	if d.NFTables.QuerySucceeded {
+		s := d.Capabilities[CapNFTables]
+		if s.Confidence != ConfidenceObserved {
+			t.Errorf("nftables answered a query (probe outcome %q) but the capability is %q; "+
+				"a successful observation was not carried into the capability table",
+				d.NFTables.Probe.Outcome, s.Confidence)
+		}
+		fw := d.Capabilities[CapFirewall]
+		if fw.Confidence != ConfidenceObserved {
+			t.Errorf("firewall is derived from nftables, which was observed, but is %q", fw.Confidence)
+		}
+	}
+	if d.TrafficControl.QuerySucceeded {
+		s := d.Capabilities[CapTC]
+		if s.Confidence != ConfidenceObserved {
+			t.Errorf("tc answered a query (probe outcome %q) but the capability is %q",
+				d.TrafficControl.Probe.Outcome, s.Confidence)
+		}
+	}
+
+	// 5d. CAKE stays semantically distinct from tc.
+	//
+	//     "tc worked and found no CAKE" must never become "CAKE unavailable
+	//     because tc failed". Those are different facts with different
+	//     consequences, and collapsing them would either report a host with a
+	//     working tc as broken, or load sch_cake to find out.
+	if d.TrafficControl.QuerySucceeded && !d.TrafficControl.CakeObserved {
+		cake := d.Capabilities[CapCake]
+		if cake.Confidence != ConfidenceUnknown {
+			t.Errorf("tc succeeded with no CAKE discipline attached, so CAKE must be "+
+				"unknown; it is %q. THN cannot establish CAKE without attaching a "+
+				"discipline, which would mutate the host", cake.Confidence)
+		}
+		if cake.Available {
+			t.Error("CAKE was reported available with no CAKE discipline observed")
+		}
+	}
+
+	// 5e. Every probe that did not reach a conclusion names a stage and a
+	//     detail, so a live-host failure is diagnosable without rerunning
+	//     anything.
+	for _, p := range d.Probes {
+		if p.Outcome.OK() {
+			continue
+		}
+		if p.Stage == "" {
+			t.Errorf("probe %s/%s ended %q with no stage recorded",
+				p.Subsystem, p.Operation, p.Outcome)
+		}
+		if p.Detail == "" {
+			t.Errorf("probe %s/%s ended %q with no explanation",
+				p.Subsystem, p.Operation, p.Outcome)
+		}
+	}
+
+	// Log the evidence so a failure on the real gateway says what it saw.
+	// Read-only, and it is the difference between "the suite failed" and
+	// "the suite failed because nft exited 1 with EPERM".
+	for _, c := range AllCapabilities() {
+		ev := d.EvidenceFor(c)
+		if ev.Confidence == ConfidenceObserved {
+			continue
+		}
+		t.Logf("  capability %-18s available=%-5v %-9s source=%-16s probe=%s/%s stage=%s outcome=%s",
+			c, ev.Available, ev.Confidence, ev.Source,
+			ev.Probe.Subsystem, ev.Probe.Operation, ev.Probe.Stage, ev.Probe.Outcome)
+		if ev.Probe.Reason != "" {
+			t.Logf("      cause: %s", ev.Probe.Reason)
 		}
 	}
 

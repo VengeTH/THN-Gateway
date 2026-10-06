@@ -1,6 +1,7 @@
 package network
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/guard"
@@ -140,6 +141,48 @@ func (o ProbeOutcome) OK() bool {
 	return o == ProbeEvidence || o == ProbeNoEvidence
 }
 
+// BlocksClaim reports whether this outcome means the probed fact was NOT
+// established.
+//
+// # The three that block, and why
+//
+//	execution_failed     the tool ran and did not succeed
+//	parse_failed         the tool ran and said something unreadable
+//	unexpected_output    it parsed into the wrong shape
+//
+// All three are the same statement: the probe was attempted and produced
+// nothing usable. A capability resting on one of them is undetermined.
+//
+// # The two that do not, and why
+//
+//	tool_unavailable     a CONFIRMED ABSENCE IS EVIDENCE
+//
+// A tool that is definitively not installed has been established as absent.
+// That is a finding about the host, and the capability depending on it is
+// genuinely unavailable — not undetermined. Scoring this as "unknown" would
+// make a minimal host look like an unexamined one, and would report the same
+// thing for "nft is absent" and "we could not find out about nft".
+//
+// This distinction is the reason `nftConfidence` and `tcConfidence` return
+// OBSERVED for an absent tool, and it is the single most important thing to
+// get right when reading a capability table.
+//
+//	not_checked          nothing was consulted, which says nothing at all
+//
+// A capability may rest on a source that was never probed and be perfectly
+// well determined by another one. `ip -j -d link show` produces the interface
+// list; `vlan` is then derived from it by reasoning, not from a probe. Blocking
+// on an unrun probe would indict every capability whose dedicated probe does
+// not exist, which is most of them.
+func (o ProbeOutcome) BlocksClaim() bool {
+	switch o {
+	case ProbeExecutionFailed, ProbeParseFailed, ProbeUnexpectedOutput:
+		return true
+	default:
+		return false
+	}
+}
+
 // Describe renders the outcome as the phrase an operator reads.
 func (o ProbeOutcome) Describe() string {
 	switch o {
@@ -266,17 +309,26 @@ func Succeeded(p Probe, detail string, count int) Probe {
 
 // classifyExecError maps an execution error onto an outcome.
 //
+// The output is consulted FIRST and structurally, because it is the only
+// sound discriminator. guard.Exec returns a non-nil Output whenever a process
+// was created and run, and its error string embeds the command's own stderr —
+// so a message like "Cannot find device \"eth0\"" arriving from a tool that
+// demonstrably ran says nothing about whether the binary is present.
+//
 // The tool-present question comes first because it is the one that decides
-// which of two opposite fixes applies. An error mentioning "not found" from a
-// shell is not the same thing as a command that ran and exited non-zero, and
-// treating them alike produces the "install a package you already have"
-// outcome that is the worst thing a diagnostic tool can say.
-func classifyExecError(err error) (ProbeOutcome, string) {
+// which of two opposite fixes applies. Getting it wrong in the "absent"
+// direction turns a routine stderr message into "nft is not installed", and a
+// confirmed absence is scored as a positive finding — so THN would report a
+// working firewall as unavailable, and confidently.
+func classifyExecError(out *guard.Output, err error) (ProbeOutcome, string) {
 	if err == nil {
 		return ProbeEvidence, ""
 	}
-	if isMissingTool(err) {
+	if toolMissing(out, err) {
 		return ProbeToolUnavailable, "the tool is not installed or not on PATH"
+	}
+	if out != nil && out.ExitCode != 0 {
+		return ProbeExecutionFailed, fmt.Sprintf("the tool ran and exited %d", out.ExitCode)
 	}
 	return ProbeExecutionFailed, "the tool ran but did not succeed"
 }
@@ -297,7 +349,7 @@ func ExecProbe(subsystem, operation, tool string, args []string, out *guard.Outp
 		p.ExitStatus = out.ExitCode
 	}
 
-	outcome, detail := classifyExecError(err)
+	outcome, detail := classifyExecError(out, err)
 	if err != nil {
 		return failed(p, StageExecute, outcome, detail, err)
 	}

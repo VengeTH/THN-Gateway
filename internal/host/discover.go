@@ -147,6 +147,43 @@ func probeRecords(snap *network.Snapshot, d *Device) []network.Probe {
 	return out
 }
 
+// NotCheckedProbe returns the record for a probe nothing was run for.
+//
+// Wrapped here rather than using network.NotChecked directly at every call
+// site, so that "nothing was asked" always carries a stage and an outcome. A
+// bare zero Probe would render as empty fields, which is indistinguishable
+// from a probe that was never filled in.
+func NotCheckedProbe(subsystem, operation string) network.Probe {
+	return network.NotChecked(subsystem, operation)
+}
+
+// findForwardingProbe locates the forwarding record among a device's probes.
+func findForwardingProbe(probes []network.Probe) (network.Probe, bool) {
+	for _, p := range probes {
+		if p.Subsystem == "forwarding" {
+			return p, true
+		}
+	}
+	return network.Probe{}, false
+}
+
+// firstProbeFor returns the first probe recorded for any of the named
+// subsystems.
+//
+// Used where a capability rests on a source with many records — every radio on
+// the host produces one — and any single one of them is representative of
+// whether the source was consulted at all.
+func firstProbeFor(probes []network.Probe, subsystems ...string) network.Probe {
+	for _, want := range subsystems {
+		for _, p := range probes {
+			if p.Subsystem == want && p.Subsystem != "" {
+				return p
+			}
+		}
+	}
+	return NotCheckedProbe("observation", "unrecorded")
+}
+
 // forwardingProbe records how the IPv4 forwarding setting was determined.
 func forwardingProbe(snap *network.Snapshot) network.Probe {
 	p := network.Probe{Subsystem: "forwarding", Operation: "sysctl-ipv4-forward"}
