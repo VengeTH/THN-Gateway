@@ -358,10 +358,16 @@ func ComputeObservedDigest(obs diff.Observed) string {
 func ComputeDesiredDigest(des desired.State) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "gen=%d;name=%s;schema=%d;", des.Generation, des.Name, des.SchemaVersion)
-	fmt.Fprintf(h, "wan=%t:%s:%s:%d:%t;", des.WAN.Present, des.WAN.Name, des.WAN.Role, des.WAN.MTU, des.WAN.Up)
+	// The intent and the stable identities are part of the desired state, so
+	// they are part of its digest. Leaving them out would let two documents
+	// that differ only in whether a gateway was requested — or only in which
+	// link the LAN selector referred to — produce the same desired digest
+	// and therefore the same plan ID.
+	fmt.Fprintf(h, "intent=%t:%s:%s;", des.Intent.Enabled, des.Intent.WANSelector, des.Intent.LANSelector)
+	fmt.Fprintf(h, "wan=%t:%s:%s:%s:%d:%t;", des.WAN.Present, des.WAN.Name, des.WAN.StableID, des.WAN.Role, des.WAN.MTU, des.WAN.Up)
 	sortAddrs := append([]string(nil), des.LAN.Addresses...)
 	sort.Strings(sortAddrs)
-	fmt.Fprintf(h, "lan=%t:%s:%s:%d:%t:%s;", des.LAN.Present, des.LAN.Name, des.LAN.Role, des.LAN.MTU, des.LAN.Up, strings.Join(sortAddrs, ","))
+	fmt.Fprintf(h, "lan=%t:%s:%s:%s:%d:%t:%s;", des.LAN.Present, des.LAN.Name, des.LAN.StableID, des.LAN.Role, des.LAN.MTU, des.LAN.Up, strings.Join(sortAddrs, ","))
 	fmt.Fprintf(h, "addr=%t:%s:%t:%t;", des.Addressing.UpstreamPresent, des.Addressing.DefaultGateway, des.Addressing.IPv4Forwarding, des.Addressing.IPv6Forwarding)
 	sortNAT := append([]string(nil), des.NAT.Interfaces...)
 	sort.Strings(sortNAT)

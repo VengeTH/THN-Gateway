@@ -32,6 +32,7 @@ import (
 	"github.com/venth/thn-gateway/internal/deployment"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/planner"
 	"github.com/venth/thn-gateway/internal/state"
@@ -125,7 +126,14 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	// would make this expression `false && ...` for every subsystem, and the
 	// gate would report an invalid configuration that validates cleanly.
 	in.ConfigValid = true
-	for _, sub := range subsystemValidations(cfg) {
+	//
+	// The gateway report is built here with no host observation, because
+	// readinessInput is a static evaluation. That is the correct report for
+	// a document check: it answers what the document says and reports which
+	// selectors have not been verified against anything, which is the honest
+	// answer on a machine that was not consulted.
+	gwReport := gateway.Validate(gateway.FromConfig(cfg, host.Resolution{}), gateway.Observed{})
+	for _, sub := range subsystemValidations(cfg, gwReport, false) {
 		if sub.Valid {
 			continue
 		}

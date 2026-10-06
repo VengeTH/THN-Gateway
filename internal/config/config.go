@@ -50,6 +50,15 @@ type Config struct {
 	// Gateway holds identity and lifecycle settings.
 	Gateway GatewayConfig `yaml:"gateway"`
 
+	// Routing carries packet-forwarding intent.
+	//
+	// It is a block of its own rather than a field on Network because
+	// forwarding is a distinct decision from addressing. Whether to place
+	// 10.77.0.1/24 on the LAN and whether to route between WAN and LAN are
+	// separate statements, they fail for different reasons, and an operator
+	// who wants one without the other must be able to say so.
+	Routing RoutingConfig `yaml:"routing"`
+
 	// Network describes intended interface roles and addressing.
 	Network NetworkConfig `yaml:"network"`
 
@@ -94,7 +103,7 @@ type Config struct {
 	Policies policy.Set `yaml:"policies"`
 }
 
-// GatewayConfig holds gateway identity.
+// GatewayConfig holds gateway identity and the explicit statement of intent.
 type GatewayConfig struct {
 	// Name is the logical gateway name, reported by `thn status`.
 	Name string `yaml:"name"`
@@ -103,6 +112,50 @@ type GatewayConfig struct {
 	// Every accepted configuration increments it, giving plans and
 	// activations a monotonic identifier to refer back to.
 	Generation uint64 `yaml:"generation"`
+
+	// Enabled states that this machine is intended to be a gateway.
+	//
+	// # Why this field exists
+	//
+	// Everything else in this document describes WHAT a gateway would be
+	// made of — which interfaces, which address, whether to masquerade. None
+	// of it says whether the operator wants any of that to happen. THN can
+	// observe that a machine has two NICs, that forwarding is enabled in the
+	// kernel, and that NAT appears possible, and it will report all three as
+	// capability. None of those observations is a request.
+	//
+	// So the request has to be written down. Without this field the only
+	// honest description of the machine was "a host with gateway-shaped
+	// hardware", and THN has no way to tell that apart from "a gateway the
+	// operator asked for" — which is the difference between an observation
+	// and an instruction, and the whole subject of this milestone.
+	//
+	// It defaults to true because a THN document that names a WAN, a LAN and
+	// a LAN address is describing a gateway, and silently disabling it would
+	// break every existing deployment for the sake of a stricter default. What
+	// the field guarantees is the opposite direction: an operator who sets it
+	// false is never asked for gateway roles they did not ask for.
+	Enabled bool `yaml:"enabled"`
+}
+
+// RoutingConfig carries packet-forwarding intent.
+//
+// Forwarding here is DESIRED state. It is a different value from the
+// forwarding the kernel currently has, which is an observation, and the two
+// are never conflated: a host may have forwarding on and want it off, and a
+// host may have it off and want it on. The planner compares them; it does not
+// copy one into the other.
+type RoutingConfig struct {
+	// IPv4Forwarding requests IPv4 packet forwarding between interfaces.
+	//
+	// This is the switch that makes a host a router rather than two hosts
+	// sharing a chassis. It is stated explicitly because "THN observed
+	// forwarding is on, so it must be wanted" is the inference this milestone
+	// exists to refuse.
+	IPv4Forwarding bool `yaml:"ipv4_forwarding"`
+
+	// IPv6Forwarding requests IPv6 packet forwarding.
+	IPv6Forwarding bool `yaml:"ipv6_forwarding"`
 }
 
 // NetworkConfig describes intended interface roles.
@@ -470,6 +523,21 @@ func Defaults() Config {
 		Gateway: GatewayConfig{
 			Name:       "thn-gateway",
 			Generation: 1,
+			// A document that configures a gateway is a gateway. Disabling
+			// this by default would make every installed THN a non-gateway
+			// that silently ignored its own configuration, which is a worse
+			// failure than being explicit and defaulting to what the rest of
+			// the defaults already assume.
+			Enabled: true,
+		},
+		Routing: RoutingConfig{
+			// Forwarding was previously hardcoded true in
+			// desired.FromConfigWithResolution, so every derived desired
+			// state already requested it. It is stated here now so the
+			// intent is the operator's rather than the model's, and the
+			// derived default is unchanged.
+			IPv4Forwarding: true,
+			IPv6Forwarding: true,
 		},
 		Network: NetworkConfig{
 			// WAN is EMPTY on purpose.
@@ -700,6 +768,7 @@ func applyEnv(c *Config) {
 func (c *Config) Normalize() error {
 	c.Logging.Level = strings.ToLower(strings.TrimSpace(c.Logging.Level))
 	c.Logging.Format = strings.ToLower(strings.TrimSpace(c.Logging.Format))
+	c.NAT.Masquerade.Outbound = strings.TrimSpace(c.NAT.Masquerade.Outbound)
 	c.Firewall.Backend = strings.ToLower(strings.TrimSpace(c.Firewall.Backend))
 	c.Firewall.DefaultInboundPolicy = strings.ToLower(strings.TrimSpace(c.Firewall.DefaultInboundPolicy))
 	c.QoS.Algorithm = strings.ToLower(strings.TrimSpace(c.QoS.Algorithm))
@@ -784,13 +853,25 @@ func (c Config) Validate() ValidationResult {
 		v.Add("gateway.generation", SeverityError, "must be greater than zero")
 	}
 
-	// --- Network ---
+	// --- Gateway intent ---
 
-	if c.Network.WAN == "" {
+	// A document that does not want a gateway must not be told to configure
+	// one. This is checked before the network rules below because those rules
+	// exist to make a gateway coherent, and a machine that is not meant to be
+	// one has no reason to satisfy them.
+	//
+	// The roles are still checked for coherence when they ARE present: an
+	// operator who writes both roles as the same interface has made a mistake
+	// whether or not they enabled the gateway, and hiding that behind
+	// gateway.enabled would make the flag a way to suppress a finding.
+	if c.Gateway.Enabled && c.Network.WAN == "" {
 		v.Add("network.wan", SeverityError,
 			"must name the uplink; run `thn discover` to see this host's interfaces, "+
 				"then set network.wan to a stable ID or a kernel interface name")
 	}
+
+	// --- Network ---
+
 	if c.Network.LAN != "" && c.Network.LAN == c.Network.WAN {
 		v.Add("network.lan", SeverityError,
 			"LAN and WAN must be different interfaces")
@@ -808,7 +889,9 @@ func (c Config) Validate() ValidationResult {
 		case prefix.Addr().IsMulticast():
 			v.Add("network.lan_prefix", SeverityError,
 				"LAN prefix must not be a multicast address")
-		case prefix.Addr().Is4() && prefix.Bits() > 29:
+		}
+
+		if prefix.IsValid() && prefix.Addr().Is4() && prefix.Bits() > 29 {
 			// IPv4 only. /64 is an ordinary IPv6 LAN size, so applying this
 			// to both families reports every IPv6 configuration as too narrow.
 			v.Add("network.lan_prefix", SeverityWarning,
@@ -888,6 +971,57 @@ func (c Config) Validate() ValidationResult {
 				v.Add(fmt.Sprintf("nat.interfaces[%d]", i), SeverityError,
 					"cannot masquerade traffic from the WAN interface")
 			}
+		}
+	}
+
+	// The masquerade outbound must name something. It accepts a logical role
+	// or a literal interface, so which of the two was written is not knowable
+	// here without importing the role vocabulary this package deliberately
+	// sits below; that resolution belongs to the gateway intent layer, which
+	// already owns the role system.
+	//
+	// What IS knowable here is that an empty outbound is never valid, and that
+	// masquerading out of the LAN is a routing loop. Both are checked because
+	// they are document-internal contradictions: no host inspection is needed
+	// to see that rewriting source addresses on every interface — including
+	// the LAN — breaks LAN-to-LAN traffic in a way that presents as
+	// intermittent hardware failure.
+	if c.NAT.Enabled && c.NAT.Masquerade.Enabled {
+		switch out := strings.TrimSpace(c.NAT.Masquerade.Outbound); {
+		case out == "":
+			v.Add("nat.masquerade.outbound", SeverityError,
+				"masquerading is enabled with no outbound interface, so source addresses "+
+					"would be rewritten on every interface including the LAN; "+
+					`set nat.masquerade.outbound to the "wan" role, or to the uplink interface`)
+		case c.Network.LAN != "" && out == c.Network.LAN:
+			v.Add("nat.masquerade.outbound", SeverityError,
+				fmt.Sprintf("masqueraded traffic must leave through the WAN, not the LAN (%s); "+
+					`set nat.masquerade.outbound to the "wan" role`, out))
+		}
+	}
+
+	// --- Routing intent ---
+
+	//
+	// These checks are about the relationship between three independent
+	// statements — the gateway is wanted, forwarding is wanted, NAT is wanted
+	// — and about combinations that describe a machine that cannot do what
+	// the document describes.
+	//
+	// They are deliberately not inferences in the other direction. A host
+	// with forwarding already on does not thereby have it wanted; that value
+	// was observed, and only this document says anything about what should
+	// happen.
+	if c.Gateway.Enabled && !c.Routing.IPv4Forwarding && c.Network.WAN != "" && c.Network.LAN != "" {
+		// Forwarding off with both roles assigned is the shape of a bridge,
+		// and it is a legitimate thing to want. What is not legitimate is
+		// asking for it while also asking to masquerade LAN traffic, because
+		// no LAN packet will ever reach the masquerade rule.
+		if c.NAT.Enabled && c.NAT.Masquerade.Enabled {
+			v.Add("routing.ipv4_forwarding", SeverityError,
+				"NAT is enabled but IPv4 forwarding is disabled, so no LAN traffic "+
+					"will ever reach the masquerade rule; "+
+					"set routing.ipv4_forwarding to true, or disable NAT")
 		}
 	}
 

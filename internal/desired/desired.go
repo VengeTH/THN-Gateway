@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 )
 
@@ -34,6 +35,19 @@ func (r Role) String() string { return string(r) }
 type Interface struct {
 	// Name is the kernel interface name. Empty when not yet identified.
 	Name string `json:"name,omitempty"`
+
+	// StableID is the rename-stable identity of this interface.
+	//
+	// It is carried alongside Name rather than instead of it because Name is
+	// what every renderer and every downstream comparison already uses, and
+	// StableID is what makes the desired state survive a NIC moving slots.
+	// A document keyed on Name alone describes one machine; a document keyed
+	// on StableID describes the same link on every machine it appears in.
+	//
+	// Empty when the interface could not be resolved, or when the host
+	// reported no hardware address to derive one from.
+	StableID string `json:"stable_id,omitempty"`
+
 	// Role is what the interface is for.
 	Role Role `json:"role"`
 	// Addresses are the addresses that should be present, in CIDR form.
@@ -113,6 +127,30 @@ type DNS struct {
 	Present bool `json:"present"`
 }
 
+// GatewayIntent is the statement of intent the desired state was built from.
+//
+// It is carried inside State rather than alongside it so that a desired state
+// is self-describing: anything holding a State can say what was actually
+// asked for, rather than having to be handed the configuration separately and
+// risk answering about a different document than the one it was built from.
+type GatewayIntent struct {
+	// Enabled reports whether a gateway was requested at all.
+	//
+	// This is the difference between "this host could be a gateway" and "this
+	// host should be one". Nothing infers it from hardware: it is read from
+	// the document or it is not there.
+	Enabled bool `json:"enabled"`
+
+	// WANSelector and LANSelector are what the operator wrote, verbatim.
+	//
+	// They are kept in the desired state beside the resolved names because a
+	// plan that cannot say "the document asked for hw:…, and this host calls
+	// that enp0s31f6" cannot explain itself to the operator who has to decide
+	// whether to apply it.
+	WANSelector string `json:"wan_selector,omitempty"`
+	LANSelector string `json:"lan_selector,omitempty"`
+}
+
 // State is the complete desired state of the gateway.
 type State struct {
 	// Name is the logical gateway name.
@@ -121,6 +159,9 @@ type State struct {
 	Generation uint64 `json:"generation"`
 	// SchemaVersion is the configuration schema version.
 	SchemaVersion int `json:"schema_version"`
+
+	// Intent is the gateway intent this state was derived from.
+	Intent GatewayIntent `json:"intent"`
 
 	// WAN is the desired uplink interface.
 	WAN Interface `json:"wan"`
@@ -150,10 +191,50 @@ func FromConfig(cfg config.Config) State {
 // FromConfigWithResolution resolves configuration intent into desired state
 // using resolved role assignments from the host discovery layer.
 func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
+	// Gateway intent is resolved once, here, and everything below reads it.
+	//
+	// It is built before any field is assigned because two of the things it
+	// decides — whether the roles are required at all, and what forwarding
+	// is wanted — change what the rest of the state should be. Deriving them
+	// from the raw configuration instead would mean reading the document a
+	// second time with a second set of rules, and the two answers would
+	// eventually disagree.
+	in := gateway.FromConfig(cfg, res)
+
 	s := State{
 		Name:          cfg.Gateway.Name,
 		Generation:    cfg.Gateway.Generation,
 		SchemaVersion: cfg.SchemaVersion,
+		Intent: GatewayIntent{
+			Enabled:     in.Enabled,
+			WANSelector: in.Roles[host.RoleWAN].Selector,
+			LANSelector: in.Roles[host.RoleLAN].Selector,
+		},
+	}
+
+	// A gateway that was not requested has no roles to fill. The roles are
+	// left absent rather than resolved, because reporting "the WAN is
+	// enp0s31f6" for a document that asked for no gateway would be exactly
+	// the inference this layer exists to avoid.
+	if !in.Enabled {
+		s.WAN = Interface{
+			Role:      RoleWAN,
+			MTU:       cfg.Network.MTU,
+			Addresses: []string{},
+			Reason:    "gateway.enabled is false; no gateway was requested",
+		}
+		s.LAN = Interface{
+			Role:      RoleLAN,
+			MTU:       cfg.Network.MTU,
+			Addresses: []string{},
+			Reason:    "gateway.enabled is false; no gateway was requested",
+		}
+		s.Addressing = Addressing{}
+		s.NAT = NAT{Enabled: false, Interfaces: []string{}, Resolved: true}
+		s.Firewall = Firewall{Backend: cfg.Firewall.Backend}
+		s.QoS = QoS{}
+		s.DNS = DNS{Servers: append([]string(nil), cfg.Network.DNS...), Present: false}
+		return s
 	}
 
 	// --- Interfaces ---
@@ -161,6 +242,7 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 	if iface, ok := res.Assigned[host.RoleWAN]; ok {
 		s.WAN = Interface{
 			Name:      iface.SystemName,
+			StableID:  iface.ID,
 			Role:      RoleWAN,
 			MTU:       cfg.Network.MTU,
 			Up:        true,
@@ -196,6 +278,7 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 	if iface, ok := res.Assigned[host.RoleLAN]; ok {
 		s.LAN = Interface{
 			Name:      iface.SystemName,
+			StableID:  iface.ID,
 			Role:      RoleLAN,
 			MTU:       cfg.Network.MTU,
 			Up:        true,
@@ -241,11 +324,19 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 
 	// --- Addressing ---
 
+	//
+	// Forwarding is taken from the intent, not hardcoded.
+	//
+	// It was previously a literal `true`, which meant every desired state
+	// ever produced asked for IPv4 forwarding regardless of what the
+	// document said — and, more importantly, meant there was nowhere for an
+	// operator to say they did not want it. A bridge and a router are
+	// different machines described by the same document before this change.
 	s.Addressing = Addressing{
 		DefaultGateway:  cfg.Network.UpstreamGateway,
 		UpstreamPresent: cfg.Network.UpstreamGateway != "",
-		IPv4Forwarding:  true,
-		IPv6Forwarding:  true,
+		IPv4Forwarding:  in.Routing.IPv4Forwarding,
+		IPv6Forwarding:  in.Routing.IPv6Forwarding,
 	}
 
 	// --- NAT ---
@@ -323,6 +414,13 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 func (s State) Pending() map[string]string {
 	out := map[string]string{}
 
+	// A document that did not ask for a gateway has nothing outstanding.
+	// Reporting its roles as pending would be the inverse error: treating a
+	// deliberate decision as an unfinished one.
+	if !s.Intent.Enabled {
+		return out
+	}
+
 	if !s.WAN.Present {
 		out["wan"] = s.WAN.Reason
 	}
@@ -363,6 +461,9 @@ func (s State) Summary() string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "gateway:  %s (generation %d)\n", s.Name, s.Generation)
+	if !s.Intent.Enabled {
+		fmt.Fprintf(&b, "          not requested (gateway.enabled is false)\n")
+	}
 	fmt.Fprintf(&b, "WAN:      %s\n", describeInterface(s.WAN))
 	fmt.Fprintf(&b, "LAN:      %s\n", describeInterface(s.LAN))
 	fmt.Fprintf(&b, "forward:  ipv4=%t ipv6=%t\n", s.Addressing.IPv4Forwarding, s.Addressing.IPv6Forwarding)

@@ -20,6 +20,29 @@ gateway:
   # activation records are all keyed on it, so it must move forward, never back.
   generation: 1
 
+  # "This machine is meant to be a gateway." Said out loud, separately from
+  # everything below it.
+  #
+  # THN will happily report that this host has two Ethernet ports, that IPv4
+  # forwarding is enabled in the kernel, and that masquerading appears
+  # possible. All three are true and none of them is a request. This key is
+  # the request, and nothing in THN sets it from an observation — hardware
+  # that looks like a gateway is evidence, never intent.
+  #
+  # Set it to false on a machine you want observed and planned around but not
+  # turned into a gateway. `thn validate` then stops demanding roles you did
+  # not ask for.
+  enabled: true
+
+routing:
+  # Forwarding is DESIRED state, not an observation.
+  #
+  # `thn status` reports what net.ipv4.ip_forward currently says. This says
+  # what it should say. `thn plan` compares the two and shows the difference;
+  # it does not assume the host is already correct because it happens to be.
+  ipv4_forwarding: true
+  ipv6_forwarding: true
+
 network:
   # The uplink — the connection carrying the internet.
   #

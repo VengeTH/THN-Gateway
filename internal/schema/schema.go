@@ -68,6 +68,10 @@ var fields = []Field{
 
 	{Key: "gateway.name", Type: TypeString, Description: "Logical gateway name", Default: "thn-gateway", Required: true},
 	{Key: "gateway.generation", Type: TypeInt, Description: "Configuration generation counter", Default: "1", Required: true},
+	{Key: "gateway.enabled", Type: TypeBool, Description: "This machine is intended to act as a gateway. Hardware that looks like a gateway is evidence, not intent; THN never sets this from an observation", Default: "true", Required: true},
+
+	{Key: "routing.ipv4_forwarding", Type: TypeBool, Description: "Route IPv4 between the WAN and LAN. This is desired state, distinct from the forwarding the kernel currently has", Default: "true", Mutating: true},
+	{Key: "routing.ipv6_forwarding", Type: TypeBool, Description: "Route IPv6 between the WAN and LAN", Default: "true", Mutating: true},
 
 	{Key: "network.wan", Type: TypeInterface, Description: "Uplink: a stable interface ID or a kernel interface name (see `thn discover`)", Required: true, Mutating: true},
 	{Key: "network.lan", Type: TypeInterface, Description: "Downstream: a stable interface ID or a kernel interface name (see `thn discover`)", Mutating: true},

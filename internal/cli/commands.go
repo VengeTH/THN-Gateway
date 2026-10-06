@@ -16,6 +16,7 @@ import (
 	"github.com/venth/thn-gateway/internal/dns"
 	"github.com/venth/thn-gateway/internal/firewall"
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/network"
@@ -524,11 +525,30 @@ func runValidate(env *Env, args []string) ExitCode {
 		dev = d
 	}
 
+	// The operator's role assignments are resolved once here, and the
+	// result is shared by the diff, the gateway intent and the plan.
+	//
+	// Resolve is pure, so calling it twice would produce the same answer —
+	// but it reads the assignment store, and a second read could in
+	// principle see a different store. Three consumers of one answer is
+	// cheaper to reason about than three answers that are currently equal.
+	//
+	// Without a live observation the resolution is empty, which the gateway
+	// validator reports as unresolved rather than skipping: a document
+	// reviewed in CI must still be told which selectors have not been
+	// checked against anything.
+	res := host.Resolution{}
+	if dev != nil {
+		res = host.Resolve(dev, roleAssignments(cfg))
+	}
+
 	var d diff.Result
 	if obs != nil {
-		res := host.Resolve(dev, roleAssignments(cfg))
 		d = diff.Compare(*obs, desiredFor(desired.FromConfigWithResolution(cfg, res)))
 	}
+
+	intent := gateway.FromConfig(cfg, res)
+	gwReport := gateway.Validate(intent, gateway.Observed{Device: dev, Resolution: &res})
 
 	result := validation.Combined(cfg, obs, d)
 
@@ -568,7 +588,7 @@ func runValidate(env *Env, args []string) ExitCode {
 	// QoS is absent deliberately: qos.Validate needs a host Availability, and
 	// inventing one here would turn every enabled shaping config into an
 	// error. See `thn qos validate`.
-	for _, sub := range subsystemValidations(cfg) {
+	for _, sub := range subsystemValidations(cfg, gwReport, *live) {
 		result = result.Merge(sub)
 	}
 
@@ -579,12 +599,18 @@ func runValidate(env *Env, args []string) ExitCode {
 			"valid":    result.Valid,
 			"layers":   result.Layers,
 			"findings": result.Findings,
+			// Machine-readable on its own terms: the report is a structure,
+			// not prose the reader has to parse back out of a message. A
+			// consumer distinguishing valid / blocked / pending reads
+			// "verdict", not the wording of "summary".
+			"gateway": gwReport,
 		}); err != nil {
 			env.errorf("thn validate: %v\n", err)
 			return ExitProblems
 		}
 	} else {
 		printValidation(env, path, result)
+		printGatewayIntent(env, gwReport)
 	}
 
 	if result.Valid {
@@ -604,8 +630,23 @@ func runValidate(env *Env, args []string) ExitCode {
 // return: `thn validate` must report everything wrong with a document in one
 // pass, and stopping at the first unparseable address would hide the four that
 // follow it.
-func subsystemValidations(cfg config.Config) []validation.Result {
+//
+// Gateway intent is folded in for the same reason, and is passed the same
+// resolution the planner will use rather than a second one: two resolutions
+// would be two answers to "does this selector match an interface", and the
+// operator would be shown whichever one disagreed with the plan.
+// gwReport is the gateway intent check, computed by the caller and passed in
+// rather than recomputed here. It is the same report `thn validate` renders
+// and the same one `thn plan` would build from: deriving it twice would mean
+// two answers to one question, and the one printed beside the other would be
+// whichever disagreed.
+func subsystemValidations(cfg config.Config, gwReport gateway.Report, live bool) []validation.Result {
 	var out []validation.Result
+
+	// Gateway intent. This is the milestone's own layer: whether a gateway
+	// was requested at all, and whether the requested one can be built from
+	// what was asked for.
+	out = append(out, validation.FromGateway(gwReport, live))
 
 	// DHCP.
 	if policy, err := dhcpPolicyFromConfig(cfg); err != nil {
@@ -669,6 +710,39 @@ func printValidation(env *Env, path string, r validation.Result) {
 	}
 }
 
+// printGatewayIntent renders the gateway intent block.
+//
+// It is printed by `thn validate` and `thn plan` rather than by a command of
+// its own. The milestone asked for the intent to be visible where the
+// configuration is checked and where the plan is built, and a separate verb
+// would put it somewhere an operator validating a document would not look.
+//
+// The block separates what was ASKED FOR from what was OBSERVED on the same
+// lines, because collapsing the two is the specific mistake this layer exists
+// to prevent. A reader must be able to see which value came from the document
+// and which came from the machine.
+func printGatewayIntent(env *Env, r gateway.Report) {
+	env.printf("\nGateway intent: %s\n", r.Verdict)
+	env.printf("  %s\n", r.Summary)
+	env.printf("%s", r.Intent.Summary())
+
+	if len(r.Findings) == 0 {
+		return
+	}
+
+	env.printf("\n  Findings:\n")
+	for _, f := range r.Findings {
+		env.printf("    %-8s %-24s %s\n", f.Severity, f.Code, f.Message)
+		if f.Hint != "" {
+			env.printf("    %-8s %-24s hint: %s\n", "", "", f.Hint)
+		}
+		if len(f.Candidates) > 0 {
+			env.printf("    %-8s %-24s candidates: %s\n", "", "",
+				strings.Join(f.Candidates, ", "))
+		}
+	}
+}
+
 // runPlan implements `thn plan`.
 func runPlan(env *Env, args []string) ExitCode {
 	fs := newFlagSet()
@@ -716,16 +790,26 @@ func runPlan(env *Env, args []string) ExitCode {
 		Device:      device,
 	})
 
+	// The same intent report `thn validate` prints, from the same
+	// resolution. A plan that showed a different verdict on the gateway
+	// configuration from the one `thn validate` gave would make the two
+	// commands disagree about the same document on the same machine.
+	intent := gateway.FromConfig(cfg, res)
+	gwReport := gateway.Validate(intent, gateway.Observed{Device: device, Resolution: &res})
+
 	if env.IsJSON {
 		if err := env.printJSON(map[string]any{
 			"config":     path,
 			"plan":       p,
 			"validation": validation.Combined(cfg, &obs, d),
+			"gateway":    gwReport,
 		}); err != nil {
 			env.errorf("thn plan: %v\n", err)
 			return ExitProblems
 		}
 	} else {
+		printGatewayIntent(env, gwReport)
+		env.printf("\n")
 		printPlan(env, cfg, p, d, obs, *explain)
 	}
 

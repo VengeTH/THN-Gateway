@@ -431,6 +431,153 @@ The key is `candidates`, never `roles` — a consumer reading a key called
 entirely when the host reported no speed, and `speed_known` says so, so a zero
 is never mistaken for a measurement.
 
+## Gateway intent (`thn validate`, `thn plan`)
+
+THN can observe that a machine has two Ethernet ports, that IPv4 forwarding is
+enabled in the kernel, and that masquerading appears possible. All three are
+true. None of them is a request.
+
+> **THN may observe that hardware is capable of acting as a gateway, but it
+> never assumes the operator wants it to become one.**
+
+So the request is written down, separately from everything it implies:
+
+```yaml
+gateway:
+  enabled: true          # "this machine is meant to be a gateway"
+
+routing:
+  ipv4_forwarding: true  # desired state — not what the kernel currently says
+  ipv6_forwarding: true
+
+network:
+  wan: hw:9025388006289ffc   # stable identity, not a kernel name
+  lan: hw:f0435941acbdd796
+  lan_prefix: 10.77.0.1/24
+
+nat:
+  masquerade:
+    outbound: wan            # a role, resolved at plan time
+```
+
+### Where it sits
+
+```
+observed hardware ──▶ hardware suitability ──▶ role resolution ──▶
+  gateway intent ──▶ desired state ──▶ plan
+```
+
+The arrow from role resolution to desired state is the new one. Everything
+before it was built by M7.0 and M7.1; everything after it already existed. This
+layer owns one question: *did the operator ask for a gateway, and can this one
+be built from what was asked for?*
+
+### What `thn validate` reports
+
+Against `configs/gateway.yaml`:
+
+```
+Gateway intent: PENDING
+  the gateway is incomplete: 2 warning(s), nothing blocking
+gateway:  requested
+WAN:     uplink0 (unresolved)
+LAN:     downlink0 (unresolved)
+LAN addr: 10.77.0.1/24
+forward:  ipv4=true ipv6=true (desired)
+NAT:      masquerade via wan (unresolved)
+
+  Findings:
+    warning  role-unresolved   the wan selector "uplink0" has not been resolved
+                               against a host; run `thn validate --live`
+```
+
+`uplink0` and `downlink0` are the placeholders that ship in
+`configs/gateway.yaml`; they match no real interface, which is why the verdict
+is PENDING rather than VALID. Replace them with the stable identities
+`thn discover` prints.
+
+The verdict is one of `VALID`, `PENDING` or `BLOCKED`, and the difference
+between the last two is worth keeping:
+
+| Verdict | Means |
+|---|---|
+| `VALID` | the requested gateway can be built from this configuration |
+| `PENDING` | coherent but incomplete — usually hardware not attached yet |
+| `BLOCKED` | it cannot be built as written; more configuration will not fix it |
+
+An unresolved selector is **pending**, not blocked. The interface may simply be
+unplugged, and the operator may have written the identity correctly. A
+not-assignable interface is blocked: loopback will never be an uplink.
+
+A document that asks for no gateway is **valid**, and is told so:
+
+```yaml
+gateway:
+  enabled: false
+```
+
+It is then never asked for the roles it declined to configure.
+
+### Findings are structured, not prose
+
+Every finding carries a stable code, a severity, and — where one applies — the
+role, the selector as written, the interface it resolved to, and that
+interface's stable identity:
+
+| Code | Meaning |
+|---|---|
+| `gateway-disabled` | the document does not ask for a gateway |
+| `role-missing` | a role the gateway needs was never named |
+| `role-unresolved` | a selector matched no observed interface |
+| `role-not-assignable` | the interface can never hold a role (loopback) |
+| `role-conflict` | two roles resolve to the same interface |
+| `role-unsuitable` | out of profile for this gateway shape |
+| `lan-address-invalid` / `lan-address-missing` | the downstream address |
+| `nat-outbound-invalid` / `nat-outbound-unresolved` | where masquerade leaves by |
+| `forwarding-incoherent` | forwarding contradicts the rest of the intent |
+
+`--json` exposes the same structure under a `gateway` key on both `thn validate`
+and `thn plan`, so a consumer reads `verdict` and `findings[].code` rather than
+parsing English.
+
+### Suitable is not invalid
+
+A container bridge cannot be the LAN of a two-port wired gateway, and THN says
+so — scoped to that profile, with the evidence attached:
+
+```
+warning  role-unsuitable   docker0 is unsuitable and is not a candidate for the
+                          lan role in this gateway profile
+```
+
+It does **not** declare the assignment impossible. Bridges, VLANs, namespaces
+and virtual machines are all built from such interfaces, and the validation is
+based on capability and intent rather than on interface names.
+
+### Observed is never overwritten
+
+Building desired state does not write to the host it was derived from. The
+observed device is unchanged, and that is asserted by test. Forwarding is the
+clearest case: `net.ipv4.ip_forward` is what `thn status` reports, and
+`routing.ipv4_forwarding` is what the document asks for. `thn plan` compares
+them:
+
+```
+observed: forwarding=0
+desired:  forwarding=1
+action:   enable IPv4 forwarding
+```
+
+### M7.2 does not activate anything
+
+This milestone makes the intent explicit and checkable. It changes no
+networking. `activation.CanApply()` is still `false`,
+`ProductionDriver.CanApply()` is still `false`, `apply` is still absent from
+`ImplementedStages()`, and `thn activate` still refuses. `internal/gateway`
+imports only the document model, the host model and the standard library — a
+test asserts that list, so a future change that widens it fails rather than
+deploys.
+
 ## Diagnosing an unknown
 
 An `unknown` with no reason is the least useful thing a diagnostic tool can
@@ -610,13 +757,19 @@ breaks a visible test.
 ## How planning works
 
 ```
-config ──▶ desired ──┐
-                    ├──▶ diff ──▶ planner ──▶ plan + simulation
-observed host ───────┘
+config ──▶ gateway intent ──▶ desired ──┐
+                                        ├──▶ diff ──▶ planner ──▶ plan + simulation
+observed host ───────────────────────────┘
 ```
 
-**Desired state** is configuration resolved: no defaults, no optional fields, and
+**Gateway intent** is the document read as a statement of intent: whether a
+gateway was asked for at all, which roles were named, and what forwarding and
+NAT were requested. It never infers intent from capability.
+
+**Desired state** is that intent resolved: no defaults, no optional fields, and
 `unknown` modelled explicitly so "not attached" stays distinct from "not wanted".
+Interfaces carry their stable identity alongside the kernel name, so a document
+keyed on hardware describes the same link on every machine it appears in.
 
 **The diff** classifies every difference, because the three kinds need different
 responses:
@@ -652,12 +805,21 @@ state during remote development:
 
 ```
 $ thn plan configs/gateway.yaml
-plan b8f3eb58b429e03f generation 1: 0 step(s), 4 pending, 0 blocked [NOT READY]
+Gateway intent: PENDING
+  the gateway is incomplete: 3 warning(s), nothing blocking
+gateway:  requested
+WAN:     uplink0 (unresolved)
+LAN:     downlink0 (unresolved)
+LAN addr: 10.77.0.1/24
+forward:  ipv4=true ipv6=true (desired)
+NAT:      masquerade via wan (unresolved)
+
+plan 883ea8bf2b5a4dcd generation 1: 0 step(s), 5 pending, 0 blocked [NOT READY]
 Activation: BLOCKED (no apply path in this build)
 
-  KIND      RISK      FIELD                        REASON
-  pending   none      wan.interface                interface not attached to this host
-  pending   none      firewall.enabled             host inspection unavailable on this platform
+  KIND      RISK      FIELD            REASON
+  pending   none      wan.interface    host inspection is unavailable
+  pending   none      lan.interface    host inspection is unavailable
 ```
 
 Everything is reported as *pending* rather than drift, because nothing has been
@@ -672,8 +834,10 @@ internal/
   guard/              exec allowlist + repo-wide AST enforcement
   config/             layered configuration loading
   schema/             versioned schema, field catalogue, typo suggestions
-  desired/            normalised target state
-  validation/         static (CI) and live policy engine
+    gateway/            gateway intent: explicit statement of what the operator
+                          wants, and whether this host can provide it (pure)
+    desired/            normalised target state
+    validation/         static (CI) and live policy engine
   diff/               observed vs desired, risk classification
   planner/            phased plan generation and simulation
   activation/         state machine; Disabled applier

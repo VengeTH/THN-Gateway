@@ -33,9 +33,12 @@
 package validation
 
 import (
+	"strings"
+
 	"github.com/venth/thn-gateway/internal/dhcp"
 	"github.com/venth/thn-gateway/internal/dns"
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/netconfig"
 )
 
@@ -55,7 +58,91 @@ const (
 	DNSFieldPrefix      = "dns."
 	FirewallFieldPrefix = "firewall."
 	NetFieldPrefix      = "net."
+	GatewayFieldPrefix  = "gateway."
 )
+
+// FromGateway projects a gateway intent report into this package's model.
+//
+// The layer is chosen by what the finding was decided against, not by which
+// package produced it. A role that resolved on this host was decided against
+// the host; a malformed LAN address was decided against the document. Filing
+// both as static would make `thn validate --live` report a resolved role as
+// though no host had been consulted.
+func FromGateway(r gateway.Report, live bool) Result {
+	layer := LayerStatic
+	if live {
+		layer = LayerLive
+	}
+
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{
+			field:    f.Code,
+			severity: gatewaySeverity(f.Severity),
+			message:  gatewayMessage(f),
+			hint:     f.Hint,
+		})
+	}
+
+	// projectResult hardcodes LayerStatic because every subsystem folded so
+	// far checks the document against itself. This one does not, so its
+	// layer is corrected afterwards rather than by teaching projectResult
+	// about an exception.
+	out := projectResult(GatewayFieldPrefix, in)
+	for i := range out.Findings {
+		out.Findings[i].Layer = layer
+	}
+	out.finalise()
+	return out
+}
+
+// gatewaySeverity maps the gateway vocabulary onto this package's.
+func gatewaySeverity(s gateway.Severity) string {
+	switch s {
+	case gateway.SeverityBlocking:
+		return "error"
+	case gateway.SeverityWarning:
+		return "warning"
+	default:
+		return "info"
+	}
+}
+
+// gatewayMessage renders a gateway finding as one sentence.
+//
+// The role, the selector and the resolved identity are folded into the text
+// rather than dropped, because that is the difference between "the LAN is
+// unresolved" and "the LAN selector hw:2c88 resolves to enx0011, which is a
+// container bridge". Only the message carries them — the structured fields
+// remain on gateway.Finding for JSON consumers — so the two cannot drift.
+func gatewayMessage(f gateway.Finding) string {
+	var b strings.Builder
+	b.WriteString(f.Message)
+
+	var facts []string
+	if f.Role != "" {
+		facts = append(facts, "role "+string(f.Role))
+	}
+	if f.Selector != "" {
+		facts = append(facts, "selector "+f.Selector)
+	}
+	if f.Interface != "" {
+		facts = append(facts, "interface "+f.Interface)
+	}
+	if f.StableID != "" {
+		facts = append(facts, "stable id "+f.StableID)
+	}
+	if len(facts) > 0 {
+		b.WriteString(" (")
+		b.WriteString(strings.Join(facts, ", "))
+		b.WriteString(")")
+	}
+	if len(f.Candidates) > 0 {
+		b.WriteString(" candidates: " + strings.Join(f.Candidates, ", "))
+	}
+
+	return b.String()
+}
 
 // subsystemFinding is the shape every subsystem validator's finding shares.
 //
