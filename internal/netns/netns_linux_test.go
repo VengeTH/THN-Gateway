@@ -196,8 +196,6 @@ func TestKernelReportsTheShapedRate(t *testing.T) {
 
 	args := []string{
 		"bandwidth", fmt.Sprintf("%dkbit", down),
-		"target", fmt.Sprintf("%dms", p.Limits.TargetMS),
-		"interval", fmt.Sprintf("%dms", p.Limits.IntervalMS),
 	}
 
 	if err := ns.ApplyCake(testIface, args); err != nil {
