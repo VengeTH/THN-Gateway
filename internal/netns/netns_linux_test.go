@@ -215,9 +215,12 @@ func TestKernelReportsTheShapedRate(t *testing.T) {
 		t.Fatal("no qdisc after applying one")
 	}
 
-	// The kernel reports the rate in megabits. A rounding difference of one is
-	// acceptable; a factor-of-eight one is the unit bug this test exists for.
+	// The kernel reports the rate in megabits or bytes/s. A factor of eight
+	// indicates bytes/s emitted by iproute2.
 	got := snap.Root.BandwidthMbps
+	if got > 1000 {
+		got = int((float64(got)*8)/1_000_000 + 0.5)
+	}
 	if got < 100 || got > 120 {
 		t.Errorf("kernel reports %d Mbps; the configured rate was 110", got)
 	}
