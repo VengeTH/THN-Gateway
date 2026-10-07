@@ -174,7 +174,7 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	// consulted. That is not a behaviour anyone can observe on a machine with
 	// no assignments, which is why it is worth a comment.
 	_, stored := storedAssignments(cfg)
-	bindings, _, _ := mergeBindings(cfg, stored)
+	bindings, conflicts, _ := mergeBindings(cfg, stored)
 
 	res := host.Resolve(device, bindings)
 	in.WAN = roleGate(device, res, host.RoleWAN, bindingSelector(cfg, stored, host.RoleWAN))
@@ -182,6 +182,83 @@ func readinessInput(cfg config.Config, path string) activation.GateInput {
 	in.Capabilities = capabilityGates(device)
 
 	in.PlanValidated = planIsRunnable(cfg, obs)
+
+	if len(conflicts) > 0 {
+		in.NoRoleConflicts = false
+		in.RoleConflictProblem = fmt.Sprintf("role %s is declared as %s but stored as %s", conflicts[0].Role, conflicts[0].Declared, conflicts[0].Stored)
+	} else if len(res.Problems) > 0 {
+		in.NoRoleConflicts = false
+		in.RoleConflictProblem = res.Problems[0].Message
+	} else if in.WAN.Satisfied && in.LAN.Satisfied && in.WAN.Interface != "" && in.WAN.Interface == in.LAN.Interface {
+		in.NoRoleConflicts = false
+		in.RoleConflictProblem = fmt.Sprintf("LAN and WAN roles are both assigned to %s", in.WAN.Interface)
+	} else {
+		in.NoRoleConflicts = true
+	}
+
+	ready := host.EvaluateReadiness(device, host.ReadinessRequest{RequiredInterfaces: 2})
+	if !ready.Blocked {
+		in.HostReadinessOK = true
+	} else {
+		in.HostReadinessOK = false
+		if len(ready.Findings) > 0 {
+			in.HostReadinessProblem = ready.Findings[0].Message
+		} else {
+			in.HostReadinessProblem = ready.Summary
+		}
+	}
+
+	in.CapabilitiesObserved = true
+	for _, req := range []string{"routing", "firewall"} {
+		found := false
+		for _, cg := range in.Capabilities {
+			if cg.Name == req {
+				found = true
+				if !cg.Satisfied() {
+					in.CapabilitiesObserved = false
+					in.CapabilitiesProblem = fmt.Sprintf("required capability %s is %s (must be observed)", req, cg.Confidence)
+				}
+				break
+			}
+		}
+		if !found {
+			in.CapabilitiesObserved = false
+			in.CapabilitiesProblem = fmt.Sprintf("required capability %s is unknown", req)
+		}
+	}
+
+	if in.PlanValidated {
+		in.DigestsFresh = true
+	} else {
+		in.DigestsFresh = false
+		in.DigestsProblem = "plan is not validated or digests do not match"
+	}
+
+	var touched []string
+	if in.WAN.Interface != "" {
+		touched = append(touched, in.WAN.Interface)
+	}
+	if in.LAN.Interface != "" {
+		touched = append(touched, in.LAN.Interface)
+	}
+	hasTS := false
+	if device != nil {
+		for _, iface := range device.Interfaces {
+			if iface.SystemName == "tailscale0" {
+				hasTS = true
+				break
+			}
+		}
+	}
+	mgrep := activation.EvaluateManagementSafety(activation.ManagementSafetyInput{
+		TailscalePresent:    hasTS,
+		TailscaleInterface:  "tailscale0",
+		HasDefaultRoute:     obs.HasDefaultRoute,
+		PlannedDefaultRoute: cfg.Network.WAN != "" || cfg.MultiWAN.Enabled,
+		TouchedInterfaces:   touched,
+	})
+	in.ManagementSafe = mgrep.Safe
+	in.ManagementProblem = mgrep.Reason
 
 	// recoverable is left unsatisfied with a reason, not silently true.
 	//

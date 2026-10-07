@@ -170,6 +170,7 @@ type GateResult struct {
 // that `thn status` can show an operator exactly how far they are from a
 // deployable gateway. That visibility is the point: the operator should learn
 // on a laptop, over SSH, that the LAN interface is unattached.
+// Evaluate runs the standard 7-gate set for an activation readiness check.
 func Evaluate(in GateInput) GateResult {
 	var gates []Gate
 
@@ -206,6 +207,106 @@ func Evaluate(in GateInput) GateResult {
 		Description: "an interface satisfying the desired LAN role must be identified and attached",
 		Satisfied:   in.LAN.Satisfied,
 		Reason:      reasonUnless(in.LAN.Satisfied, in.LAN.Reason),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "recoverable",
+		Description: "a recovery plan must exist and must not be blocked",
+		Satisfied:   in.RecoveryOK,
+		Reason:      reasonUnless(in.RecoveryOK, in.RecoveryProblem),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "physical-presence",
+		Description: "an operator must confirm physical presence at the device",
+		Satisfied:   in.PresenceConfirmed,
+		Reason: reasonUnless(in.PresenceConfirmed,
+			"nobody has confirmed being at the device; being logged in as root is not sufficient"),
+	})
+
+	res := GateResult{Gates: gates, AllSatisfied: true}
+	for _, g := range gates {
+		if !g.Satisfied {
+			res.AllSatisfied = false
+			res.Blocking = append(res.Blocking, g.Name)
+		}
+	}
+	return res
+}
+
+// EvaluateProduction runs the complete set of M7.6 production activation gates.
+// All gates must pass before a production applier is authorized to mutate host networking.
+func EvaluateProduction(in GateInput) GateResult {
+	var gates []Gate
+
+	gates = append(gates, Gate{
+		Name:        "apply-path-available",
+		Description: "the running build must contain an apply path",
+		Satisfied:   CanApply(),
+		Reason:      "this build implements observe, model, plan, validate and simulate only",
+	})
+
+	gates = append(gates, Gate{
+		Name:        "plan-validated",
+		Description: "a plan must have been generated and validated",
+		Satisfied:   in.PlanValidated,
+		Reason:      reasonUnless(in.PlanValidated, "no validated plan exists; run `thn plan` first"),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "config-valid",
+		Description: "the configuration must validate without errors",
+		Satisfied:   in.ConfigValid,
+		Reason:      reasonUnless(in.ConfigValid, in.ConfigProblem),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "wan-present",
+		Description: "an interface satisfying the desired WAN role must exist on this host",
+		Satisfied:   in.WAN.Satisfied,
+		Reason:      reasonUnless(in.WAN.Satisfied, in.WAN.Reason),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "lan-identified",
+		Description: "an interface satisfying the desired LAN role must be identified and attached",
+		Satisfied:   in.LAN.Satisfied,
+		Reason:      reasonUnless(in.LAN.Satisfied, in.LAN.Reason),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "no-role-conflicts",
+		Description: "LAN and WAN roles must not collide or reference the same physical interface",
+		Satisfied:   in.NoRoleConflicts,
+		Reason:      reasonUnless(in.NoRoleConflicts, fallback(in.RoleConflictProblem, "logical roles are unassigned or conflict with each other")),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "host-readiness",
+		Description: "host readiness criteria and required interfaces must be satisfied",
+		Satisfied:   in.HostReadinessOK,
+		Reason:      reasonUnless(in.HostReadinessOK, fallback(in.HostReadinessProblem, "host hardware or operating environment is not ready")),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "capabilities-observed",
+		Description: "required networking capabilities must be explicitly observed rather than inferred",
+		Satisfied:   in.CapabilitiesObserved,
+		Reason:      reasonUnless(in.CapabilitiesObserved, fallback(in.CapabilitiesProblem, "required capabilities are not explicitly observed")),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "digests-fresh",
+		Description: "plan digests must match live host observation and desired state",
+		Satisfied:   in.DigestsFresh,
+		Reason:      reasonUnless(in.DigestsFresh, fallback(in.DigestsProblem, "plan digests are stale or uncalculated")),
+	})
+
+	gates = append(gates, Gate{
+		Name:        "management-safety",
+		Description: "remote management connectivity (SSH, Tailscale) must be verified safe",
+		Satisfied:   in.ManagementSafe,
+		Reason:      reasonUnless(in.ManagementSafe, fallback(in.ManagementProblem, "remote management path safety cannot be proven")),
 	})
 
 	gates = append(gates, Gate{
@@ -302,6 +403,31 @@ type GateInput struct {
 	// report can show the operator the full picture rather than two booleans.
 	Capabilities []CapabilityGate
 
+	// NoRoleConflicts reports whether logical roles are free of conflicts.
+	NoRoleConflicts bool
+	// RoleConflictProblem explains a role collision or conflict.
+	RoleConflictProblem string
+
+	// HostReadinessOK reports whether the host satisfies readiness criteria.
+	HostReadinessOK bool
+	// HostReadinessProblem explains host readiness failure.
+	HostReadinessProblem string
+
+	// CapabilitiesObserved reports whether required capabilities were explicitly observed.
+	CapabilitiesObserved bool
+	// CapabilitiesProblem explains missing or unobserved capabilities.
+	CapabilitiesProblem string
+
+	// DigestsFresh reports whether plan input digests match live host state.
+	DigestsFresh bool
+	// DigestsProblem explains stale plan or digest divergence.
+	DigestsProblem string
+
+	// ManagementSafe reports whether remote management paths are preserved.
+	ManagementSafe bool
+	// ManagementProblem explains management risk.
+	ManagementProblem string
+
 	// RecoveryOK reports whether recovery is possible.
 	RecoveryOK bool
 	// RecoveryProblem explains an unrecoverable situation.
@@ -348,6 +474,13 @@ func reasonUnless(cond bool, reason string) string {
 		return "condition not satisfied"
 	}
 	return reason
+}
+
+func fallback(val, def string) string {
+	if val != "" {
+		return val
+	}
+	return def
 }
 
 // Machine tracks the gateway's lifecycle state.

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/host"
@@ -476,5 +477,153 @@ func TestOwnershipIsolation(t *testing.T) {
 	// Verify unmanaged table survived rollback
 	if !driverRollback.UnmanagedNFTables["table inet docker"] {
 		t.Error("unmanaged nftables table was modified or flushed during rollback")
+	}
+}
+
+// 8. Failure C2: Rollback verification failure results in DEGRADED
+func TestRollbackVerificationFailureReportsDegraded(t *testing.T) {
+	ctx := context.Background()
+	obs, des, assignments, plan := labFixtures()
+
+	driver := NewSimulatedDriver()
+	// Fail apply at operation 2 to trigger rollback
+	driver.SetFailAtOpIndex(2)
+
+	// Custom driver subclass / mock where post-rollback state does not match baseline
+	tamperedDriver := &tamperedStateDriver{
+		SimulatedDriver: driver,
+	}
+
+	journal := NewMemoryJournalStore()
+	executor := NewExecutor()
+
+	opts := ExecutionOptions{
+		Observed:    obs,
+		Desired:     des,
+		Assignments: assignments,
+		Journal:     journal,
+	}
+
+	res, err := executor.ExecutePlan(ctx, plan, tamperedDriver, opts)
+	if err == nil {
+		t.Fatal("expected error on rollback verification failure")
+	}
+
+	if res.FinalState != StateDegraded {
+		t.Fatalf("expected final state %s, got %s", StateDegraded, res.FinalState)
+	}
+
+	if !errors.Is(err, ErrRollbackFailed) {
+		t.Errorf("expected ErrRollbackFailed, got %v", err)
+	}
+}
+
+type tamperedStateDriver struct {
+	*SimulatedDriver
+}
+
+func (d *tamperedStateDriver) CaptureState(ctx context.Context, scope BackupScope) (*StateSnapshot, error) {
+	snap, err := d.SimulatedDriver.CaptureState(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	// Tamper state if in rollback phase
+	if d.SimulatedDriver.inRollback {
+		snap.Sysctls["net.ipv4.ip_forward"] = "1" // baseline wanted 0!
+	}
+	return snap, nil
+}
+
+// 9. Failure F: Assignment drift rejection
+func TestAssignmentDriftRejection(t *testing.T) {
+	ctx := context.Background()
+	obs, des, _, plan := labFixtures()
+
+	driver := NewSimulatedDriver()
+	executor := NewExecutor()
+
+	driftedAssignments := []host.Assignment{
+		{Role: host.RoleWAN, Selector: "eth0"},
+		{Role: host.RoleLAN, Selector: "eth99"}, // changed after plan generation!
+	}
+
+	opts := ExecutionOptions{
+		Observed:    obs,
+		Desired:     des,
+		Assignments: driftedAssignments,
+	}
+
+	res, err := executor.ExecutePlan(ctx, plan, driver, opts)
+	if err == nil {
+		t.Fatal("expected stale plan error on assignment drift")
+	}
+	if !errors.Is(err, ErrStalePlan) {
+		t.Errorf("expected ErrStalePlan, got %v", err)
+	}
+	if res.FinalState != StateBlocked {
+		t.Errorf("expected StateBlocked, got %s", res.FinalState)
+	}
+}
+
+// 10. Failure G: Missing or inferred capability rejection
+func TestMissingOrInferredCapabilityRejection(t *testing.T) {
+	ctx := context.Background()
+	obs, des, assignments, plan := labFixtures()
+
+	driver := NewSimulatedDriver()
+	executor := NewExecutor()
+
+	// Inferred capability: must NOT satisfy hard activation gate
+	caps := []activation.CapabilityGate{
+		{Name: "ip", Available: true, Confidence: "observed"},
+		{Name: "nft", Available: true, Confidence: "inferred"}, // INFERRED, NOT OBSERVED!
+		{Name: "sysctl", Available: true, Confidence: "observed"},
+	}
+
+	opts := ExecutionOptions{
+		Observed:     obs,
+		Desired:      des,
+		Assignments:  assignments,
+		Capabilities: caps,
+	}
+
+	res, err := executor.ExecutePlan(ctx, plan, driver, opts)
+	if err == nil {
+		t.Fatal("expected capability error on inferred capability")
+	}
+	if !errors.Is(err, ErrCapabilityMissing) {
+		t.Errorf("expected ErrCapabilityMissing, got %v", err)
+	}
+	if res.FinalState != StateBlocked {
+		t.Errorf("expected StateBlocked, got %s", res.FinalState)
+	}
+}
+
+// 11. Failure H: Management safety failure rejection
+func TestManagementSafetyFailureRejection(t *testing.T) {
+	ctx := context.Background()
+	obs, des, assignments, plan := labFixtures()
+
+	driver := NewSimulatedDriver()
+	executor := NewExecutor()
+
+	opts := ExecutionOptions{
+		Observed:          obs,
+		Desired:           des,
+		Assignments:       assignments,
+		ExpectedPlanID:    plan.ID,
+		ManagementSafe:    false,
+		ManagementProblem: "plan mutates Tailscale remote management path",
+	}
+
+	res, err := executor.ExecutePlan(ctx, plan, driver, opts)
+	if err == nil {
+		t.Fatal("expected execution to fail when management path cannot be proven safe")
+	}
+	if !errors.Is(err, ErrCannotApply) {
+		t.Errorf("expected ErrCannotApply, got %v", err)
+	}
+	if res.FinalState != StateBlocked {
+		t.Errorf("expected StateBlocked, got %s", res.FinalState)
 	}
 }

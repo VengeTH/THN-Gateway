@@ -131,3 +131,78 @@ func TestCLIActivationUnknownSubcommand(t *testing.T) {
 		t.Errorf("expected unknown subcommand in stderr, got: %s", errOut.String())
 	}
 }
+
+func TestCLIActivationInspectOutput(t *testing.T) {
+	env, out, _ := newTestEnv()
+	code := runActivation(env, []string{"inspect"})
+	if code != ExitOK {
+		t.Fatalf("thn activation inspect failed with exit %d", code)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Activation Plan Inspection",
+		"WHAT WILL CHANGE",
+		"WHAT WILL NOT CHANGE",
+		"WHICH INTERFACES",
+		"WHICH ROUTES",
+		"WHICH FIREWALL RESOURCES",
+		"WHICH QOS RESOURCES",
+		"WHICH DNS/DHCP RESOURCES",
+		"ROLLBACK AVAILABLE",
+		"MANAGEMENT PATH SAFE",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("thn activation inspect output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+func TestCLIActivationInspectJSON(t *testing.T) {
+	env, out, _ := newTestEnv()
+	env.IsJSON = true
+	code := runActivation(env, []string{"inspect"})
+	if code != ExitOK {
+		t.Fatalf("thn activation inspect --json failed with exit %d", code)
+	}
+
+	var data struct {
+		WhatWillChange      []string `json:"what_will_change"`
+		WhatWillNotChange   []string `json:"what_will_not_change"`
+		ManagedInterfaces   []string `json:"managed_interfaces"`
+		UnmanagedInterfaces []string `json:"unmanaged_interfaces"`
+		ManagedRoutes       []string `json:"managed_routes"`
+		UnmanagedRoutes     []string `json:"unmanaged_routes"`
+		FirewallResources   []string `json:"firewall_resources"`
+		QoSResources        []string `json:"qos_resources"`
+		DNSDHCPResources    []string `json:"dns_dhcp_resources"`
+		RollbackAvailable   bool     `json:"rollback_available"`
+		ManagementPathSafe  bool     `json:"management_path_safe"`
+	}
+
+	if err := json.Unmarshal([]byte(out.String()), &data); err != nil {
+		t.Fatalf("failed decoding JSON from thn activation inspect: %v\noutput: %s", err, out.String())
+	}
+
+	if !data.RollbackAvailable {
+		t.Error("expected rollback_available to be true")
+	}
+	if len(data.FirewallResources) == 0 {
+		t.Error("expected firewall_resources to be populated")
+	}
+}
+
+func TestCLIActivateConfirmRefusesSafely(t *testing.T) {
+	env, _, errOut := newTestEnv("activate", "--confirm")
+	code := Run(env)
+	if code != ExitProblems {
+		t.Fatalf("expected ExitProblems on unapproved host, got %d", code)
+	}
+	errStr := errOut.String()
+	if !strings.Contains(errStr, "Current network remains untouched") {
+		t.Errorf("expected 'Current network remains untouched' in error output:\n%s", errStr)
+	}
+	if !strings.Contains(errStr, "no apply path") {
+		t.Errorf("expected 'no apply path' in error output:\n%s", errStr)
+	}
+}

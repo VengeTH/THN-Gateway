@@ -123,3 +123,143 @@ func TestExecutorRejectsProductionDriverWithBlocked(t *testing.T) {
 		t.Errorf("expected error wrapping ErrCannotApply, got %v", err)
 	}
 }
+
+func TestProductionDriverAuthorizationFlow(t *testing.T) {
+	ctx := context.Background()
+	runner := newRecordingLinuxRunner()
+	driver := NewProductionDriverWithRunner(runner, nil)
+
+	// 1. Initial state: CanApply must be false
+	if driver.CanApply() {
+		t.Fatal("driver.CanApply() is true initially; must be false")
+	}
+
+	// 2. Direct mutation call must fail
+	err := driver.Execute(ctx, OpLinkSetUp{Interface: "eth0"})
+	if !errors.Is(err, ErrProductionActivationDisabled) {
+		t.Fatalf("expected ErrProductionActivationDisabled, got %v", err)
+	}
+
+	// 3. Authorization without confirmation fails
+	err = driver.Authorize(ProductionAuth{
+		Confirmed: false,
+	})
+	if err == nil {
+		t.Fatal("expected Authorize without confirmation to fail")
+	}
+
+	// 4. Authorization with unsatisfied gates fails
+	gateRes := &activation.GateResult{
+		AllSatisfied: false,
+		Blocking:     []string{"wan-present"},
+	}
+	err = driver.Authorize(ProductionAuth{
+		Confirmed:   true,
+		GatesResult: gateRes,
+	})
+	if err == nil {
+		t.Fatal("expected Authorize with unsatisfied gates to fail")
+	}
+
+	// 5. Authorization with management safety risk fails
+	gateResSuccess := &activation.GateResult{
+		AllSatisfied: true,
+	}
+	err = driver.Authorize(ProductionAuth{
+		Confirmed:         true,
+		GatesResult:       gateResSuccess,
+		ManagementSafe:    false,
+		ManagementProblem: "plan drops active SSH connection",
+	})
+	if err == nil {
+		t.Fatal("expected Authorize with management safety risk to fail")
+	}
+
+	// 6. Authorization with missing digests fails
+	err = driver.Authorize(ProductionAuth{
+		Confirmed:      true,
+		GatesResult:    gateResSuccess,
+		ManagementSafe: true,
+		PlanID:         "",
+	})
+	if err == nil {
+		t.Fatal("expected Authorize with missing plan digests to fail")
+	}
+
+	// 7. Full valid authorization succeeds
+	err = driver.Authorize(ProductionAuth{
+		Confirmed:        true,
+		GatesResult:      gateResSuccess,
+		ManagementSafe:   true,
+		PlanID:           "plan-12345",
+		ObservedDigest:   "obs-12345",
+		DesiredDigest:    "des-12345",
+		AssignmentDigest: "assign-12345",
+	})
+	if err != nil {
+		t.Fatalf("Authorize failed with valid inputs: %v", err)
+	}
+	if !driver.CanApply() {
+		t.Fatal("driver.CanApply() should be true after valid authorization")
+	}
+
+	// 8. Execute valid operations
+	err = driver.Execute(ctx, OpLinkSetUp{Interface: "eth0"})
+	if err != nil {
+		t.Fatalf("Execute failed after authorization: %v", err)
+	}
+	if len(runner.recordedCommands) != 1 {
+		t.Fatalf("expected 1 recorded command, got %d", len(runner.recordedCommands))
+	}
+	cmd := runner.recordedCommands[0]
+	if cmd[0] != "ip" || cmd[1] != "link" || cmd[2] != "set" || cmd[3] != "eth0" || cmd[4] != "up" {
+		t.Errorf("unexpected command: %v", cmd)
+	}
+}
+
+func TestProductionDriverCommandSafetyInvariants(t *testing.T) {
+	ctx := context.Background()
+	runner := newRecordingLinuxRunner()
+	driver := NewProductionDriverWithRunner(runner, nil)
+
+	// Authorize driver for test
+	_ = driver.Authorize(ProductionAuth{
+		Confirmed:        true,
+		GatesResult:      &activation.GateResult{AllSatisfied: true},
+		ManagementSafe:   true,
+		PlanID:           "plan-safe",
+		ObservedDigest:   "obs-safe",
+		DesiredDigest:    "des-safe",
+		AssignmentDigest: "assign-safe",
+	})
+
+	// Apply THN nft table
+	err := driver.Execute(ctx, OpNFTApplyTHNTable{
+		InboundPolicy:    "drop",
+		AllowEstablished: true,
+		AllowLoopback:    true,
+		LANInterface:     "eth1",
+		WANInterface:     "eth0",
+		LANSubnet:        "10.77.0.0/24",
+		NATInterfaces:    []string{"eth0"},
+	})
+	if err != nil {
+		t.Fatalf("applying THN table failed: %v", err)
+	}
+
+	for _, cmd := range runner.recordedCommands {
+		flat := cmd[0] + " "
+		for _, arg := range cmd[1:] {
+			flat += arg + " "
+		}
+
+		// Never flush ruleset
+		if flat == "nft flush ruleset " {
+			t.Fatalf("CRITICAL SAFETY VIOLATION: broad ruleset flush executed: %s", flat)
+		}
+		// Never broad route flush
+		if flat == "ip route flush " {
+			t.Fatalf("CRITICAL SAFETY VIOLATION: broad route flush executed: %s", flat)
+		}
+	}
+}

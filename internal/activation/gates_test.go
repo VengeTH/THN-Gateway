@@ -33,11 +33,16 @@ import (
 // and a test input that cannot express that cannot check that it does.
 func satisfiedInput() GateInput {
 	return GateInput{
-		PlanValidated: true,
-		ConfigValid:   true,
-		WAN:           RoleGate{Role: "wan", Satisfied: true, Interface: "uplink0", Reason: "role wan is filled by uplink0"},
-		LAN:           RoleGate{Role: "lan", Satisfied: true, Interface: "downlink0", Reason: "role lan is filled by downlink0"},
-		RecoveryOK:    true,
+		PlanValidated:        true,
+		ConfigValid:          true,
+		WAN:                  RoleGate{Role: "wan", Satisfied: true, Interface: "uplink0", Reason: "role wan is filled by uplink0"},
+		LAN:                  RoleGate{Role: "lan", Satisfied: true, Interface: "downlink0", Reason: "role lan is filled by downlink0"},
+		NoRoleConflicts:      true,
+		HostReadinessOK:      true,
+		CapabilitiesObserved: true,
+		DigestsFresh:         true,
+		ManagementSafe:       true,
+		RecoveryOK:           true,
 
 		PresenceConfirmed: true,
 	}
@@ -54,7 +59,7 @@ type gateCase struct {
 	field string
 }
 
-// allGates enumerates the seven gates and the field each reads.
+// allGates enumerates the seven readiness gates and the field each reads.
 //
 // apply-path-available has no field: it is driven by CanApply(), which is a
 // package constant and therefore cannot be varied per test.
@@ -64,6 +69,22 @@ var allGates = []gateCase{
 	{"config-valid", "ConfigValid"},
 	{"wan-present", "WAN"},
 	{"lan-identified", "LAN"},
+	{"recoverable", "RecoveryOK"},
+	{"physical-presence", "PresenceConfirmed"},
+}
+
+// allProductionGates enumerates the full set of M7.6 production activation gates.
+var allProductionGates = []gateCase{
+	{"apply-path-available", ""},
+	{"plan-validated", "PlanValidated"},
+	{"config-valid", "ConfigValid"},
+	{"wan-present", "WAN"},
+	{"lan-identified", "LAN"},
+	{"no-role-conflicts", "NoRoleConflicts"},
+	{"host-readiness", "HostReadinessOK"},
+	{"capabilities-observed", "CapabilitiesObserved"},
+	{"digests-fresh", "DigestsFresh"},
+	{"management-safety", "ManagementSafe"},
 	{"recoverable", "RecoveryOK"},
 	{"physical-presence", "PresenceConfirmed"},
 }
@@ -79,6 +100,21 @@ func unsatisfiable(in GateInput, field string) GateInput {
 		in.WAN = RoleGate{Role: "wan", Reason: "role wan is not assigned"}
 	case "LAN":
 		in.LAN = RoleGate{Role: "lan", Reason: "role lan is not assigned"}
+	case "NoRoleConflicts":
+		in.NoRoleConflicts = false
+		in.RoleConflictProblem = "roles are in conflict"
+	case "HostReadinessOK":
+		in.HostReadinessOK = false
+		in.HostReadinessProblem = "host readiness not met"
+	case "CapabilitiesObserved":
+		in.CapabilitiesObserved = false
+		in.CapabilitiesProblem = "required capabilities not observed"
+	case "DigestsFresh":
+		in.DigestsFresh = false
+		in.DigestsProblem = "plan digests are stale"
+	case "ManagementSafe":
+		in.ManagementSafe = false
+		in.ManagementProblem = "management path not proven safe"
 	case "RecoveryOK":
 		in.RecoveryOK = false
 	case "PresenceConfirmed":
@@ -105,6 +141,42 @@ func TestEveryGateIsAccountedFor(t *testing.T) {
 		if got.Gates[i].Description == "" {
 			t.Errorf("gate %q has no description", got.Gates[i].Name)
 		}
+	}
+}
+
+// TestEveryProductionGateIsAccountedFor proves all 12 M7.6 gates are present in EvaluateProduction.
+func TestEveryProductionGateIsAccountedFor(t *testing.T) {
+	got := EvaluateProduction(satisfiedInput())
+
+	if len(got.Gates) != len(allProductionGates) {
+		t.Fatalf("EvaluateProduction reported %d gates, expected %d: %v",
+			len(got.Gates), len(allProductionGates), gateNames(got))
+	}
+	for i, want := range allProductionGates {
+		if got.Gates[i].Name != want.name {
+			t.Errorf("production gate %d = %q, want %q", i, got.Gates[i].Name, want.name)
+		}
+		if got.Gates[i].Description == "" {
+			t.Errorf("production gate %q has no description", got.Gates[i].Name)
+		}
+	}
+}
+
+// TestEveryProductionGateCanBlock proves each M7.6 gate is individually load-bearing.
+func TestEveryProductionGateCanBlock(t *testing.T) {
+	for _, c := range allProductionGates {
+		if c.field == "" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			got := EvaluateProduction(unsatisfiable(satisfiedInput(), c.field))
+			if got.AllSatisfied {
+				t.Fatalf("%q did not block", c.name)
+			}
+			if !containsString(got.Blocking, c.name) {
+				t.Fatalf("Blocking = %v, want it to name %q", got.Blocking, c.name)
+			}
+		})
 	}
 }
 

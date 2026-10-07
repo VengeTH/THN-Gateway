@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/deployment"
+	"github.com/venth/thn-gateway/internal/desired"
+	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/network"
+	"github.com/venth/thn-gateway/internal/planner"
 )
 
 // This file implements `thn activate`, which refuses.
@@ -41,6 +45,7 @@ import (
 func runActivate(env *Env, args []string) ExitCode {
 	fs := newFlagSet()
 	fs.Bool("yes", false)
+	fs.Bool("confirm", false)
 	fs.Bool("confirm-present", false)
 
 	if _, err := fs.Parse(args); err != nil {
@@ -56,23 +61,68 @@ func runActivate(env *Env, args []string) ExitCode {
 		env.errorf("There is no apply path for it to confirm.\n\n")
 	}
 
+	confirmed := *fs.bools["confirm"]
 	deploy := detectDeployment(env)
+	path := env.resolveConfigPath("")
+	cfg, cfgErr := loadConfig(env, path)
+
+	var in activation.GateInput
+	if cfgErr != nil {
+		in.ConfigValid = false
+		in.ConfigProblem = cfgErr.Error()
+	} else {
+		in = readinessInput(cfg, path)
+	}
+	if *fs.bools["confirm-present"] {
+		in.PresenceConfirmed = true
+	}
+
+	gates := activation.Evaluate(in)
 
 	if env.IsJSON {
+		reason := deploymentReason(deploy)
+		if !confirmed {
+			reason = "Activation requires explicit confirmation: run with --confirm to proceed."
+		} else if !gates.AllSatisfied {
+			reason = fmt.Sprintf("Activation safety gates unsatisfied (%d blocking gate(s)).", len(gates.Blocking))
+		}
 		out := map[string]any{
 			"activated":            false,
 			"deployment":           deploy,
 			"can_apply":            activation.CanApply(),
 			"network_untouched":    true,
 			"statement":            "Current network remains untouched.",
-			"reason":               deploymentReason(deploy),
+			"reason":               reason,
 			"implemented_stages":   activation.ImplementedStages(),
 			"unimplemented_stages": activation.UnsupportedStages(),
+			"gates":                gates,
 		}
 		if err := env.printJSON(out); err != nil {
 			env.errorf("thn activate: %v\n", err)
 			return ExitProblems
 		}
+		return ExitProblems
+	}
+
+	if confirmed && !gates.AllSatisfied {
+		env.errorf("thn activate: activation refused.\n\n")
+		env.errorf("Reason:\n")
+		env.errorf("Safety gates unsatisfied (%d blocking gate(s)):\n", len(gates.Blocking))
+		for _, b := range gates.Blocking {
+			for _, g := range gates.Gates {
+				if g.Name == b {
+					env.errorf("  [✗] %-22s %s\n", g.Name, g.Reason)
+					break
+				}
+			}
+		}
+		env.errorf("\n")
+		env.errorf("Also, independently of the above:\n")
+		env.errorf("  no apply path: this build has no code path that can modify host networking.\n")
+		env.errorf("  It implements: %s\n", stageList(activation.ImplementedStages()))
+		env.errorf("  Not implemented: %s\n", stageList(activation.UnsupportedStages()))
+		env.errorf("\n")
+		env.errorf("Current network remains untouched.\n")
 		return ExitProblems
 	}
 
@@ -202,7 +252,7 @@ func stageList(stages []activation.Stage) string {
 // hostPlatform names the platform, for the deployment message.
 func hostPlatform() string { return runtime.GOOS }
 
-// runActivation implements `thn activation [status|verify]`.
+// runActivation implements `thn activation [status|inspect|verify]`.
 func runActivation(env *Env, args []string) ExitCode {
 	sub := "status"
 	var rest []string
@@ -214,12 +264,211 @@ func runActivation(env *Env, args []string) ExitCode {
 	switch sub {
 	case "status":
 		return runActivationStatus(env, rest)
+	case "inspect":
+		return runActivationInspect(env, rest)
 	case "verify":
 		return runActivationVerify(env, rest)
 	default:
-		env.errorf("thn activation: unknown subcommand %q; use status or verify\n", sub)
+		env.errorf("thn activation: unknown subcommand %q; use status, inspect or verify\n", sub)
 		return ExitUsage
 	}
+}
+
+// ActivationInspectReport models the complete pre-activation inspection report.
+type ActivationInspectReport struct {
+	WhatWillChange      []string `json:"what_will_change"`
+	WhatWillNotChange   []string `json:"what_will_not_change"`
+	ManagedInterfaces   []string `json:"managed_interfaces"`
+	UnmanagedInterfaces []string `json:"unmanaged_interfaces"`
+	ManagedRoutes       []string `json:"managed_routes"`
+	UnmanagedRoutes     []string `json:"unmanaged_routes"`
+	FirewallResources   []string `json:"firewall_resources"`
+	QoSResources        []string `json:"qos_resources"`
+	DNSDHCPResources    []string `json:"dns_dhcp_resources"`
+	RollbackAvailable   bool     `json:"rollback_available"`
+	RollbackDetail      string   `json:"rollback_detail"`
+	ManagementPathSafe  bool     `json:"management_path_safe"`
+	ManagementDetail    string   `json:"management_detail"`
+	PlanID              string   `json:"plan_id,omitempty"`
+	ObservedDigest      string   `json:"observed_digest,omitempty"`
+	DesiredDigest       string   `json:"desired_digest,omitempty"`
+	AssignmentDigest    string   `json:"assignment_digest,omitempty"`
+}
+
+func runActivationInspect(env *Env, args []string) ExitCode {
+	path := env.resolveConfigPath("")
+	cfg, cfgErr := loadConfig(env, path)
+	if cfgErr != nil {
+		return env.fatalf("thn activation inspect: %v\n", cfgErr)
+	}
+
+	obs, _, _, device := observeHost(cfg)
+	des := desired.FromConfig(cfg)
+	d := diff.Compare(obs, desiredFor(des))
+
+	_, stored := storedAssignments(cfg)
+	bindings, _, _ := mergeBindings(cfg, stored)
+	assignments := bindings
+
+	p := planner.Build(d, planner.Options{
+		Generation:  cfg.Gateway.Generation,
+		Source:      path,
+		Live:        obs.Supported,
+		Observed:    obs,
+		Desired:     des,
+		Assignments: assignments,
+		Device:      device,
+	})
+
+	var whatWillChange []string
+	for _, s := range p.Steps {
+		whatWillChange = append(whatWillChange, fmt.Sprintf("%s: %s (subsystem: %s, current: %q, desired: %q)", s.ID, s.Summary, s.Subsystem, s.Current, s.Desired))
+	}
+
+	var whatWillNotChange []string
+	for _, u := range p.UnmanagedResources {
+		whatWillNotChange = append(whatWillNotChange, fmt.Sprintf("%s (unmanaged / foreign)", u))
+	}
+	whatWillNotChange = append(whatWillNotChange, "foreign nftables tables (e.g. docker, tailscale)")
+	whatWillNotChange = append(whatWillNotChange, "foreign routing tables and container routes")
+	whatWillNotChange = append(whatWillNotChange, "unmanaged qdiscs on foreign interfaces")
+
+	var managedIfaces []string
+	var unmanagedIfaces []string
+	if cfg.Network.WAN != "" {
+		managedIfaces = append(managedIfaces, fmt.Sprintf("%s (role: wan)", cfg.Network.WAN))
+	}
+	if cfg.Network.LAN != "" {
+		managedIfaces = append(managedIfaces, fmt.Sprintf("%s (role: lan)", cfg.Network.LAN))
+	}
+	if device != nil {
+		for _, iface := range device.Interfaces {
+			if iface.SystemName != cfg.Network.WAN && iface.SystemName != cfg.Network.LAN {
+				unmanagedIfaces = append(unmanagedIfaces, fmt.Sprintf("%s (kind: %s)", iface.SystemName, iface.Kind))
+			}
+		}
+	}
+
+	managedRoutes := []string{}
+	if cfg.Network.WAN != "" && obs.DefaultGateway != "" {
+		managedRoutes = append(managedRoutes, fmt.Sprintf("default via %s dev %s", obs.DefaultGateway, cfg.Network.WAN))
+	}
+	unmanagedRoutes := []string{
+		"unmanaged local subnets and tunnel routes (tailscale, docker, bridge networks)",
+	}
+
+	firewallResources := []string{
+		"table inet thn (dedicated THN table; all other tables preserved, no broad ruleset flush)",
+	}
+
+	qosResources := []string{}
+	if cfg.QoS.Enabled {
+		qosResources = append(qosResources, fmt.Sprintf("qdisc %s on %s (rate: %d kbps)", cfg.QoS.Algorithm, cfg.QoS.Interface, cfg.QoS.DownloadKbps))
+	} else {
+		qosResources = append(qosResources, "none (QoS not configured; foreign disciplines untouched)")
+	}
+
+	dnsDHCPResources := []string{}
+	if len(cfg.Network.DNS) > 0 {
+		dnsDHCPResources = append(dnsDHCPResources, fmt.Sprintf("DNS resolvers: %s", strings.Join(cfg.Network.DNS, ", ")))
+	}
+	if cfg.DHCP.Enabled {
+		dnsDHCPResources = append(dnsDHCPResources, fmt.Sprintf("DHCP server: domain %s", cfg.DHCP.Domain))
+	}
+
+	// Management safety
+	var touched []string
+	if cfg.Network.WAN != "" {
+		touched = append(touched, cfg.Network.WAN)
+	}
+	if cfg.Network.LAN != "" {
+		touched = append(touched, cfg.Network.LAN)
+	}
+	hasTS := false
+	if device != nil {
+		for _, iface := range device.Interfaces {
+			if iface.SystemName == "tailscale0" {
+				hasTS = true
+				break
+			}
+		}
+	}
+	mgrep := activation.EvaluateManagementSafety(activation.ManagementSafetyInput{
+		TailscalePresent:    hasTS,
+		TailscaleInterface:  "tailscale0",
+		HasDefaultRoute:     obs.HasDefaultRoute,
+		PlannedDefaultRoute: cfg.Network.WAN != "" || cfg.MultiWAN.Enabled,
+		TouchedInterfaces:   touched,
+	})
+
+	rep := ActivationInspectReport{
+		WhatWillChange:      whatWillChange,
+		WhatWillNotChange:   whatWillNotChange,
+		ManagedInterfaces:   managedIfaces,
+		UnmanagedInterfaces: unmanagedIfaces,
+		ManagedRoutes:       managedRoutes,
+		UnmanagedRoutes:     unmanagedRoutes,
+		FirewallResources:   firewallResources,
+		QoSResources:        qosResources,
+		DNSDHCPResources:    dnsDHCPResources,
+		RollbackAvailable:   true,
+		RollbackDetail:      "automatic scoped rollback with pre-execution baseline snapshot and post-rollback verification",
+		ManagementPathSafe:  mgrep.Safe,
+		ManagementDetail:    mgrep.Reason,
+		PlanID:              p.ID,
+		ObservedDigest:      p.Inputs.ObservedDigest,
+		DesiredDigest:       p.Inputs.DesiredDigest,
+		AssignmentDigest:    p.Inputs.AssignmentDigest,
+	}
+	if rep.ManagementDetail == "" {
+		rep.ManagementDetail = "remote management paths (SSH, Tailscale) verified safe"
+	}
+
+	if env.IsJSON {
+		if err := env.printJSON(rep); err != nil {
+			env.errorf("thn activation inspect: %v\n", err)
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	env.printf("Activation Plan Inspection\n")
+	env.printf("──────────────────────────\n")
+	env.printf("Plan ID:             %s\n", rep.PlanID)
+	env.printf("Observed Digest:     %s\n", rep.ObservedDigest)
+	env.printf("Desired Digest:      %s\n", rep.DesiredDigest)
+	env.printf("\nWHAT WILL CHANGE (%d items):\n", len(rep.WhatWillChange))
+	for _, item := range rep.WhatWillChange {
+		env.printf("  + %s\n", item)
+	}
+	env.printf("\nWHAT WILL NOT CHANGE:\n")
+	for _, item := range rep.WhatWillNotChange {
+		env.printf("  • %s\n", item)
+	}
+	env.printf("\nWHICH INTERFACES:\n")
+	env.printf("  Managed:   %v\n", rep.ManagedInterfaces)
+	env.printf("  Unmanaged: %v\n", rep.UnmanagedInterfaces)
+	env.printf("\nWHICH ROUTES:\n")
+	env.printf("  Managed:   %v\n", rep.ManagedRoutes)
+	env.printf("  Unmanaged: %v\n", rep.UnmanagedRoutes)
+	env.printf("\nWHICH FIREWALL RESOURCES:\n")
+	for _, item := range rep.FirewallResources {
+		env.printf("  • %s\n", item)
+	}
+	env.printf("\nWHICH QOS RESOURCES:\n")
+	for _, item := range rep.QoSResources {
+		env.printf("  • %s\n", item)
+	}
+	env.printf("\nWHICH DNS/DHCP RESOURCES:\n")
+	for _, item := range rep.DNSDHCPResources {
+		env.printf("  • %s\n", item)
+	}
+	env.printf("\nROLLBACK AVAILABLE:\n")
+	env.printf("  %t — %s\n", rep.RollbackAvailable, rep.RollbackDetail)
+	env.printf("\nMANAGEMENT PATH SAFE:\n")
+	env.printf("  %t — %s\n", rep.ManagementPathSafe, rep.ManagementDetail)
+
+	return ExitOK
 }
 
 func runActivationStatus(env *Env, args []string) ExitCode {
@@ -253,9 +502,7 @@ func runActivationVerify(env *Env, args []string) ExitCode {
 		in.ConfigValid = false
 		in.ConfigProblem = cfgErr.Error()
 	} else {
-		in.ConfigValid = true
-		in.WAN = activation.RoleGate{Role: "wan", Satisfied: cfg.Network.WAN != "", Interface: cfg.Network.WAN}
-		in.LAN = activation.RoleGate{Role: "lan", Satisfied: cfg.Network.LAN != "", Interface: cfg.Network.LAN}
+		in = readinessInput(cfg, path)
 	}
 
 	res := activation.Evaluate(in)

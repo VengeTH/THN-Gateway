@@ -1123,6 +1123,51 @@ multi_wan:
 - `ProductionDriver.CanApply() == false`.
 - `ImplementedStages()` excludes `StageApply`.
 
+## M7.6 — Safe Production Activation
+
+M7.6 implements the safe production activation boundary and verified transaction execution pipeline for THN:
+
+```
+PREPARE ──▶ BACKUP ──▶ VALIDATE ──▶ APPLY ──▶ HEALTH CHECK ──▶ COMMIT
+                                       │              │
+                                       ▼              ▼
+                                  (failure) ──▶ ROLLBACK ──▶ ROLLBACK VERIFICATION ──▶ ROLLED_BACK / DEGRADED
+```
+
+### Safety and Fail-Closed Posture
+
+> **THN only modifies resources it explicitly owns.**
+
+Docker (`docker0`, `veth*`), Tailscale (`tailscale0`), foreign nftables tables, foreign routing tables/routes, and unrelated interfaces remain outside THN ownership unless explicitly adopted.
+
+### Core Architecture
+
+- **Activation Lifecycle**: Six-phase execution transaction: `PREPARE` (precondition & digest validation), `BACKUP` (scoped baseline state capture), `VALIDATE` (operation parameter bounds checking), `APPLY` (dependency-ordered execution of structured operations), `HEALTH_CHECK` (live state assertions), and `COMMIT` (journal persistence).
+- **Automatic Rollback & Verification**: Failure during apply or health check triggers compensating operations in reverse order, followed by live baseline verification against the captured pre-apply snapshot. If restoration is incomplete, the state is reported as `DEGRADED`, never falsely `ROLLED_BACK`.
+- **Ownership Boundaries**: Only `table inet thn` is managed or flushed. Destructive global flushes (`nft flush ruleset`, `ip route flush`, `ip addr flush`) are strictly forbidden by static validation and AST guards.
+- **Remote Management Safety**: Before activation, active management paths (SSH connection endpoint, Tailscale `tailscale0`, default gateway) are verified. Activation is fail-closed blocked if any mutation risks severing remote access.
+- **Plan-Bound Digests**: The execution transaction binds cryptographically to the exact plan via content-addressed SHA-256 digests (`ObservedDigest`, `DesiredDigest`, `AssignmentDigest`, `PlanID`). Any drift between plan generation and execution aborts the transaction with `ErrStalePlan`.
+- **Capability Confidence**: Only explicitly `observed` capabilities satisfy hard activation gates. Inferred or unknown capabilities fail closed.
+- **Crash Recovery**: Interrupted transactions in the execution journal are detected on startup and marked `RECOVERY_REQUIRED` to prevent speculative resume or destructive rollback.
+- **Production Confirmation**: Live activation requires explicit operator confirmation via `thn activate --confirm` and passes all hard safety gates.
+- **M7.5 Integration**: Multi-WAN failover and load-balancing routing policies require explicit verified operations and are blocked from speculative shell execution.
+
+### Activation CLI Workflow
+
+```sh
+thn activation status      # view lifecycle state, bound applier, and gate status
+thn activation inspect     # review WHAT WILL CHANGE, WHAT WILL NOT CHANGE, interfaces, routes, rollback & management safety
+thn activation verify      # evaluate all production activation safety gates
+thn activate --confirm     # fail-closed production activation requiring explicit confirmation
+```
+
+### M7.6 Safety Invariants
+
+- `activation.CanApply() == false` (fail-closed static default).
+- `ProductionDriver.CanApply() == false` (disabled unless explicitly confirmed and all gates pass).
+- `ImplementedStages()` excludes `StageApply`.
+- No unguarded exec, shell execution, or shell interpolation.
+
 ## Diagnosing an unknown
 
 An `unknown` with no reason is the least useful thing a diagnostic tool can

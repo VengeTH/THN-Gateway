@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/host"
@@ -15,11 +16,18 @@ import (
 
 // ExecutionOptions provides runtime context and state inputs to the Executor.
 type ExecutionOptions struct {
-	Observed    diff.Observed
-	Desired     desired.State
-	Assignments []host.Assignment
-	Journal     JournalStore
-	DryRun      bool
+	Observed                 diff.Observed
+	Desired                  desired.State
+	Assignments              []host.Assignment
+	Journal                  JournalStore
+	DryRun                   bool
+	ExpectedPlanID           string
+	ExpectedObservedDigest   string
+	ExpectedDesiredDigest    string
+	ExpectedAssignmentDigest string
+	ManagementSafe           bool
+	ManagementProblem        string
+	Capabilities             []activation.CapabilityGate
 }
 
 // Executor orchestrates the six-phase execution transaction:
@@ -83,6 +91,39 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 		return res, ErrStalePlan
 	}
 
+	// Verify plan-bound constraints when caller specifies expected binding
+	if opts.ExpectedPlanID != "" && plan.ID != opts.ExpectedPlanID {
+		res.FinalState = StateBlocked
+		res.Error = fmt.Sprintf("%v: plan ID %s != expected %s", ErrStalePlan, plan.ID, opts.ExpectedPlanID)
+		return res, ErrStalePlan
+	}
+	if opts.ExpectedObservedDigest != "" && currObsDigest != opts.ExpectedObservedDigest {
+		res.FinalState = StateBlocked
+		res.Error = fmt.Sprintf("%v: observed digest %s != expected %s", ErrStalePlan, currObsDigest, opts.ExpectedObservedDigest)
+		return res, ErrStalePlan
+	}
+	if opts.ExpectedDesiredDigest != "" && currDesDigest != opts.ExpectedDesiredDigest {
+		res.FinalState = StateBlocked
+		res.Error = fmt.Sprintf("%v: desired digest %s != expected %s", ErrStalePlan, currDesDigest, opts.ExpectedDesiredDigest)
+		return res, ErrStalePlan
+	}
+	if opts.ExpectedAssignmentDigest != "" && currAssignDigest != opts.ExpectedAssignmentDigest {
+		res.FinalState = StateBlocked
+		res.Error = fmt.Sprintf("%v: assignment digest %s != expected %s", ErrStalePlan, currAssignDigest, opts.ExpectedAssignmentDigest)
+		return res, ErrStalePlan
+	}
+
+	// Verify management safety
+	if opts.ManagementProblem != "" || (!opts.ManagementSafe && opts.ExpectedPlanID != "") {
+		prob := opts.ManagementProblem
+		if prob == "" {
+			prob = "remote management path cannot be proven safe"
+		}
+		res.FinalState = StateBlocked
+		res.Error = fmt.Sprintf("%v: %s", ErrCannotApply, prob)
+		return res, fmt.Errorf("%w: %s", ErrCannotApply, prob)
+	}
+
 	ok, preconditions := plan.ValidatePreconditions(opts.Observed, opts.Desired)
 	if !ok {
 		var reasons []string
@@ -102,6 +143,22 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 		res.FinalState = StateBlocked
 		res.Error = fmt.Sprintf("failed translating plan steps to operations: %v", err)
 		return res, err
+	}
+
+	// Multi-WAN safety check: non-single mode requires explicit policy routing operations
+	if opts.Desired.MultiWAN.Enabled && opts.Desired.MultiWAN.Mode != "single" && opts.Desired.MultiWAN.Mode != "" {
+		hasPolicyRouting := false
+		for _, op := range ops {
+			if op.Subsystem() == "route" && strings.Contains(op.RenderCommand(), "table") {
+				hasPolicyRouting = true
+				break
+			}
+		}
+		if !hasPolicyRouting {
+			res.FinalState = StateBlocked
+			res.Error = fmt.Sprintf("%v: Multi-WAN mode %q cannot be activated without verified policy routing", ErrCannotApply, opts.Desired.MultiWAN.Mode)
+			return res, fmt.Errorf("%w: Multi-WAN mode %q cannot be activated without verified policy routing", ErrCannotApply, opts.Desired.MultiWAN.Mode)
+		}
 	}
 
 	// Check required capabilities
@@ -125,6 +182,29 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 		res.FinalState = StateBlocked
 		res.Error = fmt.Sprintf("%v: %s", ErrCapabilityMissing, missing)
 		return res, fmt.Errorf("%w: %s", ErrCapabilityMissing, missing)
+	}
+
+	// Section 5: never use inferred capabilities as activation permission
+	if len(opts.Capabilities) > 0 {
+		for _, rc := range requiredCaps {
+			found := false
+			for _, cg := range opts.Capabilities {
+				if cg.Name == rc {
+					found = true
+					if !cg.Satisfied() {
+						res.FinalState = StateBlocked
+						res.Error = fmt.Sprintf("%v: capability %s is %s (must be observed)", ErrCapabilityMissing, rc, cg.Confidence)
+						return res, fmt.Errorf("%w: capability %s is %s; activation requires observed capability", ErrCapabilityMissing, rc, cg.Confidence)
+					}
+					break
+				}
+			}
+			if !found {
+				res.FinalState = StateBlocked
+				res.Error = fmt.Sprintf("%v: capability %s is unknown", ErrCapabilityMissing, rc)
+				return res, fmt.Errorf("%w: capability %s is unknown", ErrCapabilityMissing, rc)
+			}
+		}
 	}
 
 	// 2. BACKUP PHASE
@@ -371,7 +451,7 @@ func (e *Executor) rollback(
 				Error:           res.Error,
 			})
 		}
-		return res, fmt.Errorf("rollback verification failed: %s", strings.Join(diffs, "; "))
+		return res, fmt.Errorf("%w: rollback verification failed: %s", ErrRollbackFailed, strings.Join(diffs, "; "))
 	}
 
 	// Verification succeeded: cleanly rolled back
@@ -412,6 +492,11 @@ func deriveBackupScope(ops []Operation, obs diff.Observed) BackupScope {
 			seenIfaces[o.Interface] = true
 		case OpNFTApplyTHNTable, OpNFTDeleteTHNTable:
 			scope.NFTables = true
+		case OpQDiscApply, OpQDiscDelete:
+			seenIfaces[o.Target()] = true
+			scope.QDiscs = true
+		case OpDNSApply:
+			scope.DNS = true
 		}
 	}
 
