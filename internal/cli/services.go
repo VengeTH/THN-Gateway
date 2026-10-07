@@ -12,8 +12,10 @@ import (
 	"github.com/venth/thn-gateway/internal/dhcp"
 	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
 	"github.com/venth/thn-gateway/internal/dns"
+	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/identity"
+	"github.com/venth/thn-gateway/internal/qos"
 	"github.com/venth/thn-gateway/internal/sandbox"
 )
 
@@ -176,6 +178,178 @@ func dnsPolicyFromConfig(cfg config.Config) (dns.Policy, error) {
 	return p, nil
 }
 
+// dhcpIntent builds the DHCP intent report for a document and its gateway
+// intent.
+//
+// The LAN role is read from the gateway intent rather than from the
+// configuration a second time, so DHCP can never conclude that the LAN
+// resolves when the gateway layer concluded it does not. One resolution, one
+// answer, shared by the report, the desired state and the plan.
+func dhcpIntent(cfg config.Config, gw gateway.Intent) dhcp.Report {
+	lan := dhcp.LANRole{
+		Declared: cfg.Network.LAN != "" || cfg.Network.LANPrefix != "",
+		Prefix:   cfg.Network.LANPrefix,
+	}
+	ri := gw.Roles[host.RoleLAN]
+	lan.Selector = ri.Selector
+	lan.Resolved = ri.Resolved
+	lan.Interface = ri.Interface
+	lan.StableID = ri.StableID
+	if ri.Declared {
+		lan.Declared = true
+	}
+
+	policy, err := dhcpPolicyFromConfig(cfg)
+	if err != nil {
+		// The policy could not be built at all. Report that as the whole
+		// intent rather than guessing a pool: a DHCP intent derived from a
+		// document whose bounds do not parse would be fiction.
+		return dhcp.Report{
+			Intent:  dhcp.Intent{Enabled: cfg.DHCP.Enabled, LAN: lan},
+			Verdict: dhcp.VerdictBlocked,
+			Summary: "DHCP cannot be read from this document",
+			Findings: []dhcp.Finding{{
+				Field:    "dhcp.ranges",
+				Code:     dhcp.CodeRangeInvalid,
+				Severity: dhcp.SeverityError,
+				Message:  err.Error(),
+				Hint:     "write each pool bound as an address, for example 10.77.0.100",
+			}},
+		}
+	}
+
+	return dhcp.ValidateIntent(dhcp.FromPolicy(policy, lan))
+}
+
+// dnsIntent builds the DNS intent report for a document and its gateway
+// intent.
+//
+// The upstream source rule is taken from dns.ResolveUpstream, the same
+// function the desired state uses. Deriving it here as well would mean two
+// answers to "which field wins", and the one printed beside the other would
+// be whichever disagreed.
+func dnsIntent(cfg config.Config, gw gateway.Intent) dns.Report {
+	lan := dns.LANRole{
+		Declared: cfg.Network.LAN != "" || cfg.Network.LANPrefix != "",
+		Prefix:   cfg.Network.LANPrefix,
+	}
+	ri := gw.Roles[host.RoleLAN]
+	lan.Selector = ri.Selector
+	lan.Resolved = ri.Resolved
+	lan.Interface = ri.Interface
+	lan.StableID = ri.StableID
+	if ri.Declared {
+		lan.Declared = true
+	}
+
+	dec := dns.ResolveUpstream(cfg.DNS.Upstream, cfg.Network.DNS)
+
+	policy, err := dnsPolicyFromConfig(cfg)
+	if err != nil {
+		return dns.Report{
+			Intent:  dns.Intent{Enabled: cfg.DNS.Enabled, LAN: lan},
+			Verdict: dns.VerdictBlocked,
+			Summary: "DNS cannot be read from this document",
+			Findings: []dns.Finding{{
+				Field:    "dns",
+				Code:     dns.CodeUpstreamInvalid,
+				Severity: dns.SeverityError,
+				Message:  err.Error(),
+				Hint:     "check the upstream resolvers and local records are addresses",
+			}},
+		}
+	}
+
+	return dns.ValidateIntent(dns.FromPolicy(policy, lan, dec))
+}
+
+// qosIntent builds the QoS intent report for a document and its gateway intent.
+//
+// # Capability comes from the host, never from a flag
+//
+// The capability evidence is read from the observed device through
+// internal/host's M7.1.1 capability model. It is NOT taken from
+// `--assume-cake`, which exists for `thn qos validate`'s own command and
+// represents an operator's hypothesis rather than a fact about the machine.
+//
+// With no observation at all — a static `thn validate` in CI — the result is
+// unknown. That is the correct answer, not a default: a CI job has not
+// established anything about the gateway's kernel, and reporting the CAKE
+// capability it cannot see as available would put a guess into the desired
+// digest.
+func qosIntent(cfg config.Config, gw gateway.Intent, dev *host.Device) qos.Report {
+	role := qos.LANRole{
+		Selector: cfg.QoS.Interface,
+		Declared: cfg.QoS.Interface != "" || cfg.Network.WAN != "",
+	}
+	if role.Selector == "" {
+		role.Selector = string(host.RoleWAN)
+		role.Declared = cfg.Network.WAN != ""
+	}
+
+	ri := gw.Roles[host.RoleWAN]
+	lan := gw.Roles[host.RoleLAN]
+
+	role.Resolved = ri.Resolved
+	role.Interface = ri.Interface
+	role.StableID = ri.StableID
+	if ri.Declared {
+		role.Declared = true
+	}
+
+	// Check for role conflicts:
+	// 1. If qos.interface explicitly specifies the LAN role or points to LAN interface
+	// 2. Or if gateway intent has a conflict between WAN and LAN
+	if strings.EqualFold(cfg.QoS.Interface, "lan") ||
+		(lan.Declared && cfg.QoS.Interface != "" && (cfg.QoS.Interface == lan.Selector || (lan.Interface != "" && cfg.QoS.Interface == lan.Interface))) {
+		role.Conflict = true
+	} else if ri.Declared && lan.Declared && ri.Resolved && lan.Resolved && ri.Interface == lan.Interface && ri.Interface != "" {
+		role.Conflict = true
+	}
+
+	// An explicit qos.interface is preserved as written, and resolves only if
+	// it names the WAN role the gateway actually resolved. Otherwise the
+	// kernel name is left unresolved rather than paired with an unrelated
+	// identity.
+	if cfg.QoS.Interface != "" && !role.Conflict {
+		role.Selector = cfg.QoS.Interface
+		if role.Selector == ri.Selector || (ri.Interface != "" && role.Selector == ri.Interface) {
+			role.Interface = ri.Interface
+			role.StableID = ri.StableID
+			role.Resolved = ri.Resolved
+		} else {
+			role.Resolved = false
+			role.Interface = ""
+			role.StableID = ""
+		}
+	}
+
+	policy := qosPolicyFromConfig(cfg)
+	cap := qos.CakeCapability(dev)
+	observed := observedQdiscKinds(dev)
+
+	return qos.ValidateIntent(qos.FromPolicy(policy, role, cap, observed))
+}
+
+// observedQdiscKinds lists the queue disciplines currently attached, sorted by
+// the caller.
+//
+// Nothing here is adopted or removed: THN observes qdiscs and reports them.
+// Ownership is a separate question this milestone deliberately does not
+// answer.
+func observedQdiscKinds(dev *host.Device) []string {
+	if dev == nil {
+		return nil
+	}
+	out := make([]string, 0, len(dev.TrafficControl.Qdiscs))
+	for _, q := range dev.TrafficControl.Qdiscs {
+		if q.Kind != "" {
+			out = append(out, q.Kind)
+		}
+	}
+	return out
+}
+
 // runDHCP implements the `thn dhcp` group.
 func runDHCP(env *Env, args []string) ExitCode {
 	if len(args) == 0 {
@@ -304,6 +478,7 @@ func dhcpFindings(in []dhcp.Finding) []findingView {
 		out = append(out, findingView{
 			severity: string(f.Severity),
 			field:    f.Field,
+			code:     f.Code,
 			message:  f.Message,
 			hint:     f.Hint,
 		})
@@ -318,6 +493,7 @@ func dnsFindings(in []dns.Finding) []findingView {
 		out = append(out, findingView{
 			severity: string(f.Severity),
 			field:    f.Field,
+			code:     f.Code,
 			message:  f.Message,
 			hint:     f.Hint,
 		})
@@ -345,8 +521,16 @@ func printFindings(env *Env, findings []findingView) {
 type findingView struct {
 	severity string
 	field    string
-	message  string
-	hint     string
+
+	// code is the stable, machine-readable classification.
+	//
+	// Empty where the producing layer has not classified the finding. It is
+	// shown by the intent printers in place of the field path, because a code
+	// is something an operator can grep and a field path is something they can
+	// edit — and a terminal block has room for only one of them.
+	code    string
+	message string
+	hint    string
 }
 
 // runDHCPRender implements `thn dhcp render`.

@@ -3,9 +3,12 @@ package desired
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 
 	"github.com/venth/thn-gateway/internal/config"
+	"github.com/venth/thn-gateway/internal/dhcp"
+	"github.com/venth/thn-gateway/internal/dns"
 	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 )
@@ -113,10 +116,29 @@ type QoS struct {
 	Algorithm string `json:"algorithm,omitempty"`
 	// Interface is the device to shape.
 	Interface string `json:"interface,omitempty"`
+
+	// Role is the logical role shaping attaches to, normally "wan".
+	//
+	// Shaping belongs on the link facing the bottleneck, and for a gateway
+	// that is the uplink. Carrying the role rather than only a kernel name is
+	// what lets this stay device-independent.
+	Role string `json:"role,omitempty"`
+
+	// StableID is the rename-stable identity of that interface.
+	//
+	// Carried beside Interface rather than instead of it, for the reason
+	// every other block in this model does the same: the kernel name is what
+	// the host calls it today, and the stable ID is what survives a NIC
+	// moving slots.
+	StableID string `json:"stable_id,omitempty"`
+
 	// DownloadKbps is the shaped download rate.
 	DownloadKbps int `json:"download_kbps,omitempty"`
 	// UploadKbps is the shaped upload rate.
 	UploadKbps int `json:"upload_kbps,omitempty"`
+
+	// OverheadPercent is the framing overhead compensation applied.
+	OverheadPercent int `json:"overhead_percent,omitempty"`
 }
 
 // DNS is the desired resolver state.
@@ -125,6 +147,108 @@ type DNS struct {
 	Servers []string `json:"servers,omitempty"`
 	// Present reports whether a resolver set was configured.
 	Present bool `json:"present"`
+
+	// Service is the desired DNS *service* state.
+	//
+	// It is kept separate from Servers above because they answer different
+	// questions. Servers is what THIS HOST should query; Service is what
+	// clients should query THIS HOST for. Collapsing them is how a gateway
+	// ends up forwarding to itself, or how an operator edits dns.upstream
+	// and watches nothing change.
+	Service DNSService `json:"service"`
+}
+
+// DNSService is the desired state of the DNS service THN offers to the LAN.
+//
+// It is implementation-independent on purpose. Nothing here names dnsmasq,
+// Unbound or systemd-resolved, because this layer describes the behaviour the
+// operator asked for, and choosing the process that provides it is a separate
+// decision that this milestone deliberately does not make.
+type DNSService struct {
+	// Enabled is the explicit request for a LAN DNS service.
+	Enabled bool `json:"enabled"`
+
+	// LANSelector is what the operator wrote for the LAN, verbatim.
+	//
+	// Carried beside the resolved name so a plan can say "the document asked
+	// for hw:…, and this host calls that enx00e099001812".
+	LANSelector string `json:"lan_selector,omitempty"`
+
+	// Interface is the observed kernel name the LAN role resolved to.
+	Interface string `json:"interface,omitempty"`
+
+	// StableID is the rename-stable identity of that interface.
+	StableID string `json:"stable_id,omitempty"`
+
+	// ListenAddress is the address the service should answer on.
+	ListenAddress string `json:"listen_address,omitempty"`
+
+	// Upstream are the resolvers queries are forwarded to, sorted.
+	//
+	// Sorted because the digest is content-addressed: two documents listing
+	// the same resolvers in a different order describe the same machine and
+	// must produce the same digest and the same plan ID.
+	Upstream []string `json:"upstream,omitempty"`
+
+	// UpstreamSource names the field the resolvers came from:
+	// "dns.upstream" or "network.dns".
+	UpstreamSource string `json:"upstream_source,omitempty"`
+
+	// LocalDomain is the domain served for local names.
+	LocalDomain string `json:"local_domain,omitempty"`
+
+	// Resolved reports whether the service can be placed.
+	//
+	// False means pending, not empty: the operator asked for DNS and has not
+	// yet said on what link it should listen.
+	Resolved bool `json:"resolved"`
+}
+
+// DHCP is the desired DHCP service state.
+//
+// Like DNSService, it names no implementation. Describing which addresses
+// should be handed out is separable from which program hands them out, and
+// only the first is modelled here.
+type DHCP struct {
+	// Enabled is the explicit request for a LAN DHCP service.
+	Enabled bool `json:"enabled"`
+
+	// LANSelector is what the operator wrote for the LAN, verbatim.
+	LANSelector string `json:"lan_selector,omitempty"`
+
+	// Interface is the observed kernel name the LAN role resolved to.
+	Interface string `json:"interface,omitempty"`
+
+	// StableID is the rename-stable identity of that interface.
+	StableID string `json:"stable_id,omitempty"`
+
+	// Subnet is the LAN network the pool belongs to, in CIDR form.
+	Subnet string `json:"subnet,omitempty"`
+
+	// Router is the address advertised to clients as their default route.
+	//
+	// Derived from the LAN address, so there is one source of truth for the
+	// gateway's LAN address rather than two that can disagree.
+	Router string `json:"router,omitempty"`
+
+	// Ranges are the address pools, as "start-end" strings, in declaration
+	// order.
+	Ranges []string `json:"ranges,omitempty"`
+
+	// LeaseTime is the default lease duration, rendered for display.
+	LeaseTime string `json:"lease_time,omitempty"`
+
+	// Domain is the local domain advertised to clients.
+	Domain string `json:"domain,omitempty"`
+
+	// Authoritative marks the server authoritative for the LAN.
+	Authoritative bool `json:"authoritative"`
+
+	// AdvertisedDNS are the resolvers handed to DHCP clients, sorted.
+	AdvertisedDNS []string `json:"advertised_dns,omitempty"`
+
+	// Resolved reports whether the service can be placed.
+	Resolved bool `json:"resolved"`
 }
 
 // GatewayIntent is the statement of intent the desired state was built from.
@@ -177,6 +301,9 @@ type State struct {
 	QoS QoS `json:"qos"`
 	// DNS is the desired resolver state.
 	DNS DNS `json:"dns"`
+
+	// DHCP is the desired DHCP service state.
+	DHCP DHCP `json:"dhcp"`
 }
 
 // FromConfig resolves configuration intent into desired state.
@@ -233,7 +360,25 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 		s.NAT = NAT{Enabled: false, Interfaces: []string{}, Resolved: true}
 		s.Firewall = Firewall{Backend: cfg.Firewall.Backend}
 		s.QoS = QoS{}
-		s.DNS = DNS{Servers: append([]string(nil), cfg.Network.DNS...), Present: false}
+		s.DNS = DNS{
+			Servers: append([]string(nil), cfg.Network.DNS...),
+			Present: false,
+			// A document that asked for no gateway has no LAN to serve DNS
+			// on. The service block is reported as not requested rather than
+			// empty, so "declined" and "configured but unresolved" stay
+			// distinguishable downstream.
+			Service: DNSService{Enabled: cfg.DNS.Enabled, Resolved: true},
+		}
+		// Same reasoning for DHCP: not requested is a decision, and reporting
+		// it as "pending" would tell the operator to go and do something they
+		// deliberately chose not to do.
+		s.DHCP = DHCP{
+			Enabled:       cfg.DHCP.Enabled,
+			Authoritative: cfg.DHCP.Authoritative,
+			LeaseTime:     cfg.DHCP.LeaseTime.String(),
+			Domain:        cfg.DHCP.Domain,
+			Resolved:      true,
+		}
 		return s
 	}
 
@@ -379,20 +524,44 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 	// --- QoS ---
 
 	s.QoS = QoS{
-		Enabled:      cfg.QoS.Enabled,
-		Algorithm:    cfg.QoS.Algorithm,
-		Interface:    cfg.QoS.Interface,
-		DownloadKbps: cfg.QoS.DownloadKbps,
-		UploadKbps:   cfg.QoS.UploadKbps,
+		Enabled:         cfg.QoS.Enabled,
+		Algorithm:       cfg.QoS.Algorithm,
+		Interface:       cfg.QoS.Interface,
+		DownloadKbps:    cfg.QoS.DownloadKbps,
+		UploadKbps:      cfg.QoS.UploadKbps,
+		OverheadPercent: cfg.QoS.OverheadPercent,
+		Role:            "wan",
 	}
+
+	// The shaping interface is the resolved WAN, and the stable identity
+	// comes from gateway intent rather than from a second resolution.
+	//
+	// An explicit qos.interface is preserved, because an operator who named
+	// a device explicitly has said something the role model does not. But the
+	// role and its stable ID are always recorded, so the desired state can
+	// still explain which link it means.
+	wan := in.Roles[host.RoleWAN]
+	s.QoS.Role = string(host.RoleWAN)
+	s.QoS.StableID = wan.StableID
 	if s.QoS.Interface == "" && s.WAN.Present && s.WAN.Name != "" {
 		s.QoS.Interface = s.WAN.Name
 	}
+	if s.QoS.Interface != "" && wan.Resolved {
+		// Only trust the stable ID when the role actually resolved: pairing
+		// an explicit kernel name with an unrelated role's identity would
+		// describe a link that does not exist.
+		s.QoS.StableID = wan.StableID
+	}
+
 	if !s.QoS.Enabled {
 		// QoS off is a resolved state, not a pending one.
 		s.QoS.Resolved = true
 	} else {
-		s.QoS.Resolved = s.QoS.Interface != "" &&
+		isConflict := (s.WAN.Present && s.LAN.Present && s.WAN.Name != "" && s.WAN.Name == s.LAN.Name) ||
+			strings.EqualFold(cfg.QoS.Interface, "lan") ||
+			(s.LAN.Name != "" && cfg.QoS.Interface == s.LAN.Name)
+		s.QoS.Resolved = !isConflict &&
+			s.QoS.Interface != "" &&
 			s.QoS.DownloadKbps > 0 &&
 			s.QoS.UploadKbps > 0 &&
 			s.QoS.Algorithm != ""
@@ -405,7 +574,146 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 		Present: len(cfg.Network.DNS) > 0,
 	}
 
+	s.DNS.Service = dnsServiceState(cfg, in, s.LAN)
+
+	// --- DHCP ---
+
+	s.DHCP = dhcpServiceState(cfg, in, s.LAN)
+
 	return s
+}
+
+// dnsServiceState projects DNS service intent into desired state.
+//
+// The upstream source rule is applied here rather than being re-derived: dns
+// .upstream is canonical for the service and network.dns is the fallback,
+// exactly as dns.ResolveUpstream decides. Applying it twice would mean two
+// answers to "which resolvers", and the one recorded in the desired digest
+// would be whichever disagreed with the report the operator was shown.
+//
+// A conflict is recorded as a conflict here rather than resolved. The desired
+// state says what the document asked for; picking one of two disagreeing
+// answers would put a choice into the content-addressed identity of a machine
+// nobody has described.
+func dnsServiceState(cfg config.Config, in gateway.Intent, lan Interface) DNSService {
+	svc := DNSService{
+		Enabled:        cfg.DNS.Enabled,
+		LANSelector:    lanSelector(in),
+		Interface:      lan.Name,
+		StableID:       lan.StableID,
+		LocalDomain:    cfg.DNS.LocalDomain,
+		UpstreamSource: "",
+	}
+
+	dec := dns.ResolveUpstream(cfg.DNS.Upstream, cfg.Network.DNS)
+	svc.UpstreamSource = dec.Source
+
+	// Only the canonical source feeds the service. When the two fields
+	// disagree, nothing is recorded as upstream: the operator is told which
+	// resolver is live only after they resolve the conflict themselves.
+	if dec.Source == dns.SourceFallback && dec.Conflict {
+		svc.Upstream = nil
+	} else {
+		upstreams := make([]string, 0, len(dec.List))
+		for _, u := range dec.List {
+			if addr, err := netip.ParseAddr(u); err == nil {
+				upstreams = append(upstreams, addr.String())
+			}
+		}
+		// Sorted so that two documents naming the same resolvers in a
+		// different order produce the same digest and the same plan ID.
+		sort.Strings(upstreams)
+		svc.Upstream = upstreams
+	}
+
+	if cfg.Network.LANPrefix != "" {
+		if prefix, err := netip.ParsePrefix(cfg.Network.LANPrefix); err == nil {
+			svc.ListenAddress = prefix.Addr().String()
+		}
+	}
+
+	// A service with somewhere to listen and somewhere to forward to can be
+	// placed. When it is off, that IS the resolved state.
+	svc.Resolved = !svc.Enabled || (svc.ListenAddress != "" && svc.Interface != "")
+
+	return svc
+}
+
+// dhcpServiceState projects DHCP intent into desired state.
+//
+// The pool and the advertised router both come from the LAN, never from an
+// interface name: the router is the declared LAN address, and the pool is
+// validated against the LAN subnet. That is what makes the desired state
+// survive a NIC moving slots — the stable identity carries across, and the
+// address does not depend on which enx… the kernel currently calls it.
+func dhcpServiceState(cfg config.Config, in gateway.Intent, lan Interface) DHCP {
+	dh := DHCP{
+		Enabled:       cfg.DHCP.Enabled,
+		LANSelector:   lanSelector(in),
+		Interface:     lan.Name,
+		StableID:      lan.StableID,
+		LeaseTime:     cfg.DHCP.LeaseTime.String(),
+		Domain:        cfg.DHCP.Domain,
+		Authoritative: cfg.DHCP.Authoritative,
+	}
+
+	var prefix netip.Prefix
+	if cfg.Network.LANPrefix != "" {
+		prefix, _ = netip.ParsePrefix(cfg.Network.LANPrefix)
+	}
+	if prefix.IsValid() {
+		dh.Subnet = prefix.Masked().String()
+		// The router advertisement is the LAN address. There is no separate
+		// DHCP router option in the configuration model and this layer does
+		// not invent one: two sources of truth for the gateway's LAN address
+		// is how a pool ends up advertising a router the machine does not
+		// hold.
+		dh.Router = prefix.Addr().String()
+	}
+
+	dh.Ranges = desiredDHCPRanges(cfg, prefix)
+
+	dh.Resolved = !dh.Enabled || (dh.Interface != "" && dh.Subnet != "" && len(dh.Ranges) > 0)
+
+	return dh
+}
+
+// desiredDHCPRanges renders the configured pools for the desired state.
+//
+// The derivation matches what internal/cli's policy translator does: an
+// explicit range is used as written, and a document that asks for DHCP with a
+// usable LAN but names no pool gets the conventional pool. Both paths are
+// deterministic, and both are expressed in the intent's terms rather than in
+// the backend's, so a future backend cannot change what THN wants.
+func desiredDHCPRanges(cfg config.Config, prefix netip.Prefix) []string {
+	var out []string
+
+	for _, rg := range cfg.DHCP.Ranges {
+		start, err1 := netip.ParseAddr(rg.Start)
+		end, err2 := netip.ParseAddr(rg.End)
+		if err1 != nil || err2 != nil {
+			// An unparseable bound is reported by validation with the field
+			// path that names it. The desired state records the shape it was
+			// given rather than inventing an address for it, so the digest
+			// still changes when the operator edits the broken value.
+			out = append(out, fmt.Sprintf("%s-%s", rg.Start, rg.End))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s-%s", start, end))
+	}
+
+	if len(out) == 0 && cfg.DHCP.Enabled && prefix.IsValid() {
+		for _, r := range dhcp.DerivePool(prefix, 100, 150) {
+			out = append(out, r.String())
+		}
+	}
+
+	return out
+}
+
+// lanSelector returns what the operator wrote for the LAN, verbatim.
+func lanSelector(in gateway.Intent) string {
+	return in.Roles[host.RoleLAN].Selector
 }
 
 // Pending lists the subsystems whose desired state cannot yet be determined,
@@ -436,6 +744,16 @@ func (s State) Pending() map[string]string {
 	}
 	if s.QoS.Enabled && !s.QoS.Resolved {
 		out["qos"] = "QoS is enabled but the interface or rates are incomplete"
+	}
+	// DHCP and DNS are reported as pending only when they were asked for.
+	// A service the operator declined is not outstanding work, and listing it
+	// as pending would tell them to go and configure something they chose not
+	// to.
+	if s.DHCP.Enabled && !s.DHCP.Resolved {
+		out["dhcp"] = "DHCP is enabled but the LAN or its address pool is not yet determined"
+	}
+	if s.DNS.Service.Enabled && !s.DNS.Service.Resolved {
+		out["dns"] = "DNS is enabled but the LAN or its listen address is not yet determined"
 	}
 
 	return out
@@ -471,6 +789,8 @@ func (s State) Summary() string {
 	fmt.Fprintf(&b, "firewall: %s\n", describeFirewall(s.Firewall))
 	fmt.Fprintf(&b, "QoS:      %s\n", describeQoS(s.QoS))
 	fmt.Fprintf(&b, "DNS:      %s\n", describeDNS(s.DNS))
+	fmt.Fprintf(&b, "DNS svc:  %s\n", describeDNSService(s.DNS.Service))
+	fmt.Fprintf(&b, "DHCP:     %s\n", describeDHCP(s.DHCP))
 
 	return b.String()
 }
@@ -522,8 +842,15 @@ func describeQoS(q QoS) string {
 	if !q.Resolved {
 		return "enabled (pending: interface or rates incomplete)"
 	}
-	return fmt.Sprintf("enabled (%s on %s, %d/%d kbps)",
-		q.Algorithm, q.Interface, q.DownloadKbps, q.UploadKbps)
+
+	// Both directions are named. "download" means internet to LAN and
+	// "upload" means LAN to internet, and an operator reading only the words
+	// would otherwise have to guess which way round the link is being capped.
+	out := fmt.Sprintf("enabled (%s on %s [%s], download %dkbit/s internet-to-LAN, upload %dkbit/s LAN-to-internet)",
+		q.Algorithm, q.Interface, orNoneStr(q.StableID),
+		q.DownloadKbps, q.UploadKbps)
+
+	return out
 }
 
 // describeDNS renders the resolver's desired state.
@@ -532,6 +859,63 @@ func describeDNS(d DNS) string {
 		return "not configured"
 	}
 	return strings.Join(d.Servers, ", ")
+}
+
+// describeDNSService renders the desired DNS *service*.
+//
+// It is a separate line from the resolver set because it is a separate
+// decision. The line above is "what this host should query"; this one is
+// "what clients should query this host for". Merging them would hide exactly
+// the edit that has historically done nothing.
+func describeDNSService(d DNSService) string {
+	if !d.Enabled {
+		return "not requested"
+	}
+	if !d.Resolved {
+		return fmt.Sprintf("requested (pending: no LAN or listen address; source %s)",
+			orNoneStr(d.UpstreamSource))
+	}
+	out := fmt.Sprintf("on %s", orNoneStr(d.ListenAddress))
+	if len(d.Upstream) > 0 {
+		out += fmt.Sprintf(" -> %s", strings.Join(d.Upstream, ", "))
+	} else {
+		out += " (no upstream declared)"
+	}
+	return out
+}
+
+// describeDHCP renders the desired DHCP service.
+//
+// The router is shown alongside the pool deliberately: an operator reading
+// "pool 10.77.0.100-10.77.0.250" has no way to know the clients will be told
+// 10.77.0.1 is their gateway unless both are stated.
+func describeDHCP(d DHCP) string {
+	if !d.Enabled {
+		return "not requested"
+	}
+	if !d.Resolved {
+		return "requested (pending: the LAN or its address pool is not yet determined)"
+	}
+
+	out := fmt.Sprintf("on %s (%s)", orNoneStr(d.Interface), orNoneStr(d.Subnet))
+	if len(d.Ranges) > 0 {
+		out += fmt.Sprintf(" pool %s", strings.Join(d.Ranges, ", "))
+	}
+	if d.Router != "" {
+		out += fmt.Sprintf(" router %s", d.Router)
+	}
+	if len(d.AdvertisedDNS) > 0 {
+		out += fmt.Sprintf(" DNS %s", strings.Join(d.AdvertisedDNS, ", "))
+	}
+	return out
+}
+
+// orNoneStr renders an empty string as an explicit absence.
+func orNoneStr(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
 }
 
 // Prefixes returns the desired LAN prefixes parsed as network prefixes.

@@ -578,6 +578,433 @@ imports only the document model, the host model and the standard library — a
 test asserts that list, so a future change that widens it fails rather than
 deploys.
 
+## DHCP and DNS intent (M7.3)
+
+A gateway that hands out no addresses and resolves no names is a router, not a
+gateway. THN can observe two Ethernet ports and a possible masquerade rule;
+none of that says whether the operator wants clients to be given an address or
+to query a resolver on this machine.
+
+> **A pool that does not belong to the LAN subnet, or a document that names two
+> different resolver sets, is a contradiction — not a preference. THN reports
+> it and refuses to pick.**
+
+### The chain
+
+```
+observed host ──▶ hardware intelligence ──▶ role resolution ──▶ gateway intent ──▶
+  DHCP intent ──▶ DNS intent ──▶ desired state ──▶ plan
+```
+
+DHCP and DNS sit **between gateway intent and desired state**. That position is
+the whole design. Both need the LAN that gateway intent resolves, and both feed
+the desired state that the planner consumes.
+
+### The existing configuration is reused, not replaced
+
+M7.3 introduces no new syntax. It reads what earlier milestones already
+declared:
+
+```yaml
+network:
+  lan: hw:f0435941acbdd796
+  lan_prefix: 10.77.0.1/24
+  dns:                       # the HOST's resolvers — the fallback
+    - 1.1.1.1
+
+dhcp:
+  enabled: true
+  ranges:
+    - start: 10.77.0.100
+      end:   10.77.0.250
+
+dns:
+  enabled: true
+  upstream:                  # AUTHORITATIVE for the DNS service
+    - 1.1.1.1
+    - 9.9.9.9
+```
+
+`internal/dhcp` and `internal/dns` already owned these concepts as *policies* —
+what a rendered config should say. M7.3 adds an *intent* layer above each: the
+policy is the document-shaped model, and the intent is the same facts plus the
+logical LAN role they attach to. The pool arithmetic is **not** reimplemented;
+the intent layer calls the existing validator, so two layers cannot reach
+different conclusions about one pool.
+
+### DHCP hangs off the LAN role, not an interface name
+
+```yaml
+network:
+  lan: hw:f0435941acbdd796    # stable identity
+  lan_prefix: 10.77.0.1/24
+```
+
+A pool is only meaningful relative to a subnet on a link. Naming
+`enx00e099001812` would make the pool's correctness depend on a kernel name that
+changes when a NIC moves slots, so the intent carries the **stable identity and
+the prefix**, and the resolved kernel name is kept beside it as an observation
+about the machine right now.
+
+The advertised router is **derived** from `lan_prefix`. There is no separate
+DHCP router option in the configuration model and M7.3 does not invent one:
+two sources of truth for "the gateway's LAN address" is exactly how a pool ends
+up advertising a router the machine does not hold.
+
+Subnet checks use real CIDR semantics — `/8`, `/16`, `/24`, `/25`, `/26`, `/27`,
+`/28` and the rest all work, and `/24` is not assumed. Both pool endpoints are
+checked, not just the start:
+
+| LAN | Pool | Verdict |
+|---|---|---|
+| `10.77.0.1/24` | `10.77.0.100`–`10.77.0.250` | valid |
+| `10.77.0.1/24` | `10.88.0.100`–`10.88.0.250` | `dhcp-range-outside-lan` |
+| `10.77.0.1/24` | `10.77.0.250`–`10.78.0.10` | `dhcp-range-outside-lan` (end leaves the subnet) |
+| `10.77.0.1/24` | `10.77.0.1`–`10.77.0.250` | `dhcp-range-includes-gateway` |
+| `10.77.0.1/24` | `10.77.0.250`–`10.77.0.100` | `dhcp-range-reversed` |
+| `10.77.0.1/24` | `10.77.0.200`–`10.77.0.200` | valid — a one-address pool |
+
+### DHCP and DNS stay separate domains
+
+They are related, and they are not the same thing:
+
+```
+DNS intent  ──▶  which DNS server(s) THN provides or uses
+DHCP intent ──▶  which DNS server(s) clients receive
+```
+
+DHCP may advertise resolver addresses to clients as a DHCP option. That does
+**not** mean DHCP owns the DNS configuration, and a client resolving through the
+gateway does not require this machine to run a resolver at all. M7.3 carries
+`AdvertisedDNS` as plain data and never infers a service from it.
+
+### DNS upstream precedence is unchanged
+
+The M3/M4 rule is preserved exactly, and now lives in one function —
+`dns.ResolveUpstream` — so the validator, the intent layer and the desired state
+cannot each hold their own opinion:
+
+| `dns.upstream` | `network.dns` | Result |
+|---|---|---|
+| set | — | used (`dns.upstream` is authoritative) |
+| — | set | used (the documented fallback) |
+| set | set, equal | accepted; order is not significant |
+| set | set, **differing** | `dns-upstream-conflict`, **BLOCKED** |
+| — | — | none. THN does **not** invent a resolver |
+
+The last row matters. Silently prepopulating `1.1.1.1` would mean an operator
+who never chose a resolver ends up with their clients' queries leaving the
+network, and nothing in the document would say so.
+
+### What `thn validate` reports
+
+```
+DHCP intent: BLOCKED
+  DHCP cannot be built as configured: 1 blocking finding(s)
+DHCP:    requested
+LAN:     hw:f0435941acbdd796 -> enx00e099001812 [hw:f0435941acbdd796]
+Subnet:  10.77.0.0/24
+Advertise router: 10.77.0.1
+Ranges:  10.88.0.100-10.88.0.250
+Lease:   12h0m0s
+
+  Findings:
+    error  dhcp-range-outside-lan  the pool starts at 10.88.0.100, outside the
+                                   LAN prefix 10.77.0.0/24
+                                   hint: place the pool inside the LAN network
+
+DNS intent: VALID
+  the requested DNS service can be built from this configuration
+DNS:     requested
+LAN:     hw:f0435941acbdd796 -> enx00e099001812 [hw:f0435941acbdd796]
+Listen:  10.77.0.1
+Upstream: 1.1.1.1, 9.9.9.9 (from dns.upstream)
+```
+
+Each section names its stable code *and* explains the problem in plain
+language. A beginner needs "the pool must belong to the LAN subnet"; an
+administrator needs `dhcp-range-outside-lan` to grep and dispatch on. The prose
+is never the source of truth — the code is.
+
+The verdict semantics are the same three M7.2 established:
+
+| Verdict | Means |
+|---|---|
+| `VALID` | the intent is complete and internally consistent |
+| `PENDING` | coherent but incomplete — usually the LAN is not attached yet |
+| `BLOCKED` | it cannot be built as written; more configuration will not fix it |
+
+### Dependencies are explained, not dumped
+
+When the LAN cannot be resolved, DHCP and DNS say so and **stop**. They do not
+report their own configuration as the problem:
+
+```
+gateway:  the lan selector "downlink0" has not been resolved against a host
+dhcp:     dhcp-lan-unresolved  the LAN selector "downlink0" has not been
+                               resolved against a host; DHCP cannot be checked
+                               against a link that is not identified yet
+dns:      dns-lan-unresolved   the LAN selector "downlink0" has not been
+                               resolved against a host; DNS cannot be checked
+                               against a link that is not identified yet
+```
+
+`dhcp-range-outside-lan` is **absent** here, and deliberately so. A test asserts
+it stays absent. Telling an operator their pool is wrong when the real problem
+is that there is no LAN to be wrong against sends them to edit the wrong line.
+
+### Findings are stable codes
+
+| Code | Meaning |
+|---|---|
+| `dhcp-disabled` | the document does not ask for DHCP |
+| `dhcp-lan-missing` / `dhcp-lan-unresolved` | no LAN, or a LAN matching no interface |
+| `dhcp-lan-address-missing` | no LAN address, so no subnet a pool could belong to |
+| `dhcp-range-missing` / `dhcp-range-invalid` | no pool, or unusable bounds |
+| `dhcp-range-reversed` | start above end |
+| `dhcp-range-outside-lan` | the pool leaves the LAN subnet |
+| `dhcp-range-includes-gateway` | the pool contains the gateway's own address |
+| `dns-disabled` | the document does not ask for a DNS service |
+| `dns-lan-missing` / `dns-lan-unresolved` | the LAN DNS would be served on |
+| `dns-upstream-missing` / `dns-upstream-invalid` | no resolver, or one that cannot be one |
+| `dns-upstream-conflict` | `dns.upstream` and `network.dns` disagree |
+| `dns-upstream-duplicate` | the same resolver listed twice |
+
+### JSON exposes all three
+
+`--json` adds `dhcp` and `dns` as siblings of `gateway`, on both `thn validate`
+and `thn plan`. A consumer reads `verdict` and `findings[].code` rather than
+parsing English, and no existing field was removed or reshaped:
+
+```json
+{
+  "valid": false,
+  "gateway": { "verdict": "PENDING", "findings": [ ... ] },
+  "dhcp":    { "verdict": "BLOCKED", "intent": { ... }, "findings": [ ... ] },
+  "dns":     { "verdict": "VALID",   "intent": { ... }, "findings": [ ... ] }
+}
+```
+
+### `thn plan` describes intent; it does not apply it
+
+```
+Plan
+  5. service-intent — describe the DHCP and DNS behaviour requested, which this
+     build does not yet apply
+       [none    ] serve addresses on the LAN from 10.77.0.100-10.77.0.250
+       [none    ] serve DNS on the LAN forwarding to 1.1.1.1, 9.9.9.9
+```
+
+These steps carry **no commands**, and that absence is the point. A step
+rendering `systemctl enable dnsmasq` would assert an implementation this build
+does not have. THN does not install dnsmasq, Kea, Unbound or anything else, and
+does not choose between them — the intent layer is deliberately
+implementation-independent, so the plan says what behaviour was requested and
+that it is not yet applied:
+
+```
+Simulation (nothing has been changed)
+  Consequences:
+    - dhcp-intent describes requested behaviour only; nothing is started or
+      configured for it
+    - dns-service-intent describes requested behaviour only; nothing is started
+      or configured for it
+```
+
+### DHCP and DNS changes are content-addressed
+
+The desired-state digest covers both services, so a plan cannot silently
+describe a different machine than the one that was configured:
+
+| Change | Digest |
+|---|---|
+| pool, lease time, router, domain, DHCP enablement | **changes** |
+| upstream resolvers, listen address, DNS enablement | **changes** |
+| same resolvers in a different order | **unchanged** — same machine |
+
+The last row is the reason ordering is normalised: a document listing
+`1.1.1.1, 9.9.9.9` and one listing `9.9.9.9, 1.1.1.1` describe one machine and
+must produce one plan ID.
+
+### M7.3 does not activate anything
+
+This milestone makes the DHCP and DNS *intent* explicit and checkable. It
+starts nothing.
+
+- No DHCP or DNS server is started, and no port is bound.
+- No package is installed, and no backend is chosen.
+- `/etc/resolv.conf` and systemd-resolved are untouched.
+- No nftables rule, route, address or sysctl is changed.
+- `activation.CanApply()` is still `false`.
+- `ProductionDriver.CanApply()` is still `false`.
+- `apply` is still absent from `ImplementedStages()`, and `thn activate` still
+  refuses.
+
+Validation is offline: it resolves no names and contacts no resolver, so a
+CI job with no network reaches the same verdict as one on the gateway. Tests
+assert all of the above, including that `thn validate` and `thn plan` write no
+service configuration to disk.
+
+## QoS / CAKE intent and planning (M7.4)
+
+A home gateway connects a high-speed LAN to an asymmetric, rate-limited broadband
+uplink. When multiple devices transmit at once, bottleneck buffers fill up and
+latency spikes — a problem known as *bufferbloat*. Traffic shaping addresses this
+by enforcing queue discipline on the uplink bottleneck.
+
+### Beginner concepts
+
+- **Download**: Traffic arriving from the Internet to the LAN.
+- **Upload**: Traffic leaving the LAN toward the Internet. Because upstream
+  broadband is typically narrower than downstream, upload is where packet queues
+  most frequently fill.
+- **Traffic shaping**: Regulating the pace and queueing of network traffic so
+  bottleneck links do not saturate their device buffers, preserving interactive
+  latency during large transfers.
+- **qdisc (queue discipline)**: The Linux kernel mechanism that schedules,
+  queues, and shapes packets on a network interface.
+- **CAKE (Common Applications Kept Enhanced)**: A modern, rate-aware queue
+  discipline designed for broadband links. Unlike unshaped disciplines, CAKE
+  shapes traffic toward provisioned rates and spreads bandwidth across flows
+  to eliminate bufferbloat.
+
+### The pipeline
+
+```
+QoS Intent
+    ↓
+Capability Evidence
+    ↓
+Desired QoS
+    ↓
+Plan
+```
+
+QoS intent connects to the logical **WAN role**, never to an arbitrary physical
+device name. The pipeline evaluates the operator's declared bandwidth, checks
+for role conflicts, evaluates capability evidence without mutating the host,
+and feeds into desired state and deterministic planning.
+
+### Existing configuration is reused
+
+```yaml
+qos:
+  enabled: true
+  algorithm: cake
+  interface: wan           # logical role, defaults to WAN
+  download_kbps: 100000    # 100 Mbps
+  upload_kbps: 20000       # 20 Mbps
+  overhead_percent: 10     # framing compensation
+```
+
+QoS defaults to **disabled**. Traffic shaping actively throttles packet flow
+toward configured rates, so enabling it implicitly or with guessed bandwidth
+would risk capping an unconfigured connection.
+
+### Critical distinctions
+
+1. **QoS intent vs observed qdisc**: Intent is what the operator wants. Observed
+   qdisc is what Linux currently has attached. A host running `fq_codel` with
+   an intent requesting `cake` shows a reconciliation difference in the plan,
+   not an overwritten observation.
+2. **CAKE capability vs CAKE intent**: Wanting CAKE does not mean the host has
+   it. An operator may request CAKE on a host where THN has not yet established
+   kernel module availability.
+3. **`unknown` is not `unavailable`**: CAKE is provided by the `sch_cake` kernel
+   module. `tc` being installed does not prove CAKE is usable without attaching
+   a discipline, which is a state-changing mutation. THN **never** mutates the
+   host to test CAKE. Absent non-mutating evidence, CAKE remains `unknown`, and
+   the validation verdict is `PENDING`, never `BLOCKED` or `unavailable`.
+4. **Existing unmanaged qdiscs are not adopted**: An existing qdisc on the WAN
+   remains observed external infrastructure until THN explicitly manages it.
+   It is not silently adopted or removed.
+
+### What `thn validate` reports
+
+```
+QoS intent: PENDING
+  traffic shaping is incomplete: 1 warning(s), nothing blocking
+QoS:      requested
+Algorithm: cake
+Uplink:   wan -> enp0s31f6 [hw:7c6170fd7f34317a]
+Rates:    download (internet to LAN) 100000kbit/s, upload (LAN to internet) 20000kbit/s
+Evidence: unknown — no host observation was taken, so CAKE availability was not established
+
+  Findings:
+    warning  qos-cake-unknown  QoS requested cake, but THN does not have sufficient
+                               evidence to establish cake availability on this host.
+                               No network mutation was performed to test it.
+```
+
+### Stable finding codes
+
+| Code | Meaning |
+|---|---|
+| `qos-disabled` | traffic shaping not requested |
+| `qos-wan-missing` | shaping enabled but no WAN uplink configured |
+| `qos-wan-unresolved` | WAN selector unresolved against a host |
+| `qos-wan-conflict` | shaping bound to LAN or conflicting interface |
+| `qos-rate-missing` | bandwidth rates missing |
+| `qos-rate-invalid` | negative or implausible rate |
+| `qos-rate-zero` | one direction unset / zero |
+| `qos-algorithm-missing` | algorithm not specified |
+| `qos-algorithm-unsupported` | unknown algorithm |
+| `qos-cake-unknown` | CAKE capability unproven without mutation (`PENDING`) |
+| `qos-cake-unavailable` | CAKE capability confirmed unavailable (`BLOCKED`) |
+| `qos-existing-qdisc-unmanaged` | existing qdisc observed on link |
+
+### JSON exposes QoS
+
+`--json` on `thn validate` and `thn plan` exposes `qos` alongside `gateway`,
+`dhcp`, and `dns`:
+
+```json
+{
+  "valid": true,
+  "gateway": { "verdict": "VALID", ... },
+  "dhcp":    { "verdict": "VALID", ... },
+  "dns":     { "verdict": "VALID", ... },
+  "qos":     {
+    "verdict": "PENDING",
+    "intent": { "enabled": true, "algorithm": "cake", ... },
+    "findings": [ ... ]
+  }
+}
+```
+
+### `thn plan` describes intent without fake commands
+
+Planning describes the requested shaping policy and prerequisite status. It does
+**not** invent implementation commands:
+- No `tc qdisc add`, `tc qdisc replace`, or `tc qdisc del`.
+- No `modprobe sch_cake`.
+- No `systemctl` or package manager commands.
+
+```
+Plan
+  5. services — describe the DHCP, DNS and QoS behaviour requested
+       [none    ] shape the wan with cake at 100000/20000 kbit/s
+```
+
+The step carries `Commands: nil` and `Reversible: "not-applied"`.
+
+### Desired-state digest
+
+QoS intent is content-addressed in the desired digest:
+- Changing rates, algorithm, enablement, stable WAN ID, or overhead changes
+  the desired digest and plan ID.
+- Observed disciplines and capability evidence describe the host and are
+  deliberately excluded from the desired digest, keeping plan identity pure.
+
+### M7.4 safety invariants
+
+- No `tc` mutation.
+- No kernel module loading (`modprobe`).
+- No service installation or startup.
+- `activation.CanApply() == false`.
+- `ProductionDriver.CanApply() == false`.
+- `ImplementedStages()` excludes `StageApply`.
+
 ## Diagnosing an unknown
 
 An `unknown` with no reason is the least useful thing a diagnostic tool can

@@ -191,6 +191,18 @@ func (s Severity) rank() int {
 type Finding struct {
 	// Field is the dotted path of the offending setting.
 	Field string `json:"field"`
+
+	// Code is the stable, machine-readable reason.
+	//
+	// Field alone cannot separate the upstream findings from one another:
+	// "upstream[0]" is produced by an unparseable address, an unspecified
+	// address and a loopback address, which are different mistakes with
+	// different fixes. The code is the vocabulary a consumer dispatches on;
+	// Message is free to be reworded.
+	//
+	// Empty where this package has not yet classified the finding.
+	Code string `json:"code,omitempty"`
+
 	// Severity classifies the finding.
 	Severity Severity `json:"severity"`
 	// Message describes the problem.
@@ -211,19 +223,88 @@ type Result struct {
 	InfoCount    int `json:"info_count"`
 }
 
+// Finding codes.
+//
+// These are the stable, machine-readable reasons a DNS intent is not
+// satisfied. They are a vocabulary, not sentences.
+const (
+	// CodeDisabled means the document does not ask for a DNS service.
+	CodeDisabled = "dns-disabled"
+
+	// CodeLANMissing means DNS was requested with no LAN to serve.
+	CodeLANMissing = "dns-lan-missing"
+
+	// CodeLANUnresolved means the LAN role is written down but matches no
+	// observed interface.
+	CodeLANUnresolved = "dns-lan-unresolved"
+
+	// CodeLANAddressMissing means DNS was requested but the LAN has no
+	// address to listen on.
+	CodeLANAddressMissing = "dns-lan-address-missing"
+
+	// CodeUpstreamMissing means DNS is enabled with no resolver to forward
+	// to, so every query would fail.
+	CodeUpstreamMissing = "dns-upstream-missing"
+
+	// CodeUpstreamInvalid means a named resolver cannot be one.
+	CodeUpstreamInvalid = "dns-upstream-invalid"
+
+	// CodeUpstreamDuplicate means the same resolver is listed more than
+	// once.
+	CodeUpstreamDuplicate = "dns-upstream-duplicate"
+
+	// CodeUpstreamConflict means dns.upstream and network.dns were both
+	// declared and disagree.
+	//
+	// Both are authoritative and both name resolvers, so a document that
+	// disagrees with itself has no single answer to use. Preferring one
+	// silently is what made this invisible before: editing dns.upstream did
+	// nothing and said nothing.
+	CodeUpstreamConflict = "dns-upstream-conflict"
+
+	// CodeCacheInvalid means the cache size cannot be honoured.
+	CodeCacheInvalid = "dns-cache-invalid"
+
+	// CodeDomainInvalid means the local domain is not a DNS name.
+	CodeDomainInvalid = "dns-domain-invalid"
+
+	// CodeRecordInvalid means a local record cannot be served.
+	CodeRecordInvalid = "dns-record-invalid"
+)
+
 // add appends a finding.
 func (r *Result) add(field string, sev Severity, msg, hint string) {
 	r.Findings = append(r.Findings, Finding{Field: field, Severity: sev, Message: msg, Hint: hint})
 }
 
+// addC appends a finding carrying a stable classification code.
+func (r *Result) addC(code, field string, sev Severity, msg, hint string) {
+	r.Findings = append(r.Findings, Finding{Field: field, Code: code, Severity: sev, Message: msg, Hint: hint})
+}
+
 // errorf appends an error finding.
 func (r *Result) errorf(field, msg, hint string) { r.add(field, SeverityError, msg, hint) }
+
+// errorc appends an error finding carrying a stable classification code.
+func (r *Result) errorc(code, field, msg, hint string) {
+	r.addC(code, field, SeverityError, msg, hint)
+}
 
 // warnf appends a warning finding.
 func (r *Result) warnf(field, msg, hint string) { r.add(field, SeverityWarning, msg, hint) }
 
+// warnc appends a warning finding carrying a stable classification code.
+func (r *Result) warnc(code, field, msg, hint string) {
+	r.addC(code, field, SeverityWarning, msg, hint)
+}
+
 // infof appends an informational finding.
 func (r *Result) infof(field, msg, hint string) { r.add(field, SeverityInfo, msg, hint) }
+
+// infoc appends an informational finding carrying a stable classification code.
+func (r *Result) infoc(code, field, msg, hint string) {
+	r.addC(code, field, SeverityInfo, msg, hint)
+}
 
 // finalise counts, sorts and sets Valid.
 func (r *Result) finalise() {
@@ -266,7 +347,7 @@ func Validate(p Policy) Result {
 	var r Result
 
 	if !p.Enabled {
-		r.infof("enabled",
+		r.infoc(CodeDisabled, "enabled",
 			"DNS is disabled; clients would have to be pointed at an external resolver", "")
 		r.finalise()
 		return r
@@ -276,59 +357,74 @@ func Validate(p Policy) Result {
 	// starts happily and answers nothing, and the LAN appears to have a
 	// working network that cannot resolve anything.
 	if len(p.Upstream) == 0 {
-		r.errorf("upstream",
+		r.errorc(CodeUpstreamMissing, "upstream",
 			"no upstream resolvers are configured, so every query would fail",
 			"set dns.upstream to at least one resolver")
 	}
 
+	// seen lets a repeated resolver be reported rather than silently
+	// forwarded to twice. It is not an error: listing 1.1.1.1 twice is a
+	// harmless typo, not a broken network. But it is worth saying, because
+	// the operator almost certainly meant to list a second resolver.
+	seen := make(map[netip.Addr]int, len(p.Upstream))
+
 	for i, u := range p.Upstream {
 		field := fmt.Sprintf("upstream[%d]", i)
 
+		if u.IsValid() {
+			if prev, dup := seen[u]; dup {
+				r.warnc(CodeUpstreamDuplicate, field,
+					fmt.Sprintf("resolver %s is already listed at index %d", u, prev),
+					"list each resolver once; a duplicate is forwarded to twice")
+			}
+			seen[u] = i
+		}
+
 		switch {
 		case !u.IsValid():
-			r.errorf(field, "the resolver address is not valid", "")
+			r.errorc(CodeUpstreamInvalid, field, "the resolver address is not valid", "")
 		case u.IsUnspecified():
-			r.errorf(field,
+			r.errorc(CodeUpstreamInvalid, field,
 				"the unspecified address is not a resolver",
 				"use a real resolver such as 1.1.1.1")
 		case u.IsMulticast():
-			r.errorf(field, "a multicast address is not a resolver", "")
+			r.errorc(CodeUpstreamInvalid, field, "a multicast address is not a resolver", "")
 		case u.IsLoopback():
 			// Pointing dnsmasq at itself creates a forwarding loop that
 			// presents as every query timing out.
-			r.errorf(field,
+			r.errorc(CodeUpstreamInvalid, field,
 				fmt.Sprintf("resolver %s is a loopback address, which would forward queries to itself", u),
 				"point at an external resolver, or omit upstream entirely to serve only local names")
 		case u.IsPrivate():
 			// Not fatal: a resolver on the LAN is a legitimate design, such
 			// as a Pi-hole. But it deserves a warning because it is usually a
 			// typo when the gateway itself is meant to be the resolver.
-			r.warnf(field,
+			r.warnc(CodeUpstreamInvalid, field,
 				fmt.Sprintf("resolver %s is a private address; THN will forward queries to the LAN", u),
 				"that is correct only if another host on the LAN is intended to serve DNS")
 		case u.IsLinkLocalUnicast():
-			r.warnf(field,
+			r.warnc(CodeUpstreamInvalid, field,
 				fmt.Sprintf("resolver %s is a link-local address with a limited lifetime", u), "")
 		}
 	}
 
 	if p.CacheSize < 0 {
-		r.errorf("cache_size", "the cache size must not be negative", "use 0 for the backend default")
+		r.errorc(CodeCacheInvalid, "cache_size", "the cache size must not be negative", "use 0 for the backend default")
 	} else if p.CacheSize > 0 && p.CacheSize < 100 {
-		r.warnf("cache_size",
+		r.warnc(CodeCacheInvalid, "cache_size",
 			fmt.Sprintf("a cache of %d answers is very small and will miss constantly", p.CacheSize),
 			"1000 is a reasonable starting point")
 	}
 
 	if p.LocalDomain != "" && strings.ContainsAny(p.LocalDomain, " \t/:") {
-		r.errorf("local_domain",
+		r.errorc(CodeDomainInvalid, "local_domain",
 			fmt.Sprintf("the local domain %q contains characters a DNS name cannot", p.LocalDomain), "")
 	}
 
 	validateRecords(&r, p)
 
 	if p.LogQueries {
-		r.infof("log_queries",
+		r.infoc(CodeCacheInvalid, "log_queries",
 			"query logging is enabled; this writes to disk continuously and is the fastest way to fill a small filesystem",
 			"keep it on only while investigating")
 	}
@@ -345,18 +441,18 @@ func validateRecords(r *Result, p Policy) {
 		field := fmt.Sprintf("local_records[%d]", i)
 
 		if rec.Hostname == "" {
-			r.errorf(field+".hostname", "the record needs a hostname", "")
+			r.errorc(CodeRecordInvalid, field+".hostname", "the record needs a hostname", "")
 			continue
 		}
 
 		if !isValidLabel(rec.Hostname) {
-			r.errorf(field+".hostname",
+			r.errorc(CodeRecordInvalid, field+".hostname",
 				fmt.Sprintf("%q is not a valid DNS label", rec.Hostname),
 				"use letters, digits and dashes; it must start with a letter or digit")
 		}
 
 		if prev, dup := seen[rec.Hostname]; dup {
-			r.errorf(field+".hostname",
+			r.errorc(CodeRecordInvalid, field+".hostname",
 				fmt.Sprintf("the name %q is already defined at index %d", rec.Hostname, prev),
 				"a name may only resolve one way; add the address as an alias instead")
 		}
@@ -364,22 +460,22 @@ func validateRecords(r *Result, p Policy) {
 
 		switch {
 		case !rec.Address.IsValid():
-			r.errorf(field+".address", "the record needs a valid address", "")
+			r.errorc(CodeRecordInvalid, field+".address", "the record needs a valid address", "")
 		case rec.Address.IsUnspecified():
-			r.errorf(field+".address",
+			r.errorc(CodeRecordInvalid, field+".address",
 				"a record pointing at the unspecified address would answer with 0.0.0.0",
 				"use the address of the host this name refers to")
 		case rec.Address.IsMulticast():
-			r.errorf(field+".address", "a record must not point at a multicast address", "")
+			r.errorc(CodeRecordInvalid, field+".address", "a record must not point at a multicast address", "")
 		}
 
 		for j, alias := range rec.Aliases {
 			if alias == rec.Hostname {
-				r.warnf(fmt.Sprintf("%s.aliases[%d]", field, j),
+				r.warnc(CodeRecordInvalid, fmt.Sprintf("%s.aliases[%d]", field, j),
 					fmt.Sprintf("the alias %q repeats the record's own name", alias), "")
 			}
 			if !isValidLabel(alias) {
-				r.errorf(fmt.Sprintf("%s.aliases[%d]", field, j),
+				r.errorc(CodeRecordInvalid, fmt.Sprintf("%s.aliases[%d]", field, j),
 					fmt.Sprintf("%q is not a valid DNS label", alias), "")
 			}
 		}

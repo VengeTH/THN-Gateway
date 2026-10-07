@@ -561,6 +561,7 @@ func qosFindings(in []qos.Finding) []findingView {
 		out = append(out, findingView{
 			severity: string(f.Severity),
 			field:    f.Field,
+			code:     f.Code,
 			message:  f.Message,
 			hint:     f.Hint,
 		})

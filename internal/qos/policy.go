@@ -284,6 +284,14 @@ type Selection struct {
 	// Available reports whether the requested algorithm was usable.
 	Available bool `json:"requested_available"`
 
+	// Uncertain reports that THN could not establish availability either way.
+	//
+	// This is the field that stops "unknown" being silently converted into
+	// "unavailable". When it is set, Algorithm still names what WOULD be
+	// rendered, but the caller must not read that as a statement about the
+	// host: it is what THN would do if the capability turned out to exist.
+	Uncertain bool `json:"uncertain"`
+
 	// Reason explains a fallback, or "" when the request was met.
 	Reason string `json:"fallback_reason,omitempty"`
 
@@ -300,7 +308,24 @@ type Selection struct {
 // available is the set of algorithms the kernel supports. An empty set means
 // nothing was detected, which is treated as "no shaping available" rather than
 // "everything available".
+//
+// The caveat is in the second half of that sentence, and it is the rule M7.4
+// exists to enforce. "Nothing was detected" and "nobody looked" are different
+// states, so a caller that did not establish the set must mark it unknown —
+// see Availability.Confidence — and the selection comes back Uncertain rather
+// than reporting the requested algorithm as unavailable.
 func Select(p Policy, available map[Algorithm]bool) Selection {
+	return SelectWithConfidence(p, available, "")
+}
+
+// SelectWithConfidence is Select with an explicit statement of how firmly the
+// set was established.
+//
+// It exists so a caller that genuinely does not know does not have to
+// fabricate an empty set to say so.
+func SelectWithConfidence(p Policy, available map[Algorithm]bool, confidence string) Selection {
+	unknown := confidence == ConfidenceUnknown
+
 	requested := p.Algorithm
 	if requested == "" {
 		requested = AlgorithmCake
@@ -312,6 +337,24 @@ func Select(p Policy, available map[Algorithm]bool) Selection {
 	if available[requested] {
 		s.Algorithm = requested
 		s.Available = true
+		return s
+	}
+
+	// The requested algorithm was not found in the set.
+	//
+	// Before concluding anything about that, ask how firmly the set was
+	// established. An availability nobody determined is not an availability
+	// that came back empty, and treating them alike is how "THN did not
+	// check" becomes "this kernel cannot do it".
+	//
+	// The requested algorithm is reported as Uncertain rather than absent, so
+	// the caller can render a plan that is explicitly provisional instead of
+	// one that silently downgrades the operator's request.
+	if unknown {
+		s.Algorithm = requested
+		s.Uncertain = true
+		s.Reason = fmt.Sprintf("%s availability was not established; THN cannot confirm or deny it "+
+			"without modifying the host, and did not", requested)
 		return s
 	}
 
@@ -354,6 +397,43 @@ type Availability struct {
 
 	// Error records why detection failed, if it did.
 	Error string `json:"error,omitempty"`
+
+	// Confidence records how firmly the algorithm set was established:
+	// "observed" or "unknown".
+	//
+	// This is load-bearing rather than decorative. An empty or empty-map
+	// Availability produced by "nothing was detected" and an Availability
+	// produced by "nobody asked" mean opposite things, and treating them alike
+	// reports a host as incapable on the strength of THN's own restraint.
+	//
+	// When it is "unknown", Select must NOT conclude that an algorithm is
+	// unavailable. It reports the uncertainty instead, which is the difference
+	// between "the kernel cannot do this" and "THN did not find out".
+	//
+	// It is a string rather than an enum so this package stays free of a
+	// dependency on internal/host, which owns the canonical vocabulary.
+	Confidence string `json:"confidence,omitempty"`
+}
+
+// Availability confidence values.
+//
+// They mirror internal/host's Confidence vocabulary without importing it.
+const (
+	// ConfidenceObserved means THN asked the host and got an answer.
+	ConfidenceObserved = "observed"
+
+	// ConfidenceUnknown means THN could not determine it without mutating the
+	// host, so it did not try.
+	ConfidenceUnknown = "unknown"
+)
+
+// IsUnknown reports whether the availability set was never established.
+//
+// An availability that is empty AND unknown is the "nobody asked" case. An
+// availability that is empty and observed is "the host has nothing", and
+// those two must not collapse.
+func (a Availability) IsUnknown() bool {
+	return a.Confidence == ConfidenceUnknown
 }
 
 // Supports reports whether an algorithm is available.

@@ -30,6 +30,7 @@ import (
 
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/venth/thn-gateway/internal/dns"
 	"github.com/venth/thn-gateway/internal/schema"
 )
 
@@ -425,8 +426,13 @@ func validateCoherence(r *Result, cfg config.Config) {
 	// This check exists because the disagreement used to be invisible:
 	// dns.upstream was never read at all, so editing it changed nothing and
 	// nothing said so.
-	if len(cfg.DNS.Upstream) > 0 && len(cfg.Network.DNS) > 0 {
-		if sameResolverList(cfg.DNS.Upstream, cfg.Network.DNS) {
+	//
+	// The rule itself now lives in dns.ResolveUpstream, alongside the DNS
+	// intent that consumes it. Re-deriving it here would mean two answers to
+	// "which field wins", and the one printed beside the other would be
+	// whichever disagreed.
+	if dec := dns.ResolveUpstream(cfg.DNS.Upstream, cfg.Network.DNS); dec.BothDeclared {
+		if dec.Agree {
 			r.warnf(LayerStatic, "dns.upstream",
 				"resolvers are listed twice, as dns.upstream and network.dns; "+
 					"they agree today, but one of them should be removed",
@@ -581,27 +587,6 @@ func Combined(cfg config.Config, obs *diff.Observed, d diff.Result) Result {
 	}
 	merged.finalise()
 	return merged
-}
-
-// sameResolverList reports whether two resolver lists name the same set.
-//
-// Order is not significant: a document that lists the same resolvers in a
-// different order has not disagreed with itself.
-func sameResolverList(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := make(map[string]int, len(a))
-	for _, s := range a {
-		seen[s]++
-	}
-	for _, s := range b {
-		seen[s]--
-		if seen[s] < 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // checkInterfaceName returns a message when an interface name is implausible.

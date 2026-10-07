@@ -38,6 +38,7 @@ import (
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/host"
+	"github.com/venth/thn-gateway/internal/qos"
 )
 
 // Action classifies the reconciliation operation on a resource.
@@ -76,6 +77,7 @@ var phases = []Phase{
 	{Number: 2, Name: "forwarding", Purpose: "enable kernel forwarding, required before any traffic can be routed"},
 	{Number: 3, Name: "services", Purpose: "apply NAT, firewall and shaping, which translate and filter the traffic forwarding will carry"},
 	{Number: 4, Name: "housekeeping", Purpose: "apply resolvers, which affect name resolution rather than connectivity"},
+	{Number: 5, Name: "service-intent", Purpose: "describe the DHCP and DNS behaviour requested, which this build does not yet apply"},
 }
 
 // Phases returns a copy of the phase table.
@@ -319,6 +321,20 @@ func Build(d diff.Result, opts Options) *Plan {
 	p.Blocked = d.ByKind(diff.KindBlocked)
 	p.Pending = d.ByKind(diff.KindPending)
 
+	// DHCP and DNS intent is appended as DESCRIBED state, not as drift.
+	//
+	// These steps come from the document, not from a comparison against the
+	// host: THN does not observe a DHCP or DNS service, so there is no
+	// observed-vs-desired comparison to make and no drift to report. Adding
+	// them here is what lets `thn plan` answer "what would this machine hand
+	// out, and to whom" without pretending it can already do it.
+	//
+	// They carry no commands on purpose. A step whose Commands field contained
+	// "systemctl enable dnsmasq" would assert that an implementation exists,
+	// and nothing in this build starts or configures a service. The step says
+	// the behaviour is desired and is not yet applied, which is the truth.
+	p.Steps = append(p.Steps, serviceIntentSteps(opts.Desired, opts.Device)...)
+
 	p.ManagedResources, p.UnmanagedResources = identifyResources(opts)
 	p.Preconditions = buildPreconditions(opts, d, p.Inputs)
 	p.Transaction = buildTransaction(p.Steps, p.Blocked, opts.Generation)
@@ -373,10 +389,69 @@ func ComputeDesiredDigest(des desired.State) string {
 	sort.Strings(sortNAT)
 	fmt.Fprintf(h, "nat=%t:%t:%s;", des.NAT.Enabled, des.NAT.Resolved, strings.Join(sortNAT, ","))
 	fmt.Fprintf(h, "fw=%t:%s:%s:%t:%t;", des.Firewall.Enabled, des.Firewall.Backend, des.Firewall.DefaultInboundPolicy, des.Firewall.AllowEstablished, des.Firewall.AllowLoopback)
-	fmt.Fprintf(h, "qos=%t:%t:%s:%s:%d:%d;", des.QoS.Enabled, des.QoS.Resolved, des.QoS.Algorithm, des.QoS.Interface, des.QoS.DownloadKbps, des.QoS.UploadKbps)
+	fmt.Fprintf(h, "qos=%t:%t:%s:%s:%d:%d;",
+		des.QoS.Enabled, des.QoS.Resolved, des.QoS.Algorithm,
+		des.QoS.Interface, des.QoS.DownloadKbps, des.QoS.UploadKbps)
+
+	// M7.4 extends the QoS content address with the role, the stable identity
+	// and the overhead compensation.
+	//
+	// Each is asked-for information rather than an observation, which is the
+	// rule this function follows throughout: the desired digest must be the
+	// same on two machines given the same document. A rate, an algorithm and
+	// a link are all choices someone made.
+	//
+	// Capability and the observed qdiscs are deliberately ABSENT. Both describe
+	// the host rather than the request, and including them would mean a plan
+	// generated on a machine with CAKE had a different identity from the same
+	// plan generated on a machine without — which would break content
+	// addressing for the one class of information where it is least useful.
+	// They belong to the observed digest, and they are rendered into the QoS
+	// plan step where an operator can act on them.
+	fmt.Fprintf(h, "qosrole=%s:%s:%d;",
+		des.QoS.Role, des.QoS.StableID, des.QoS.OverheadPercent)
 	sortDNS := append([]string(nil), des.DNS.Servers...)
 	sort.Strings(sortDNS)
 	fmt.Fprintf(h, "dns=%t:%s;", des.DNS.Present, strings.Join(sortDNS, ","))
+
+	// The DNS SERVICE is content-addressed separately from the host's own
+	// resolver set, because they are separate decisions. Without this, a
+	// document that turned the service on, moved its listen address or
+	// changed its upstream resolvers would produce the same desired digest
+	// and therefore the same plan ID as one that did not.
+	//
+	// Every collection is sorted, so two documents listing the same
+	// resolvers in a different order describe the same machine and must not
+	// produce two different digests.
+	svc := des.DNS.Service
+	sortSvcUpstream := append([]string(nil), svc.Upstream...)
+	sort.Strings(sortSvcUpstream)
+	fmt.Fprintf(h, "dnssvc=%t:%s:%s:%s:%s:%t:%s:%s;",
+		svc.Enabled, svc.LANSelector, svc.Interface, svc.StableID,
+		svc.ListenAddress, svc.Resolved, strings.Join(sortSvcUpstream, ","),
+		svc.LocalDomain)
+	// The upstream source is part of the identity: a document that resolves
+	// the same resolver set through dns.upstream and one that does so through
+	// network.dns are different documents, and the milestone's whole point is
+	// that the difference is visible rather than silently absorbed.
+	fmt.Fprintf(h, "dnssrc=%s;", svc.UpstreamSource)
+
+	// DHCP intent is content-addressed too: changing a pool, the advertised
+	// router, the lease time or whether DHCP is wanted at all all change what
+	// clients would be given, so all of it changes the digest.
+	//
+	// Ranges keep declaration order. Reordering two disjoint pools describes
+	// the same set of addresses, but the order is the operator's written
+	// intent and sorting would hide an edit that is otherwise invisible.
+	d := des.DHCP
+	fmt.Fprintf(h, "dhcp=%t:%s:%s:%s:%s:%s:%s:%t:%t:%s;",
+		d.Enabled, d.LANSelector, d.Interface, d.StableID,
+		d.Subnet, d.Router, strings.Join(d.Ranges, ","),
+		d.Authoritative, d.Resolved, d.LeaseTime)
+	sortAdvDNS := append([]string(nil), d.AdvertisedDNS...)
+	sort.Strings(sortAdvDNS)
+	fmt.Fprintf(h, "dhcpdns=%s;dhcpdomain=%s;", strings.Join(sortAdvDNS, ","), d.Domain)
+
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -777,9 +852,326 @@ func phaseFor(subsystem string) Phase {
 		return phasesTable()[1]
 	case "nftables", "qdisc":
 		return phasesTable()[2]
+	case "dhcp", "dns":
+		return phasesTable()[4]
 	default:
 		return phasesTable()[3]
 	}
+}
+
+// serviceIntentSteps describes the requested DHCP and DNS behaviour.
+//
+// # Why these are steps rather than drift
+//
+// Every other step in a plan answers "the host differs from what was asked
+// for". These answer "what was asked for" on its own. THN observes
+// interfaces, addresses, routes, forwarding and firewall rules; it does not
+// observe a running DHCP or DNS service, so there is no observed value to
+// compare against and no drift to synthesise. Emitting them keeps `thn plan`
+// able to show the whole intent in one place.
+//
+// # Why they carry no commands
+//
+// A step normally renders the commands that would enact it. These do not,
+// and that absence is deliberate rather than an omission: this build does not
+// start, configure or install a DHCP or DNS service, so rendering
+// "systemctl enable dnsmasq" would describe an implementation that does not
+// exist. The step instead says the behaviour is desired and is not yet
+// applied, which is both true and checkable.
+//
+// The identity used in Target is the stable interface ID where one is known,
+// so a plan generated after a NIC moves slots still refers to the same link.
+func serviceIntentSteps(des desired.State, dev *host.Device) []Step {
+	var out []Step
+
+	if des.DHCP.Enabled {
+		out = append(out, dhcpIntentStep(des.DHCP))
+	}
+	if des.DNS.Service.Enabled {
+		out = append(out, dnsServiceIntentStep(des.DNS.Service))
+	}
+	if des.QoS.Enabled {
+		out = append(out, qosIntentStep(des.QoS, dev))
+	}
+
+	return out
+}
+
+// qosIntentStep describes the requested shaping policy.
+//
+// # Why capability is read here and not from desired state
+//
+// Capability is an OBSERVED fact about this host, not something the operator
+// asked for, so it is read from the device rather than carried in
+// desired.State. Putting it in the desired state would make the desired digest
+// depend on which machine produced it, and two identical configurations on two
+// different hosts would stop being the same machine — which is exactly the
+// property the digest exists to preserve.
+//
+// The same reasoning keeps observed qdiscs out of it. They describe the host,
+// not the request, and they already belong to the observed digest.
+//
+// # Why this is separate from qdisc drift
+//
+// internal/diff already compares the observed qdisc against the desired one and
+// emits qos-absent or qos-algorithm when they differ. Those changes describe
+// drift: the host does not match the document.
+//
+// This step describes the document itself, and it exists for the case the diff
+// cannot express. When CAKE capability is unknown the desired policy is
+// perfectly coherent and there is nothing to compare against — the host has
+// not been asked and must not be. Without this step a plan would show no QoS at
+// all in that state, and an operator would conclude THN had ignored their
+// configuration.
+//
+// # Why it carries no commands
+//
+// There is no production QoS applier. A step rendering "tc qdisc replace …"
+// would assert an implementation this build does not have, exactly as
+// systemctl enable dnsmasq would in M7.3. The step states the policy and, when
+// the capability is unresolved, says which prerequisite is outstanding.
+func qosIntentStep(d desired.QoS, dev *host.Device) Step {
+	phase := phasesTable()[4]
+
+	cap := qos.CakeCapability(dev)
+	observed := observedQdiscKinds(dev)
+
+	summary := fmt.Sprintf("shape the %s with %s at %d/%d kbit/s",
+		orNoneLabel(d.Role, d.Interface), orNoneLabel(d.Algorithm, "(no algorithm)"),
+		d.DownloadKbps, d.UploadKbps)
+
+	reason := "the document asks for traffic shaping on the uplink; " +
+		"no qdisc is attached, changed or removed by this build"
+
+	// An unresolved capability is reported on the step rather than only in the
+	// findings, because the plan is where an operator asks "what is left to
+	// do?" and the honest answer is "confirm the kernel provides this".
+	switch string(cap.State) {
+	case string(qos.CapabilityUnknown):
+		reason = "the document asks for traffic shaping, but THN does not have sufficient " +
+			"evidence that " + orNoneLabel(d.Algorithm, "this algorithm") + " can be used here; " +
+			"no network mutation was performed to find out"
+	case string(qos.CapabilityUnavailable):
+		reason = "the document asks for traffic shaping, but THN has evidence that " +
+			orNoneLabel(d.Algorithm, "this algorithm") + " cannot be used on this host"
+	}
+
+	target := serviceTarget(d.Role, d.Interface, d.StableID)
+	if target == "" {
+		target = "qos:" + orNoneLabel(d.Role, "wan")
+	}
+
+	return Step{
+		ID:           "qos-intent",
+		Action:       qosAction(d.Algorithm, observed),
+		Target:       target,
+		Phase:        phase.Number,
+		PhaseName:    phase.Name,
+		Subsystem:    "qos",
+		Field:        "qos.enabled",
+		Risk:         diff.RiskNone,
+		Summary:      summary,
+		Reason:       reason,
+		Current:      currentQdiscText(observed),
+		Desired:      qosDesiredText(d, cap),
+		Commands:     nil,
+		RequiresRoot: false,
+		Disruptive:   false,
+		Reversible:   "not-applied",
+	}
+}
+
+// observedQdiscKinds lists the disciplines currently attached.
+//
+// Pure observation. Nothing here is adopted or removed: THN reads qdiscs and
+// reports them, and ownership is a separate question this milestone
+// deliberately does not answer.
+func observedQdiscKinds(dev *host.Device) []string {
+	if dev == nil {
+		return nil
+	}
+	out := make([]string, 0, len(dev.TrafficControl.Qdiscs))
+	for _, q := range dev.TrafficControl.Qdiscs {
+		if q.Kind != "" {
+			out = append(out, q.Kind)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// qosAction classifies the step as a no-op or an update.
+//
+// A host already carrying the requested discipline is a NOOP: the desired state
+// is satisfied, and reporting it as work to do would teach operators to ignore
+// the plan. Anything else is an UPDATE, because the document asks for a policy
+// the host does not currently have.
+//
+// The observed disciplines are observation only. THN does not adopt them, so
+// "fq_codel is attached" is never a reason to claim the job is done.
+func qosAction(algorithm string, observed []string) Action {
+	if len(observed) == 1 && strings.EqualFold(observed[0], algorithm) {
+		return ActionNoop
+	}
+	return ActionUpdate
+}
+
+// currentQdiscText renders what is attached now.
+func currentQdiscText(observed []string) string {
+	if len(observed) == 0 {
+		return "(no queue discipline observed)"
+	}
+	return strings.Join(observed, ", ") + " (observed, not adopted by THN)"
+}
+
+// qosDesiredText renders the desired shaping policy for a step.
+func qosDesiredText(d desired.QoS, cap qos.Evidence) string {
+	parts := []string{
+		"enabled",
+		"algorithm=" + orNoneLabel(d.Algorithm, "(none)"),
+		"role=" + orNoneLabel(d.Role, "(unset)"),
+	}
+	if d.DownloadKbps > 0 || d.UploadKbps > 0 {
+		parts = append(parts, fmt.Sprintf("download=%dkbit/s upload=%dkbit/s", d.DownloadKbps, d.UploadKbps))
+	}
+	// The capability verdict is rendered into the step because it is the
+	// prerequisite an operator has to resolve. It is deliberately not in the
+	// desired digest: it describes this host, not the request.
+	parts = append(parts, "capability="+string(cap.State))
+	return strings.Join(parts, " ")
+}
+
+// orNoneLabel renders an empty string as an explicit label.
+func orNoneLabel(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+// dhcpIntentStep describes the requested DHCP behaviour.
+func dhcpIntentStep(d desired.DHCP) Step {
+	phase := phasesTable()[4]
+
+	summary := "serve addresses on the LAN"
+	if len(d.Ranges) > 0 {
+		summary += " from " + strings.Join(d.Ranges, ", ")
+	}
+
+	reason := "the document asks for DHCP on the LAN; no address service is started or configured by this build"
+	if !d.Resolved {
+		reason = "the document asks for DHCP but the LAN or its address pool is not yet determined, so no pool can be planned"
+	}
+
+	target := serviceTarget(d.LANSelector, d.Interface, d.StableID)
+	if target == "" {
+		target = "dhcp:lan"
+	}
+
+	return Step{
+		ID:        "dhcp-intent",
+		Action:    ActionCreate,
+		Target:    target,
+		Phase:     phase.Number,
+		PhaseName: phase.Name,
+		Subsystem: "dhcp",
+		Field:     "dhcp.enabled",
+		Risk:      diff.RiskNone,
+		Summary:   summary,
+		Reason:    reason,
+		Current:   "(no DHCP service is applied by this build)",
+		Desired:   dhcpDesiredText(d),
+		// Deliberately empty. See the function comment.
+		Commands:     nil,
+		RequiresRoot: false,
+		Disruptive:   false,
+		Reversible:   "not-applied",
+	}
+}
+
+// dnsServiceIntentStep describes the requested DNS behaviour.
+func dnsServiceIntentStep(s desired.DNSService) Step {
+	phase := phasesTable()[4]
+
+	summary := "serve DNS on the LAN"
+	if len(s.Upstream) > 0 {
+		summary += " forwarding to " + strings.Join(s.Upstream, ", ")
+	}
+
+	reason := "the document asks for a DNS service on the LAN; no resolver is started or configured by this build"
+	if !s.Resolved {
+		reason = "the document asks for DNS but the LAN or its listen address is not yet determined, so no resolver can be planned"
+	}
+
+	target := serviceTarget(s.LANSelector, s.Interface, s.StableID)
+	if target == "" {
+		target = "dns:lan"
+	}
+
+	return Step{
+		ID:           "dns-service-intent",
+		Action:       ActionCreate,
+		Target:       target,
+		Phase:        phase.Number,
+		PhaseName:    phase.Name,
+		Subsystem:    "dns",
+		Field:        "dns.enabled",
+		Risk:         diff.RiskNone,
+		Summary:      summary,
+		Reason:       reason,
+		Current:      "(no DNS service is applied by this build)",
+		Desired:      dnsDesiredText(s),
+		Commands:     nil,
+		RequiresRoot: false,
+		Disruptive:   false,
+		Reversible:   "not-applied",
+	}
+}
+
+// serviceTarget builds a stable identity for a service step.
+//
+// The stable ID is preferred over the kernel name so that a plan generated
+// before and after a NIC moves slots refers to the same link. Falls back to
+// the selector, which is what the document actually wrote.
+func serviceTarget(selector, iface, stableID string) string {
+	switch {
+	case stableID != "":
+		return stableID
+	case selector != "":
+		return selector
+	default:
+		return iface
+	}
+}
+
+// dhcpDesiredText renders the desired DHCP state for a step's Desired field.
+func dhcpDesiredText(d desired.DHCP) string {
+	parts := []string{"enabled"}
+	if d.Subnet != "" {
+		parts = append(parts, "lan="+d.Subnet)
+	}
+	if len(d.Ranges) > 0 {
+		parts = append(parts, "range="+strings.Join(d.Ranges, ","))
+	}
+	if d.Router != "" {
+		parts = append(parts, "router="+d.Router)
+	}
+	return strings.Join(parts, " ")
+}
+
+// dnsDesiredText renders the desired DNS state for a step's Desired field.
+func dnsDesiredText(s desired.DNSService) string {
+	parts := []string{"enabled"}
+	if s.ListenAddress != "" {
+		parts = append(parts, "listen="+s.ListenAddress)
+	}
+	if len(s.Upstream) > 0 {
+		parts = append(parts, "upstream="+strings.Join(s.Upstream, ","))
+	}
+	if s.UpstreamSource != "" {
+		parts = append(parts, "source="+s.UpstreamSource)
+	}
+	return strings.Join(parts, " ")
 }
 
 // summaryFor renders a one-line description of a change.
@@ -1015,6 +1407,15 @@ func (p *Plan) simulate() {
 	sim := Simulation{}
 
 	for _, s := range p.Steps {
+		// A declared service intent is not something that WOULD be applied:
+		// this build has no implementation to apply it with. Counting it as
+		// a pending action would tell the operator a DHCP or DNS service
+		// would start, which is the one claim this milestone must not make.
+		if s.Reversible == "not-applied" {
+			sim.Consequences = append(sim.Consequences,
+				fmt.Sprintf("%s describes requested behaviour only; nothing is started or configured for it", s.ID))
+			continue
+		}
 		sim.WouldApply = append(sim.WouldApply, s.Summary)
 	}
 	for _, c := range p.Pending {
@@ -1097,11 +1498,27 @@ func (p *Plan) simulate() {
 		sim.Headline = fmt.Sprintf("%d change(s) would be made, none of which interrupt connectivity", len(sim.WouldApply))
 	case len(sim.Pending) > 0:
 		sim.Headline = "nothing to do yet; the configuration is not yet complete enough to act on"
+	case declaredIntent(p.Steps) > 0:
+		sim.Headline = fmt.Sprintf(
+			"the host already matches the configuration; %d requested service behaviour(s) are described but not applied",
+			declaredIntent(p.Steps))
 	default:
 		sim.Headline = "nothing to do: the host already matches the configuration"
 	}
 
 	p.Simulation = sim
+}
+
+// declaredIntent counts the steps that describe requested service behaviour
+// rather than describing a change this build could make.
+func declaredIntent(steps []Step) int {
+	n := 0
+	for _, s := range steps {
+		if s.Reversible == "not-applied" {
+			n++
+		}
+	}
+	return n
 }
 
 // checkReady reports whether the plan can be acted on.

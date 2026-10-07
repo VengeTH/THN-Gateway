@@ -21,6 +21,7 @@ import (
 	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/venth/thn-gateway/internal/qos"
 	"github.com/venth/thn-gateway/internal/schema"
 	"github.com/venth/thn-gateway/internal/validation"
 )
@@ -550,6 +551,17 @@ func runValidate(env *Env, args []string) ExitCode {
 	intent := gateway.FromConfig(cfg, res)
 	gwReport := gateway.Validate(intent, gateway.Observed{Device: dev, Resolution: &res})
 
+	// DHCP, DNS and QoS intent are derived from the SAME gateway intent, so
+	// all four reports describe one document read one way. A DHCP report built
+	// from a second resolution would be able to disagree with the gateway
+	// report printed above it, and the operator would be shown whichever one
+	// differed.
+	svc := serviceIntents{
+		dhcp: dhcpIntent(cfg, intent),
+		dns:  dnsIntent(cfg, intent),
+		qos:  qosIntent(cfg, intent, dev),
+	}
+
 	result := validation.Combined(cfg, obs, d)
 
 	// Report conflicts between declared configuration and stored assignments.
@@ -588,7 +600,7 @@ func runValidate(env *Env, args []string) ExitCode {
 	// QoS is absent deliberately: qos.Validate needs a host Availability, and
 	// inventing one here would turn every enabled shaping config into an
 	// error. See `thn qos validate`.
-	for _, sub := range subsystemValidations(cfg, gwReport, *live) {
+	for _, sub := range subsystemValidationsWithIntent(cfg, gwReport, *live, svc) {
 		result = result.Merge(sub)
 	}
 
@@ -599,11 +611,18 @@ func runValidate(env *Env, args []string) ExitCode {
 			"valid":    result.Valid,
 			"layers":   result.Layers,
 			"findings": result.Findings,
-			// Machine-readable on its own terms: the report is a structure,
-			// not prose the reader has to parse back out of a message. A
-			// consumer distinguishing valid / blocked / pending reads
-			// "verdict", not the wording of "summary".
+			// Machine-readable on their own terms: each report is a
+			// structure, not prose the reader has to parse back out of a
+			// message. A consumer distinguishing valid / blocked / pending
+			// reads "verdict", not the wording of "summary".
+			//
+			// All four are siblings here. They answer four different
+			// questions and a client must not have to scrape the human
+			// output to tell which is which.
 			"gateway": gwReport,
+			"dhcp":    svc.dhcp,
+			"dns":     svc.dns,
+			"qos":     svc.qos,
 		}); err != nil {
 			env.errorf("thn validate: %v\n", err)
 			return ExitProblems
@@ -611,6 +630,9 @@ func runValidate(env *Env, args []string) ExitCode {
 	} else {
 		printValidation(env, path, result)
 		printGatewayIntent(env, gwReport)
+		printServiceIntent(env, "DHCP", string(svc.dhcp.Verdict), svc.dhcp.Summary, svc.dhcp.Intent.Summary(), dhcpFindings(svc.dhcp.Findings))
+		printServiceIntent(env, "DNS", string(svc.dns.Verdict), svc.dns.Summary, svc.dns.Intent.Summary(), dnsFindings(svc.dns.Findings))
+		printServiceIntent(env, "QoS", string(svc.qos.Verdict), svc.qos.Summary, svc.qos.Intent.Summary(), qosFindings(svc.qos.Findings))
 	}
 
 	if result.Valid {
@@ -641,6 +663,28 @@ func runValidate(env *Env, args []string) ExitCode {
 // two answers to one question, and the one printed beside the other would be
 // whichever disagreed.
 func subsystemValidations(cfg config.Config, gwReport gateway.Report, live bool) []validation.Result {
+	return subsystemValidationsWithIntent(cfg, gwReport, live, serviceIntents{})
+}
+
+// serviceIntents carries the DHCP, DNS and QoS intent reports.
+//
+// They are computed once by the caller and passed in, for the same reason
+// gwReport is: they are the same reports `thn validate` prints and `thn plan`
+// renders, and deriving them twice would mean two answers to one question.
+type serviceIntents struct {
+	dhcp dhcp.Report
+	dns  dns.Report
+	qos  qos.Report
+}
+
+// subsystemValidationsWithIntent runs each foldable subsystem's own validator
+// over one configuration document.
+//
+// This is the body of subsystemValidations, with the pre-computed service
+// intents threaded through. The wrapper above exists so callers that do not
+// need the intents (the readiness path, and the paths where the policy layer
+// alone is the question being asked) keep their existing shape.
+func subsystemValidationsWithIntent(cfg config.Config, gwReport gateway.Report, live bool, svc serviceIntents) []validation.Result {
 	var out []validation.Result
 
 	// Gateway intent. This is the milestone's own layer: whether a gateway
@@ -655,6 +699,14 @@ func subsystemValidations(cfg config.Config, gwReport gateway.Report, live bool)
 	} else {
 		out = append(out, validation.FromDHCP(dhcp.Validate(policy)))
 	}
+	// The DHCP intent layer sits alongside the policy layer rather than
+	// replacing it. The policy answers "can this document be rendered"; the
+	// intent answers "was DHCP asked for, and can it be built from the LAN
+	// that was declared". A perfect pool with no LAN passes the first and is
+	// blocked by the second.
+	if svc.dhcp.Intent.Enabled || len(svc.dhcp.Findings) > 0 {
+		out = append(out, validation.FromDHCPIntent(svc.dhcp))
+	}
 
 	// DNS.
 	if policy, err := dnsPolicyFromConfig(cfg); err != nil {
@@ -662,6 +714,19 @@ func subsystemValidations(cfg config.Config, gwReport gateway.Report, live bool)
 			"check the upstream resolvers and local records are addresses"))
 	} else {
 		out = append(out, validation.FromDNS(dns.Validate(policy)))
+	}
+	// The DNS intent layer owns the upstream source conflict, so this is how
+	// a document declaring two different resolver sets reaches the gate with
+	// a stable code attached.
+	if svc.dns.Intent.Enabled || len(svc.dns.Findings) > 0 {
+		out = append(out, validation.FromDNSIntent(svc.dns))
+	}
+
+	// QoS. Folded in with real capability evidence rather than an invented
+	// Availability: with no observation the verdict is an honest unknown, and
+	// a CI gate can carry that without pretending to know the kernel.
+	if svc.qos.Intent.Enabled || len(svc.qos.Findings) > 0 {
+		out = append(out, validation.FromQoSIntent(svc.qos))
 	}
 
 	// Firewall policy. The translator cannot fail: it substitutes defaults.
@@ -743,6 +808,42 @@ func printGatewayIntent(env *Env, r gateway.Report) {
 	}
 }
 
+// printServiceIntent renders one service intent block.
+//
+// It is printed by `thn validate` and `thn plan` rather than by a command of
+// its own, for the same reason the gateway block is: the intent should be
+// visible where the configuration is checked and where the plan is built.
+//
+// The machine-readable code is printed beside the sentence rather than instead
+// of it. A beginner needs "the pool must belong to the LAN subnet"; an
+// administrator needs "dhcp-range-outside-lan" to grep, dispatch on and match
+// against a runbook. Neither audience is served by the other's format alone,
+// and the prose is not the source of truth - the code is.
+func printServiceIntent(env *Env, name, verdict, summary, detail string, findings []findingView) {
+	env.printf("\n%s intent: %s\n", name, verdict)
+	env.printf("  %s\n", summary)
+	env.printf("%s", detail)
+
+	if len(findings) == 0 {
+		return
+	}
+
+	env.printf("\n  Findings:\n")
+	for _, f := range findings {
+		// The code is the stable identifier. When a finding has none - an
+		// unclassified finding from a path that has not been annotated - the
+		// field path is shown in its place so the line is never blank.
+		label := f.code
+		if label == "" {
+			label = f.field
+		}
+		env.printf("    %-8s %-28s %s\n", f.severity, label, f.message)
+		if f.hint != "" {
+			env.printf("    %-8s %-28s hint: %s\n", "", "", f.hint)
+		}
+	}
+}
+
 // runPlan implements `thn plan`.
 func runPlan(env *Env, args []string) ExitCode {
 	fs := newFlagSet()
@@ -797,18 +898,34 @@ func runPlan(env *Env, args []string) ExitCode {
 	intent := gateway.FromConfig(cfg, res)
 	gwReport := gateway.Validate(intent, gateway.Observed{Device: device, Resolution: &res})
 
+	// The same DHCP, DNS and QoS intent reports `thn validate` prints, from
+	// the same gateway intent. A plan that showed a different verdict on the
+	// service configuration from the one `thn validate` gave would make the
+	// two commands disagree about the same document on the same machine.
+	svc := serviceIntents{
+		dhcp: dhcpIntent(cfg, intent),
+		dns:  dnsIntent(cfg, intent),
+		qos:  qosIntent(cfg, intent, device),
+	}
+
 	if env.IsJSON {
 		if err := env.printJSON(map[string]any{
 			"config":     path,
 			"plan":       p,
 			"validation": validation.Combined(cfg, &obs, d),
 			"gateway":    gwReport,
+			"dhcp":       svc.dhcp,
+			"dns":        svc.dns,
+			"qos":        svc.qos,
 		}); err != nil {
 			env.errorf("thn plan: %v\n", err)
 			return ExitProblems
 		}
 	} else {
 		printGatewayIntent(env, gwReport)
+		printServiceIntent(env, "DHCP", string(svc.dhcp.Verdict), svc.dhcp.Summary, svc.dhcp.Intent.Summary(), dhcpFindings(svc.dhcp.Findings))
+		printServiceIntent(env, "DNS", string(svc.dns.Verdict), svc.dns.Summary, svc.dns.Intent.Summary(), dnsFindings(svc.dns.Findings))
+		printServiceIntent(env, "QoS", string(svc.qos.Verdict), svc.qos.Summary, svc.qos.Intent.Summary(), qosFindings(svc.qos.Findings))
 		env.printf("\n")
 		printPlan(env, cfg, p, d, obs, *explain)
 	}

@@ -23,12 +23,16 @@
 //
 // # What is deliberately NOT folded in
 //
-// internal/qos is not here. qos.Validate takes an Availability describing what
-// the host kernel supports, which is a host observation. Calling it from the
-// static layer would mean passing an Availability this package invented, and
-// an invented "nothing available" turns every enabled shaping config into an
-// error. `thn validate` must stay deterministic and host-free to be a CI
-// gate, so QoS keeps its own command and says so rather than guessing.
+// internal/qos was not here before M7.4. qos.Validate takes an Availability
+// describing what the host kernel supports, and the static layer had no honest
+// Availability to give it — inventing one would have turned "THN did not
+// look" into either "available" or "unavailable", and both are fabrications.
+//
+// M7.4 removed the obstacle by separating the two questions: the intent layer
+// judges the document, and reads capability from the observed host through
+// internal/host's evidence model. No observation now yields an explicit
+// unknown rather than a guess, which is exactly the value a CI gate can be
+// given. See FromQoSIntent.
 
 package validation
 
@@ -40,6 +44,7 @@ import (
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
 	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/netconfig"
+	"github.com/venth/thn-gateway/internal/qos"
 )
 
 // Subsystem field prefixes.
@@ -59,6 +64,7 @@ const (
 	FirewallFieldPrefix = "firewall."
 	NetFieldPrefix      = "net."
 	GatewayFieldPrefix  = "gateway."
+	QoSFieldPrefix      = "qos."
 )
 
 // FromGateway projects a gateway intent report into this package's model.
@@ -232,6 +238,67 @@ func FromDNS(r dns.Result) Result {
 		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
 	}
 	return projectResult(DNSFieldPrefix, in)
+}
+
+// FromDHCPIntent projects a DHCP intent report into this package's model.
+//
+// The intent layer and the policy layer are both folded in, and they are not
+// redundant. The policy validator answers "can this document be rendered"; the
+// intent report answers "was DHCP asked for, and can it be built from the LAN
+// that was declared". A document with a perfect pool and no LAN passes the
+// first and is blocked by the second, which is the distinction the milestone
+// exists to make.
+//
+// The field path is carried through rather than replaced by the code, because
+// an operator told "dhcp.ranges[0].start" learns which line to edit and an
+// operator told "dhcp.dhcp-range-outside-lan" does not. Both reach the
+// consumer: the code travels in the message and in JSON, the field reaches
+// the human-readable table.
+func FromDHCPIntent(r dhcp.Report) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(DHCPFieldPrefix, in)
+}
+
+// FromDNSIntent projects a DNS intent report into this package's model.
+//
+// The intent layer owns the upstream source conflict, so this is the path by
+// which a document declaring two different resolver sets reaches
+// `thn validate` with a stable code attached.
+func FromDNSIntent(r dns.Report) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(DNSFieldPrefix, in)
+}
+
+// FromQoSIntent projects a QoS intent report into this package's model.
+//
+// # Why QoS is folded in now
+//
+// The header of this file used to exclude internal/qos, on the grounds that
+// qos.Validate takes an Availability describing what the host kernel supports
+// and the static layer had no honest Availability to give it.
+//
+// M7.4 is what removed that obstacle. The intent layer separates the two
+// questions that were conflated — "does the document make sense" and "what
+// has THN established about this host" — and answers the second with an
+// explicit unknown when nothing was observed. So this folds in a report built
+// from real capability evidence, with "no observation" landing on unknown
+// rather than on a guess.
+//
+// A CI gate that cannot see the gateway must therefore report a QoS verdict of
+// PENDING rather than pretending the kernel can or cannot shape. That is the
+// correct outcome: the document is judged, and the host is not invented.
+func FromQoSIntent(r qos.Report) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(QoSFieldPrefix, in)
 }
 
 // FromFirewallPolicy projects a firewall policy result into this package's

@@ -249,18 +249,27 @@ func TestValidateAcceptsACompleteConfiguration(t *testing.T) {
 	}
 }
 
-// TestValidateDoesNotFoldInQos pins the deliberate exclusion.
+// TestValidateFoldsInQoSWithoutFabricatingHostFacts pins what M7.4 changed and
+// what it deliberately did not.
 //
-// qos.Validate needs an Availability describing what the host kernel supports.
-// That is a host observation, and `thn validate` is the static, host-free CI
-// gate. Calling qos.Validate here would mean passing an Availability this
-// package invented; an invented "nothing is available" turns every enabled
-// shaping config into an error, and CI would go red on a document that is
-// fine.
+// This used to be TestValidateDoesNotFoldInQos, and asserted that QoS was
+// excluded from the gate. The reason for excluding it was sound: qos.Validate
+// needs an Availability describing what the host kernel supports, and the
+// static layer had no honest Availability to give it. Passing an invented
+// "nothing is available" turns every enabled shaping config into an error, and
+// CI goes red on a document that is fine.
 //
-// This test fails if someone helpfully folds QoS in. The failure message says
-// what to do instead.
-func TestValidateDoesNotFoldInQos(t *testing.T) {
+// M7.4 removed the obstacle rather than the rule. The intent layer separates
+// "does the document make sense" from "what has THN established about this
+// host", and answers the second with an explicit unknown when nothing was
+// observed. So the gate now folds QoS in, and a document with no host
+// observation reaches an honest verdict instead of an invented one.
+//
+// The assertion is therefore the same one, and it is the one that matters: an
+// enabled, well-specified QoS configuration must not fail the gate, and no QoS
+// error may reach it as though THN had observed the kernel and found it
+// wanting. A capability that was never established must stay PENDING.
+func TestValidateFoldsInQoSWithoutFabricatingHostFacts(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Network.WAN = "enp0s31f6"
 	cfg.Network.LAN = "enp1s0"
