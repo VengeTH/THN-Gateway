@@ -15,6 +15,7 @@ import (
 	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/identity"
+	"github.com/venth/thn-gateway/internal/multiwan"
 	"github.com/venth/thn-gateway/internal/qos"
 	"github.com/venth/thn-gateway/internal/sandbox"
 )
@@ -346,6 +347,43 @@ func observedQdiscKinds(dev *host.Device) []string {
 		if q.Kind != "" {
 			out = append(out, q.Kind)
 		}
+	}
+	return out
+}
+
+// multiWANIntent builds the Multi-WAN intent report for a document and its gateway intent.
+func multiWANIntent(cfg config.Config, gw gateway.Intent, dev *host.Device) multiwan.Report {
+	otherRoles := make(map[string]string)
+	for r, ri := range gw.Roles {
+		if r != host.RoleWAN && !r.IsWAN() {
+			roleName := string(r)
+			if ri.StableID != "" {
+				otherRoles[ri.StableID] = roleName
+			}
+			if ri.Interface != "" {
+				otherRoles[ri.Interface] = roleName
+			}
+			if ri.Selector != "" {
+				otherRoles[ri.Selector] = roleName
+			}
+		}
+	}
+
+	intent := multiwan.FromConfig(cfg, otherRoles, dev)
+	return multiwan.ValidateIntent(intent)
+}
+
+// multiwanFindings projects Multi-WAN findings into the shared rendering view.
+func multiwanFindings(in []multiwan.Finding) []findingView {
+	out := make([]findingView, 0, len(in))
+	for _, f := range in {
+		out = append(out, findingView{
+			severity: string(f.Severity),
+			field:    f.Field,
+			code:     f.Code,
+			message:  f.Message,
+			hint:     f.Hint,
+		})
 	}
 	return out
 }

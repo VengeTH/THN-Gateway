@@ -95,6 +95,11 @@ func KnownRoles() []Role {
 	return []Role{RoleWAN, RoleLAN, RoleMGMT, RoleGuest, RoleDMZ}
 }
 
+// IsWAN reports whether the role is an uplink role (RoleWAN or a multi-WAN instance like wan:name).
+func (r Role) IsWAN() bool {
+	return r == RoleWAN || strings.HasPrefix(string(r), "wan:")
+}
+
 // ParseRole parses a role name, accepting an empty string as unassigned.
 func ParseRole(s string) (Role, error) {
 	r := Role(strings.ToLower(strings.TrimSpace(s)))
@@ -105,6 +110,9 @@ func ParseRole(s string) (Role, error) {
 		if r == k {
 			return r, nil
 		}
+	}
+	if strings.HasPrefix(string(r), "wan:") && len(r) > 4 {
+		return r, nil
 	}
 	names := make([]string, 0, len(KnownRoles()))
 	for _, k := range KnownRoles() {

@@ -43,6 +43,7 @@ import (
 	"github.com/venth/thn-gateway/internal/dns"
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
 	"github.com/venth/thn-gateway/internal/gateway"
+	"github.com/venth/thn-gateway/internal/multiwan"
 	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/qos"
 )
@@ -65,6 +66,7 @@ const (
 	NetFieldPrefix      = "net."
 	GatewayFieldPrefix  = "gateway."
 	QoSFieldPrefix      = "qos."
+	MultiWANFieldPrefix = "multi_wan."
 )
 
 // FromGateway projects a gateway intent report into this package's model.
@@ -299,6 +301,15 @@ func FromQoSIntent(r qos.Report) Result {
 		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
 	}
 	return projectResult(QoSFieldPrefix, in)
+}
+
+// FromMultiWANIntent projects a Multi-WAN intent report into this package's model.
+func FromMultiWANIntent(r multiwan.Report) Result {
+	in := make([]subsystemFinding, 0, len(r.Findings))
+	for _, f := range r.Findings {
+		in = append(in, subsystemFinding{f.Field, string(f.Severity), f.Message, f.Hint})
+	}
+	return projectResult(MultiWANFieldPrefix, in)
 }
 
 // FromFirewallPolicy projects a firewall policy result into this package's

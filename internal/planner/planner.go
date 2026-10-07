@@ -452,6 +452,17 @@ func ComputeDesiredDigest(des desired.State) string {
 	sort.Strings(sortAdvDNS)
 	fmt.Fprintf(h, "dhcpdns=%s;dhcpdomain=%s;", strings.Join(sortAdvDNS, ","), d.Domain)
 
+	// Multi-WAN intent is content-addressed too: mode, members, weights,
+	// priorities and health policy change routing and failover behavior,
+	// so all of it changes the digest.
+	mw := des.MultiWAN
+	fmt.Fprintf(h, "mwan=%t:%t:%s:%s;", mw.Enabled, mw.Resolved, mw.Mode, mw.Policy)
+	fmt.Fprintf(h, "mwanhc=%s:%d:%d;", mw.HealthCheck.Target, mw.HealthCheck.Interval, mw.HealthCheck.Timeout)
+	for _, m := range mw.Members {
+		fmt.Fprintf(h, "mwanm=%s:%s:%s:%d:%d:%t:%s;",
+			m.ID, m.Interface, m.StableID, m.Weight, m.Priority, m.Enabled, m.Gateway)
+	}
+
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -893,6 +904,9 @@ func serviceIntentSteps(des desired.State, dev *host.Device) []Step {
 	if des.QoS.Enabled {
 		out = append(out, qosIntentStep(des.QoS, dev))
 	}
+	if des.MultiWAN.Enabled || len(des.MultiWAN.Members) > 1 {
+		out = append(out, multiWANIntentStep(des.MultiWAN, dev))
+	}
 
 	return out
 }
@@ -1126,6 +1140,88 @@ func dnsServiceIntentStep(s desired.DNSService) Step {
 		Disruptive:   false,
 		Reversible:   "not-applied",
 	}
+}
+
+// multiWANIntentStep describes the requested multi-WAN routing and balancing policy.
+//
+// Like DHCP, DNS and QoS, it carries NO shell or network mutation commands:
+// this build does not touch ip rule, ip route, or nftables. It states the
+// requested mode, priorities, weights and consequences without faking an applier.
+func multiWANIntentStep(m desired.MultiWAN, dev *host.Device) Step {
+	phase := phasesTable()[4]
+
+	mode := m.Mode
+	if mode == "" {
+		mode = "single"
+	}
+
+	summary := fmt.Sprintf("route Internet traffic via %d WAN uplink(s) in %s mode",
+		len(m.Members), mode)
+
+	reason := "the document asks for multi-WAN routing; " +
+		"no routing table, ip rule, or nftables state is modified by this build"
+	if !m.Resolved {
+		reason = "the document asks for multi-WAN routing, but one or more WAN members have not yet been resolved against this host"
+	}
+
+	var desiredParts []string
+	desiredParts = append(desiredParts, "mode="+mode, "policy="+m.Policy)
+	for _, mem := range m.Members {
+		desiredParts = append(desiredParts, fmt.Sprintf("%s:%s(p=%d,w=%d,en=%t)",
+			mem.ID, orNoneLabel(mem.Interface, mem.StableID), mem.Priority, mem.Weight, mem.Enabled))
+	}
+
+	return Step{
+		ID:           "multi-wan-intent",
+		Action:       multiWANAction(m, dev),
+		Target:       "routing:multi-wan",
+		Phase:        phase.Number,
+		PhaseName:    phase.Name,
+		Subsystem:    "routing",
+		Field:        "multi_wan.mode",
+		Risk:         diff.RiskNone,
+		Summary:      summary,
+		Reason:       reason,
+		Current:      currentWANText(m, dev),
+		Desired:      strings.Join(desiredParts, " "),
+		Commands:     nil,
+		RequiresRoot: false,
+		Disruptive:   false,
+		Reversible:   "not-applied",
+	}
+}
+
+// multiWANAction classifies the multi-WAN planning step action.
+func multiWANAction(m desired.MultiWAN, dev *host.Device) Action {
+	if dev == nil || len(dev.Routes) == 0 {
+		return ActionCreate
+	}
+	if m.Mode == "single" && len(m.Members) == 1 {
+		for _, r := range dev.Routes {
+			if (r.Destination == "default" || r.Destination == "0.0.0.0/0") &&
+				r.Interface != "" && (r.Interface == m.Members[0].Interface || r.Interface == m.Members[0].StableID) {
+				return ActionNoop
+			}
+		}
+	}
+	return ActionUpdate
+}
+
+// currentWANText renders the current observed default WAN routing state.
+func currentWANText(m desired.MultiWAN, dev *host.Device) string {
+	if dev == nil || len(dev.Routes) == 0 {
+		return "(no default WAN route observed)"
+	}
+	var defRoutes []string
+	for _, r := range dev.Routes {
+		if r.Destination == "default" || r.Destination == "0.0.0.0/0" {
+			defRoutes = append(defRoutes, fmt.Sprintf("via %s dev %s", r.Gateway, r.Interface))
+		}
+	}
+	if len(defRoutes) == 0 {
+		return "(no default WAN route observed)"
+	}
+	return strings.Join(defRoutes, ", ") + " (observed, not managed by multi-WAN)"
 }
 
 // serviceTarget builds a stable identity for a service step.

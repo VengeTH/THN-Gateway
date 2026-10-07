@@ -71,6 +71,9 @@ type Config struct {
 	// QoS controls traffic shaping intent.
 	QoS QoSConfig `yaml:"qos"`
 
+	// MultiWAN controls multi-uplink routing, failover and load balancing.
+	MultiWAN MultiWANConfig `yaml:"multi_wan"`
+
 	// DHCP controls address assignment intent.
 	DHCP DHCPConfig `yaml:"dhcp"`
 
@@ -278,6 +281,60 @@ type QoSConfig struct {
 	// its 10 percent default rather than shaping at the payload rate, which
 	// would leave the link permanently a tenth under-utilised.
 	OverheadPercent int `yaml:"overhead_percent"`
+}
+
+// MultiWANConfig controls multi-uplink routing, failover and load balancing.
+type MultiWANConfig struct {
+	// Enabled explicitly requests multi-WAN routing management.
+	Enabled bool `yaml:"enabled"`
+
+	// Mode is "single", "failover", or "load_balance".
+	Mode string `yaml:"mode"`
+
+	// Policy is the routing policy: "default" (session/connection-oriented).
+	Policy string `yaml:"policy"`
+
+	// Members lists the individual WAN connections.
+	Members []WANMemberConfig `yaml:"members"`
+
+	// HealthCheck configures health evaluation for WAN links.
+	HealthCheck WANHealthCheckConfig `yaml:"health_check"`
+}
+
+// WANMemberConfig is one logical WAN link.
+type WANMemberConfig struct {
+	// ID is the logical identifier, e.g. "wan1", "pldt".
+	ID string `yaml:"id"`
+
+	// Interface is the interface selector (stable ID "hw:..." or system name).
+	Interface string `yaml:"interface"`
+
+	// Weight is the relative connection distribution in load_balance mode.
+	Weight int `yaml:"weight"`
+
+	// Priority is the preference rank in failover mode (higher = preferred).
+	Priority int `yaml:"priority"`
+
+	// Enabled states whether this WAN is administratively active.
+	Enabled bool `yaml:"enabled"`
+
+	// Gateway optionally specifies the upstream next-hop address.
+	Gateway string `yaml:"gateway"`
+
+	// Description is an optional human label.
+	Description string `yaml:"description"`
+}
+
+// WANHealthCheckConfig configures health checks.
+type WANHealthCheckConfig struct {
+	// Target is an optional address or host to verify connectivity toward.
+	Target string `yaml:"target"`
+
+	// Interval is the health assessment period.
+	Interval time.Duration `yaml:"interval"`
+
+	// Timeout is the maximum time for a health probe.
+	Timeout time.Duration `yaml:"timeout"`
 }
 
 // DHCPRangeConfig is one address pool handed out by DHCP.
@@ -586,6 +643,16 @@ func Defaults() Config {
 			Enabled:   false,
 			Algorithm: "cake",
 			Interface: "",
+		},
+		MultiWAN: MultiWANConfig{
+			Enabled: false,
+			Mode:    "single",
+			Policy:  "default",
+			Members: []WANMemberConfig{},
+			HealthCheck: WANHealthCheckConfig{
+				Interval: 10 * time.Second,
+				Timeout:  2 * time.Second,
+			},
 		},
 		DHCP: DHCPConfig{
 			// DHCP is on by default: a gateway that does not serve

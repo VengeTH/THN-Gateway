@@ -1005,6 +1005,124 @@ QoS intent is content-addressed in the desired digest:
 - `ProductionDriver.CanApply() == false`.
 - `ImplementedStages()` excludes `StageApply`.
 
+## Multi-WAN intent, routing policy and load balancing (M7.5)
+
+A resilient gateway often requires multiple Internet connections — whether for
+automatic failover when a primary provider drops, or for distributing new
+outbound connections across multiple active uplinks.
+
+### What is Multi-WAN?
+
+Multi-WAN connects more than one upstream Internet service provider to a single
+THN gateway, governed by explicit routing policies:
+
+- **Failover**: Traffic prefers the primary provider, switching to backup links
+  when higher-priority uplinks fail.
+
+  ```
+  PLDT (primary)
+    ↓
+  Converge (backup)
+  ```
+
+- **Load balancing**: Traffic is distributed across multiple healthy uplinks
+  according to configured relative weights.
+
+  ```
+  PLDT (weight 2) ─────┐
+                       ├── THN ── LAN
+  Converge (weight 1) ─┘
+  ```
+
+### What load balancing is not: non-bonding
+
+Load balancing in THN is **session- and connection-oriented**. It assigns new
+outbound TCP/UDP flows across available uplinks according to their weights, while
+preserving connection affinity so existing sessions remain tied to their
+selected WAN.
+
+> **Two Internet connections do not automatically become one connection with
+> their speeds combined.** A 200 Mbps link and a 100 Mbps link do not yield a
+> single 300 Mbps download without dedicated packet-level bonding infrastructure
+> (e.g. MPTCP or SpeedFusion).
+
+### Explicit membership, not hardware guessing
+
+THN **never** assumes that multiple Ethernet ports equal multiple WANs. An
+observed second NIC or Wi-Fi adapter is candidate hardware, not an uplink. WAN
+membership is explicit, declarative, and bound to rename-stable interface
+identities (`hw:...`).
+
+### Configuration
+
+Single-WAN configurations remain 100% backward compatible without changes. When
+multi-WAN is requested:
+
+```yaml
+multi_wan:
+  enabled: true
+  mode: load_balance        # "single", "failover", or "load_balance"
+  policy: default           # session/connection affinity
+  members:
+    - id: pldt
+      interface: hw:7c6170fd7f34317a
+      weight: 2
+      priority: 100
+      enabled: true
+    - id: converge
+      interface: hw:2c886f45ad0cb12f
+      weight: 1
+      priority: 100
+      enabled: true
+  health_check:
+    target: 1.1.1.1
+    interval: 10s
+    timeout: 2s
+```
+
+### Health evidence without mutation
+
+- **Carrier present is not Internet health**: A physical link with carrier and
+  an IP address can still have a broken upstream route. Without live active
+  probing, health remains honestly reported as `unknown`.
+- **Interface down is confirmed failure**: An interface without carrier or
+  administratively down is confirmed `unhealthy`.
+- **`unknown` is not `unhealthy`**: An uplink with unknown health is not
+  arbitrarily discarded.
+
+### Finding codes
+
+| Code | Meaning |
+|---|---|
+| `multiwan-disabled` | multi-WAN management not requested (single WAN default) |
+| `multiwan-mode-invalid` | unknown mode (must be `single`, `failover`, `load_balance`) |
+| `multiwan-members-empty` | enabled with no WAN members configured |
+| `multiwan-member-missing` | member without selector or identifier |
+| `multiwan-member-unresolved` | member selector unobserved on host (`PENDING`) |
+| `multiwan-duplicate-interface` | two members claim the same physical interface (`BLOCKED`) |
+| `multiwan-duplicate-id` | two members share the same ID |
+| `multiwan-role-conflict` | member claims an interface assigned to LAN, DMZ, or Guest |
+| `multiwan-weight-invalid` | non-positive weight |
+| `multiwan-priority-invalid` | negative priority |
+| `multiwan-all-unhealthy` | all configured uplinks confirmed down/unusable |
+| `multiwan-member-disabled` | member administratively disabled |
+| `multiwan-single-mode-excess` | single mode selected with multiple members |
+
+### Planning and desired-state digest
+
+- Multi-WAN mode, policy, member IDs, weights, priorities, and health check
+  settings are content-addressed in the desired digest.
+- Planning steps carry `Commands: nil` and `Reversible: "not-applied"`: no `ip rule`,
+  `ip route`, or `nftables` commands are invented or executed.
+
+### M7.5 safety invariants
+
+- No live route or rule manipulation.
+- No live nftables mutation.
+- `activation.CanApply() == false`.
+- `ProductionDriver.CanApply() == false`.
+- `ImplementedStages()` excludes `StageApply`.
+
 ## Diagnosing an unknown
 
 An `unknown` with no reason is the least useful thing a diagnostic tool can

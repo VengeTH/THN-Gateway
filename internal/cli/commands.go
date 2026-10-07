@@ -18,6 +18,7 @@ import (
 	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
 	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
+	"github.com/venth/thn-gateway/internal/multiwan"
 	"github.com/venth/thn-gateway/internal/netconfig"
 	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
@@ -551,15 +552,15 @@ func runValidate(env *Env, args []string) ExitCode {
 	intent := gateway.FromConfig(cfg, res)
 	gwReport := gateway.Validate(intent, gateway.Observed{Device: dev, Resolution: &res})
 
-	// DHCP, DNS and QoS intent are derived from the SAME gateway intent, so
-	// all four reports describe one document read one way. A DHCP report built
-	// from a second resolution would be able to disagree with the gateway
-	// report printed above it, and the operator would be shown whichever one
-	// differed.
+	// DHCP, DNS, QoS and Multi-WAN intent are derived from the SAME gateway intent,
+	// so all reports describe one document read one way. A report built from a
+	// second resolution would be able to disagree with the gateway report printed
+	// above it, and the operator would be shown whichever one differed.
 	svc := serviceIntents{
-		dhcp: dhcpIntent(cfg, intent),
-		dns:  dnsIntent(cfg, intent),
-		qos:  qosIntent(cfg, intent, dev),
+		dhcp:     dhcpIntent(cfg, intent),
+		dns:      dnsIntent(cfg, intent),
+		qos:      qosIntent(cfg, intent, dev),
+		multiwan: multiWANIntent(cfg, intent, dev),
 	}
 
 	result := validation.Combined(cfg, obs, d)
@@ -619,10 +620,11 @@ func runValidate(env *Env, args []string) ExitCode {
 			// All four are siblings here. They answer four different
 			// questions and a client must not have to scrape the human
 			// output to tell which is which.
-			"gateway": gwReport,
-			"dhcp":    svc.dhcp,
-			"dns":     svc.dns,
-			"qos":     svc.qos,
+			"gateway":   gwReport,
+			"dhcp":      svc.dhcp,
+			"dns":       svc.dns,
+			"qos":       svc.qos,
+			"multi_wan": svc.multiwan,
 		}); err != nil {
 			env.errorf("thn validate: %v\n", err)
 			return ExitProblems
@@ -633,6 +635,7 @@ func runValidate(env *Env, args []string) ExitCode {
 		printServiceIntent(env, "DHCP", string(svc.dhcp.Verdict), svc.dhcp.Summary, svc.dhcp.Intent.Summary(), dhcpFindings(svc.dhcp.Findings))
 		printServiceIntent(env, "DNS", string(svc.dns.Verdict), svc.dns.Summary, svc.dns.Intent.Summary(), dnsFindings(svc.dns.Findings))
 		printServiceIntent(env, "QoS", string(svc.qos.Verdict), svc.qos.Summary, svc.qos.Intent.Summary(), qosFindings(svc.qos.Findings))
+		printServiceIntent(env, "Multi-WAN", string(svc.multiwan.Verdict), svc.multiwan.Summary, svc.multiwan.Intent.Summary(), multiwanFindings(svc.multiwan.Findings))
 	}
 
 	if result.Valid {
@@ -666,15 +669,16 @@ func subsystemValidations(cfg config.Config, gwReport gateway.Report, live bool)
 	return subsystemValidationsWithIntent(cfg, gwReport, live, serviceIntents{})
 }
 
-// serviceIntents carries the DHCP, DNS and QoS intent reports.
+// serviceIntents carries the DHCP, DNS, QoS and Multi-WAN intent reports.
 //
 // They are computed once by the caller and passed in, for the same reason
 // gwReport is: they are the same reports `thn validate` prints and `thn plan`
 // renders, and deriving them twice would mean two answers to one question.
 type serviceIntents struct {
-	dhcp dhcp.Report
-	dns  dns.Report
-	qos  qos.Report
+	dhcp     dhcp.Report
+	dns      dns.Report
+	qos      qos.Report
+	multiwan multiwan.Report
 }
 
 // subsystemValidationsWithIntent runs each foldable subsystem's own validator
@@ -727,6 +731,11 @@ func subsystemValidationsWithIntent(cfg config.Config, gwReport gateway.Report, 
 	// a CI gate can carry that without pretending to know the kernel.
 	if svc.qos.Intent.Enabled || len(svc.qos.Findings) > 0 {
 		out = append(out, validation.FromQoSIntent(svc.qos))
+	}
+
+	// Multi-WAN. Folded in with member bindings and health evidence.
+	if svc.multiwan.Intent.Enabled || len(svc.multiwan.Intent.Members) > 1 || len(svc.multiwan.Findings) > 0 {
+		out = append(out, validation.FromMultiWANIntent(svc.multiwan))
 	}
 
 	// Firewall policy. The translator cannot fail: it substitutes defaults.
@@ -898,14 +907,15 @@ func runPlan(env *Env, args []string) ExitCode {
 	intent := gateway.FromConfig(cfg, res)
 	gwReport := gateway.Validate(intent, gateway.Observed{Device: device, Resolution: &res})
 
-	// The same DHCP, DNS and QoS intent reports `thn validate` prints, from
-	// the same gateway intent. A plan that showed a different verdict on the
+	// The same DHCP, DNS, QoS and Multi-WAN intent reports `thn validate` prints,
+	// from the same gateway intent. A plan that showed a different verdict on the
 	// service configuration from the one `thn validate` gave would make the
 	// two commands disagree about the same document on the same machine.
 	svc := serviceIntents{
-		dhcp: dhcpIntent(cfg, intent),
-		dns:  dnsIntent(cfg, intent),
-		qos:  qosIntent(cfg, intent, device),
+		dhcp:     dhcpIntent(cfg, intent),
+		dns:      dnsIntent(cfg, intent),
+		qos:      qosIntent(cfg, intent, device),
+		multiwan: multiWANIntent(cfg, intent, device),
 	}
 
 	if env.IsJSON {
@@ -917,6 +927,7 @@ func runPlan(env *Env, args []string) ExitCode {
 			"dhcp":       svc.dhcp,
 			"dns":        svc.dns,
 			"qos":        svc.qos,
+			"multi_wan":  svc.multiwan,
 		}); err != nil {
 			env.errorf("thn plan: %v\n", err)
 			return ExitProblems
@@ -926,6 +937,7 @@ func runPlan(env *Env, args []string) ExitCode {
 		printServiceIntent(env, "DHCP", string(svc.dhcp.Verdict), svc.dhcp.Summary, svc.dhcp.Intent.Summary(), dhcpFindings(svc.dhcp.Findings))
 		printServiceIntent(env, "DNS", string(svc.dns.Verdict), svc.dns.Summary, svc.dns.Intent.Summary(), dnsFindings(svc.dns.Findings))
 		printServiceIntent(env, "QoS", string(svc.qos.Verdict), svc.qos.Summary, svc.qos.Intent.Summary(), qosFindings(svc.qos.Findings))
+		printServiceIntent(env, "Multi-WAN", string(svc.multiwan.Verdict), svc.multiwan.Summary, svc.multiwan.Intent.Summary(), multiwanFindings(svc.multiwan.Findings))
 		env.printf("\n")
 		printPlan(env, cfg, p, d, obs, *explain)
 	}

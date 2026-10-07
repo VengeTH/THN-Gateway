@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/dhcp"
@@ -251,6 +252,45 @@ type DHCP struct {
 	Resolved bool `json:"resolved"`
 }
 
+// MultiWAN is the desired multi-uplink routing and balancing state.
+type MultiWAN struct {
+	// Enabled reports whether multi-WAN is desired.
+	Enabled bool `json:"enabled"`
+
+	// Resolved reports whether all active WAN members are resolved.
+	Resolved bool `json:"resolved"`
+
+	// Mode is "single", "failover", or "load_balance".
+	Mode string `json:"mode"`
+
+	// Policy is the routing policy (e.g. "default" connection/session-oriented).
+	Policy string `json:"policy"`
+
+	// Members are the desired WAN member links, sorted by ID.
+	Members []MultiWANMember `json:"members"`
+
+	// HealthCheck contains health verification settings.
+	HealthCheck HealthCheck `json:"health_check"`
+}
+
+// MultiWANMember is one desired WAN uplink.
+type MultiWANMember struct {
+	ID        string `json:"id"`
+	Interface string `json:"interface"`
+	StableID  string `json:"stable_id"`
+	Weight    int    `json:"weight"`
+	Priority  int    `json:"priority"`
+	Enabled   bool   `json:"enabled"`
+	Gateway   string `json:"gateway,omitempty"`
+}
+
+// HealthCheck contains health check configuration.
+type HealthCheck struct {
+	Target   string        `json:"target,omitempty"`
+	Interval time.Duration `json:"interval,omitempty"`
+	Timeout  time.Duration `json:"timeout,omitempty"`
+}
+
 // GatewayIntent is the statement of intent the desired state was built from.
 //
 // It is carried inside State rather than alongside it so that a desired state
@@ -304,6 +344,9 @@ type State struct {
 
 	// DHCP is the desired DHCP service state.
 	DHCP DHCP `json:"dhcp"`
+
+	// MultiWAN is the desired multi-uplink routing state.
+	MultiWAN MultiWAN `json:"multi_wan"`
 }
 
 // FromConfig resolves configuration intent into desired state.
@@ -378,6 +421,12 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 			LeaseTime:     cfg.DHCP.LeaseTime.String(),
 			Domain:        cfg.DHCP.Domain,
 			Resolved:      true,
+		}
+		s.MultiWAN = MultiWAN{
+			Enabled:  false,
+			Mode:     "single",
+			Policy:   "default",
+			Resolved: true,
 		}
 		return s
 	}
@@ -580,6 +629,10 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 
 	s.DHCP = dhcpServiceState(cfg, in, s.LAN)
 
+	// --- Multi-WAN ---
+
+	s.MultiWAN = multiWANState(cfg, in, s.WAN, res)
+
 	return s
 }
 
@@ -745,6 +798,9 @@ func (s State) Pending() map[string]string {
 	if s.QoS.Enabled && !s.QoS.Resolved {
 		out["qos"] = "QoS is enabled but the interface or rates are incomplete"
 	}
+	if s.MultiWAN.Enabled && !s.MultiWAN.Resolved {
+		out["multi_wan"] = "multi-WAN is enabled but one or more WAN members are unresolved"
+	}
 	// DHCP and DNS are reported as pending only when they were asked for.
 	// A service the operator declined is not outstanding work, and listing it
 	// as pending would tell them to go and configure something they chose not
@@ -788,6 +844,7 @@ func (s State) Summary() string {
 	fmt.Fprintf(&b, "NAT:      %s\n", describeNAT(s.NAT))
 	fmt.Fprintf(&b, "firewall: %s\n", describeFirewall(s.Firewall))
 	fmt.Fprintf(&b, "QoS:      %s\n", describeQoS(s.QoS))
+	fmt.Fprintf(&b, "Multi-WAN: %s\n", describeMultiWAN(s.MultiWAN))
 	fmt.Fprintf(&b, "DNS:      %s\n", describeDNS(s.DNS))
 	fmt.Fprintf(&b, "DNS svc:  %s\n", describeDNSService(s.DNS.Service))
 	fmt.Fprintf(&b, "DHCP:     %s\n", describeDHCP(s.DHCP))
@@ -851,6 +908,17 @@ func describeQoS(q QoS) string {
 		q.DownloadKbps, q.UploadKbps)
 
 	return out
+}
+
+// describeMultiWAN renders Multi-WAN's desired state.
+func describeMultiWAN(m MultiWAN) string {
+	if !m.Enabled && len(m.Members) <= 1 {
+		return "single uplink"
+	}
+	if !m.Resolved {
+		return fmt.Sprintf("enabled (pending: mode %s, %d member(s) incomplete)", m.Mode, len(m.Members))
+	}
+	return fmt.Sprintf("enabled (mode %s, %d member(s))", m.Mode, len(m.Members))
 }
 
 // describeDNS renders the resolver's desired state.
@@ -929,4 +997,87 @@ func (s State) Prefixes() ([]netip.Prefix, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// multiWANState projects Multi-WAN configuration into desired state.
+func multiWANState(cfg config.Config, in gateway.Intent, wan Interface, res host.Resolution) MultiWAN {
+	mwan := MultiWAN{
+		Enabled: cfg.MultiWAN.Enabled,
+		Mode:    cfg.MultiWAN.Mode,
+		Policy:  cfg.MultiWAN.Policy,
+		HealthCheck: HealthCheck{
+			Target:   cfg.MultiWAN.HealthCheck.Target,
+			Interval: cfg.MultiWAN.HealthCheck.Interval,
+			Timeout:  cfg.MultiWAN.HealthCheck.Timeout,
+		},
+	}
+	if mwan.Mode == "" {
+		mwan.Mode = "single"
+	}
+	if mwan.Policy == "" {
+		mwan.Policy = "default"
+	}
+
+	if len(cfg.MultiWAN.Members) == 0 {
+		m := MultiWANMember{
+			ID:        "wan",
+			Interface: wan.Name,
+			StableID:  wan.StableID,
+			Weight:    1,
+			Priority:  100,
+			Enabled:   true,
+		}
+		if m.Interface == "" && cfg.Network.WAN != "" {
+			m.Interface = cfg.Network.WAN
+		}
+		mwan.Members = []MultiWANMember{m}
+		mwan.Resolved = wan.Present || !in.Enabled || !mwan.Enabled
+		return mwan
+	}
+
+	allResolved := true
+	for _, mc := range cfg.MultiWAN.Members {
+		m := MultiWANMember{
+			ID:        mc.ID,
+			Interface: mc.Interface,
+			Weight:    mc.Weight,
+			Priority:  mc.Priority,
+			Enabled:   mc.Enabled,
+			Gateway:   mc.Gateway,
+		}
+		if m.Weight <= 0 {
+			m.Weight = 1
+		}
+		if m.Priority <= 0 {
+			m.Priority = 100
+		}
+
+		matched := false
+		for r, iface := range res.Assigned {
+			if r.IsWAN() || r == host.RoleWAN {
+				if iface.ID == m.Interface || iface.SystemName == m.Interface {
+					m.StableID = iface.ID
+					m.Interface = iface.SystemName
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched && m.Interface == wan.Name && wan.Present {
+			m.StableID = wan.StableID
+			matched = true
+		}
+
+		if !matched && m.Enabled {
+			allResolved = false
+		}
+		mwan.Members = append(mwan.Members, m)
+	}
+
+	sort.SliceStable(mwan.Members, func(i, j int) bool {
+		return mwan.Members[i].ID < mwan.Members[j].ID
+	})
+
+	mwan.Resolved = allResolved
+	return mwan
 }
