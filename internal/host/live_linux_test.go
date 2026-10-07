@@ -31,6 +31,25 @@ package host
 // On a machine with no `ip`, or a container with no network namespace worth
 // looking at, this skips with a stated reason. It never reports a pass it did
 // not achieve, because "the integration test passed" must mean something.
+//
+// # CI environment & unprivileged host contract
+//
+// This test runs as part of the unprivileged test suite (`go test -race ./...`)
+// in CI and on development machines. It requires only `ip` on PATH.
+//
+// On minimal, cloud, or unprivileged hosts:
+//   - Root permissions are absent: `nft` and `tc` queries fail with EPERM,
+//     correctly degrading to `unknown` with a recorded probe detail rather than
+//     failing the suite.
+//   - Wireless tools (`iw`) may be absent: `readWirelessModes` records
+//     `tool_unavailable`, and no positive wireless capabilities are claimed.
+//   - Cloud hypervisors (such as Azure VM Accelerated Networking on GitHub
+//     Actions runners) may pair a synthetic netdev (`eth0`) with an SR-IOV
+//     virtual function (`enP...`) sharing the same physical MAC address and
+//     Ethernet link kind. Both records legitimately share the same hardware
+//     identity because kernel interface names are not authoritative device
+//     identities. Distinct physical devices, different link kinds, or
+//     ephemeral links must never collapse into one identity.
 
 import (
 	"context"
@@ -100,14 +119,30 @@ func TestLiveDiscoveryOnLinux(t *testing.T) {
 		}
 	}
 
-	// 3. Identities are unique. A collision means two distinct links are
-	//    indistinguishable to every selector-based consumer.
-	seen := map[string]string{}
+	// 3. Hardware identities are unique per physical device.
+	//
+	// A collision between genuinely different physical devices (different
+	// MAC addresses), between different link kinds, or between ephemeral
+	// interfaces means distinct links are indistinguishable to selector-based
+	// consumers.
+	//
+	// Multiple kernel interface records referring to the same underlying
+	// physical device (such as an Azure SR-IOV Accelerated Networking pair:
+	// synthetic eth0 and VF enP... sharing a MAC and link kind) legitimately
+	// share a stable hardware identity. Kernel interface names are not
+	// authoritative device identities.
+	seen := map[string]Interface{}
 	for _, i := range d.Interfaces {
 		if prev, dup := seen[i.ID]; dup {
-			t.Errorf("%s and %s share identity %s", prev, i.SystemName, i.ID)
+			if i.IDKind != IdentityHardware || prev.IDKind != IdentityHardware ||
+				i.MAC == "" || i.MAC != prev.MAC || i.Kind != prev.Kind {
+				t.Errorf("%s (%s, %s, %s) and %s (%s, %s, %s) share identity %s; "+
+					"distinct physical devices or link kinds must not collapse into one identity",
+					prev.SystemName, prev.Kind, prev.MAC, prev.IDKind,
+					i.SystemName, i.Kind, i.MAC, i.IDKind, i.ID)
+			}
 		}
-		seen[i.ID] = i.SystemName
+		seen[i.ID] = i
 	}
 
 	// 4. Loopback is never physical and never assignable.
@@ -325,15 +360,19 @@ func TestLiveDiscoveryIsRepeatable(t *testing.T) {
 		return
 	}
 
-	byID := make(map[string]Interface, len(second.Interfaces))
+	byName := make(map[string]Interface, len(second.Interfaces))
 	for _, i := range second.Interfaces {
-		byID[i.ID] = i
+		byName[i.SystemName] = i
 	}
 	for _, i := range first.Interfaces {
-		got, ok := byID[i.ID]
+		got, ok := byName[i.SystemName]
 		if !ok {
 			t.Errorf("%s (%s) vanished between two observations", i.SystemName, i.ID)
 			continue
+		}
+		if got.ID != i.ID {
+			t.Errorf("%s: stable identity changed between observations: %s -> %s",
+				i.SystemName, i.ID, got.ID)
 		}
 		if got.Kind != i.Kind || got.Physical != i.Physical {
 			t.Errorf("%s: classification changed between observations: (%s,%v) -> (%s,%v)",
