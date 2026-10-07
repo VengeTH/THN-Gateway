@@ -158,6 +158,22 @@ type daemonProc struct {
 	output *strings.Builder
 }
 
+// socketDir returns a temporary directory suitable for binding Unix domain
+// sockets. On Windows, AF_UNIX has a strict 108-character sockaddr_un path
+// buffer limit, so long test names combined with TempDir cause bind failures.
+func socketDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		dir, err := os.MkdirTemp("", "ts")
+		if err != nil {
+			t.Fatalf("creating socket dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		return dir
+	}
+	return t.TempDir()
+}
+
 // startDaemon launches the real thnd binary and waits until its socket answers.
 //
 // Waiting for the file to exist is not enough: a socket inode appears before
@@ -166,7 +182,7 @@ type daemonProc struct {
 func startDaemon(t *testing.T, thndPath string, extraEnv ...string) *daemonProc {
 	t.Helper()
 
-	dir := t.TempDir()
+	dir := socketDir(t)
 	sock := filepath.Join(dir, "thnd.sock")
 
 	env := cleanEnv(append([]string{
@@ -387,9 +403,9 @@ func TestDiagnosticsJSONUnmarshals(t *testing.T) {
 func TestBothBinariesAgreeOnTheConfiguredSocket(t *testing.T) {
 	thnPath, thndPath := binaries(t)
 
-	dir := t.TempDir()
-	sock := filepath.ToSlash(filepath.Join(dir, "configured.sock"))
-	db := filepath.ToSlash(filepath.Join(dir, "state", "state.db"))
+	dir := socketDir(t)
+	sock := filepath.ToSlash(filepath.Join(dir, "c.sock"))
+	db := filepath.ToSlash(filepath.Join(dir, "s.db"))
 
 	cfg := writeConfig(t, "schema_version: 1\npaths:\n  socket: "+sock+"\n  state_db: "+db+"\n")
 	env := []string{"THN_CONFIG=" + cfg}
