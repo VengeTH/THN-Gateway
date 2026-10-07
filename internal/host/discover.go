@@ -50,19 +50,13 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 			fmt.Sprintf("host inspection is unavailable on %s/%s; "+
 				"no interfaces and no capabilities were observed",
 				runtime.GOOS, runtime.GOARCH))
-		d.Capabilities = capabilitiesFor(d, nil)
-
-		// The probe records are collected on this path too. Nothing was read,
-		// which is exactly the case that produces no diagnostic and would
-		// otherwise be indistinguishable from "there was nothing to read" —
-		// so it has to be stated explicitly, or a report from an unsupported
-		// platform carries no trace of why it is empty.
 		d.Probes = probeRecords(snap, d)
 		if len(d.Probes) == 0 {
 			d.Probes = []network.Probe{
 				network.NotChecked("host-inspection", "observe-host"),
 			}
 		}
+		d.Capabilities = capabilitiesFor(d, nil)
 		return d
 	}
 
@@ -90,8 +84,8 @@ func FromSnapshot(snap *network.Snapshot) *Device {
 	d.Routes = snap.Routes
 
 	d.ForwardingEnabled, d.ForwardingKnown = forwardingFrom(snap)
-	d.Capabilities = capabilitiesFor(d, snap)
 	d.Probes = probeRecords(snap, d)
+	d.Capabilities = capabilitiesFor(d, snap)
 	return d
 }
 
@@ -530,14 +524,25 @@ func capabilitiesFor(d *Device, snap *network.Snapshot) map[Capability]Capabilit
 	// reporting what the hardware could theoretically do rather than what was
 	// observed.
 	wlanClients, wlanAPs := wirelessByMode(d)
+	wProbe := firstProbeFor(d.Probes, "wireless")
 
-	set(CapWirelessClient, len(wlanClients) > 0, ConfidenceObserved,
-		wirelessReason("client", wlanClients,
+	set(CapWirelessClient, len(wlanClients) > 0, wirelessConfidence(wProbe, len(wlanClients) > 0),
+		wirelessReason("client", wlanClients, wProbe,
 			"no wireless interface was observed operating as a client (mode managed/station)"))
-	set(CapWirelessAP, len(wlanAPs) > 0, ConfidenceObserved,
-		wirelessReason("access-point", wlanAPs,
+	set(CapWirelessAP, len(wlanAPs) > 0, wirelessConfidence(wProbe, len(wlanAPs) > 0),
+		wirelessReason("access-point", wlanAPs, wProbe,
 			"no wireless interface was observed operating as an access point (mode AP)"))
 	return caps
+}
+
+func wirelessConfidence(p network.Probe, present bool) Confidence {
+	if present {
+		return ConfidenceObserved
+	}
+	if p.Outcome.BlocksClaim() {
+		return ConfidenceUnknown
+	}
+	return ConfidenceObserved
 }
 
 // nftConfidence reports how firmly nftables availability was established.
@@ -737,11 +742,14 @@ func wirelessByMode(d *Device) (clients, aps []string) {
 	return clients, aps
 }
 
-func wirelessReason(mode string, names []string, absent string) string {
-	if len(names) == 0 {
-		return absent
+func wirelessReason(mode string, names []string, p network.Probe, absent string) string {
+	if len(names) > 0 {
+		return fmt.Sprintf("observed in %s mode on: %s", mode, strings.Join(names, ", "))
 	}
-	return fmt.Sprintf("observed in %s mode on: %s", mode, strings.Join(names, ", "))
+	if p.Outcome.BlocksClaim() {
+		return fmt.Sprintf("wireless %s could not be determined: probe ended %s (%s)", mode, p.Outcome, p.Detail)
+	}
+	return absent
 }
 
 func hasKind(d *Device, kind string) bool {

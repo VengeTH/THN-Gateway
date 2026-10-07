@@ -244,6 +244,78 @@ func TestMissingIwDoesNotEstablishPositiveWirelessCapability(t *testing.T) {
 	}
 }
 
+// TestWirelessProbeExecutionFailedDegradesToUnknown proves that when a wireless
+// probe ends in execution_failed (e.g. tool execution failure), wireless capabilities
+// degrade to ConfidenceUnknown and do not claim false ConfidenceObserved.
+// Furthermore, CapNetns and CapVeth are not polluted by the wireless probe.
+func TestWirelessProbeExecutionFailedDegradesToUnknown(t *testing.T) {
+	snap := &network.Snapshot{
+		Platform:  "linux",
+		Supported: true,
+		Interfaces: []network.Interface{
+			{Name: "lo", Index: 1, Kind: "loopback"},
+			{Name: "docker0", Index: 2, Kind: "bridge", LinkType: "ether"},
+		},
+		Probes: []network.Probe{
+			{
+				Subsystem: "wireless", Operation: "nl80211-modes", Tool: "iw",
+				Stage: network.StageExecute, Outcome: network.ProbeExecutionFailed,
+				Detail: "the tool ran but did not succeed",
+				Reason: "iw exited with error",
+			},
+		},
+		NFTables: network.NFTablesState{
+			Checked:   true,
+			Available: false,
+			Reason:    "nft is absent",
+			Probe: network.Probe{
+				Subsystem: "nftables", Operation: "list-tables",
+				Stage: network.StageExecute, Outcome: network.ProbeToolUnavailable,
+				Detail: "the tool is not installed",
+			},
+		},
+		TrafficControl: network.TCState{
+			Checked:   true,
+			Available: false,
+			Reason:    "tc is absent",
+			Probe: network.Probe{
+				Subsystem: "traffic-control", Operation: "qdisc-show",
+				Stage: network.StageExecute, Outcome: network.ProbeToolUnavailable,
+				Detail: "the tool is not installed",
+			},
+		},
+	}
+
+	d := FromSnapshot(snap)
+
+	// Wireless capabilities must degrade to ConfidenceUnknown, not ConfidenceObserved
+	for _, c := range []Capability{CapWirelessAP, CapWirelessClient} {
+		state := d.Capabilities[c]
+		if state.Confidence != ConfidenceUnknown {
+			t.Errorf("%s confidence = %q, want unknown when wireless probe failed", c, state.Confidence)
+		}
+		if state.Available {
+			t.Errorf("%s available = true, want false when wireless probe failed", c)
+		}
+	}
+
+	// CapNetns (observed via docker0 bridge) must not inherit the failed wireless probe.
+	netnsEv := d.EvidenceFor(CapNetns)
+	if netnsEv.Probe.Subsystem == "wireless" {
+		t.Errorf("CapNetns inherited wireless probe: %+v", netnsEv.Probe)
+	}
+
+	// No false confidence capabilities!
+	if falseConf := d.FalseConfidenceCapabilities(); len(falseConf) != 0 {
+		t.Errorf("unexpected false confidence capabilities: %v", falseConf)
+	}
+
+	// All unknowns must explain themselves!
+	if unexplained := d.UnknownCapabilitiesExplainThemselves(); len(unexplained) != 0 {
+		t.Errorf("unexplained unknown capabilities: %v", unexplained)
+	}
+}
+
 // TestPermissionDeniedNFTablesProbeDoesNotEstablishPositiveFirewall verifies
 // that when nft fails due to lack of root privileges (EPERM), nftables and firewall
 // capabilities degrade to unknown and never satisfy hard gates.

@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -35,6 +36,19 @@ func TestPermittedReadOnlyInvocations(t *testing.T) {
 	for _, c := range cases {
 		if err := Check(c.name, c.args...); err != nil {
 			t.Errorf("Check(%q, %v) = %v, want nil", c.name, c.args, err)
+		}
+	}
+}
+
+// TestExecReturnsNilOutputWhenProcessNotCreated asserts that when a command
+// cannot be started (e.g. executable not found on PATH), Exec returns a nil Output
+// so callers can structurally distinguish "no process created" from a failed run.
+func TestExecReturnsNilOutputWhenProcessNotCreated(t *testing.T) {
+	ctx := context.Background()
+	out, err := Exec(ctx, "iw", "dev")
+	if err != nil && !strings.Contains(err.Error(), "exit ") {
+		if out != nil {
+			t.Errorf("expected nil Output when process was not created, got: %+v", out)
 		}
 	}
 }

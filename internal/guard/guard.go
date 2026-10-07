@@ -276,17 +276,19 @@ func Exec(ctx context.Context, name string, args ...string) (*Output, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	out := &Output{Stdout: stdout.String(), Stderr: stderr.String()}
-
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			out.ExitCode = exitErr.ExitCode()
+			out := &Output{
+				Stdout:   stdout.String(),
+				Stderr:   stderr.String(),
+				ExitCode: exitErr.ExitCode(),
+			}
 			return out, fmt.Errorf("%s: exit %d: %s", name, out.ExitCode, stderr.String())
 		}
-		return out, fmt.Errorf("executing %s: %w", name, err)
+		return nil, fmt.Errorf("executing %s: %w", name, err)
 	}
-	return out, nil
+	return &Output{Stdout: stdout.String(), Stderr: stderr.String()}, nil
 }
 
 // Audit exposes the allowlist for diagnostics and documentation generation.

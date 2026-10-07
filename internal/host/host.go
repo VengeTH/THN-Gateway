@@ -649,10 +649,10 @@ func (d *Device) EvidenceFor(c Capability) CapabilityEvidence {
 		} else {
 			ev.Probe = NotCheckedProbe("forwarding", "sysctl-ipv4-forward")
 		}
-	case CapWirelessAP, CapWirelessClient, CapVeth, CapNetns:
+	case CapWirelessAP, CapWirelessClient:
 		ev.Source = "interfaces"
 		ev.Probe = firstProbeFor(d.Probes, "wireless", "host-info", "interfaces")
-	case CapMultipleEthernet, CapVLAN, CapBridge:
+	case CapVeth, CapNetns, CapMultipleEthernet, CapVLAN, CapBridge:
 		ev.Source = "interfaces"
 		ev.Probe = firstProbeFor(d.Probes, "interfaces", "host-info")
 	default:

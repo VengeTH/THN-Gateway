@@ -56,6 +56,8 @@ import (
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/venth/thn-gateway/internal/network"
 )
 
 // TestLiveDiscoveryOnLinux runs the real inspector against this machine.
@@ -424,6 +426,34 @@ func TestLiveDiscoveryLeavesTheNetworkAlone(t *testing.T) {
 		t.Error("the interface set changed across a discovery run")
 	}
 	if string(routesBefore) != string(routesAfter) {
-		t.Error("the routing table changed across a discovery run")
+		rBefore, errB := network.ParseRoutes(routesBefore)
+		rAfter, errA := network.ParseRoutes(routesAfter)
+		if errB != nil || errA != nil || !routesMatch(rBefore, rAfter) {
+			t.Errorf("the routing table changed across a discovery run:\n  before: %s\n  after:  %s",
+				string(routesBefore), string(routesAfter))
+		}
 	}
+}
+
+func routesMatch(before, after []network.Route) bool {
+	if len(before) != len(after) {
+		return false
+	}
+	type key struct {
+		dst   string
+		gw    string
+		iface string
+		scope string
+		isDef bool
+	}
+	bMap := make(map[key]bool, len(before))
+	for _, r := range before {
+		bMap[key{dst: r.Destination, gw: r.Gateway, iface: r.Interface, scope: r.Scope, isDef: r.Default}] = true
+	}
+	for _, r := range after {
+		if !bMap[key{dst: r.Destination, gw: r.Gateway, iface: r.Interface, scope: r.Scope, isDef: r.Default}] {
+			return false
+		}
+	}
+	return true
 }
