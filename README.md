@@ -47,7 +47,7 @@ thn schema   [--mutating]
 thn status   [--local]
 thn diagnostics [--local]
 thn host     [--analyze] [--debug] [--requires <n>] [--mac] [--config <path>] [--json]
-thn activate        # always refuses
+thn activate        # applies configuration with --confirm --confirm-present
 ```
 
 ### Tiers
@@ -58,7 +58,7 @@ Commands are grouped by what they need, and the grouping is a safety property:
 |---|---|---|
 | `pure` | `validate`, `plan`, `config`, `schema` | nothing — no daemon, no root, no network |
 | `live` | `status`, `diagnostics` | `thnd` (or `--local`) |
-| `destructive` | `activate` | refused in this build |
+| `destructive` | `activate` | requires --confirm --confirm-present |
 
 The pure commands are safe to run unattended, in CI, or against a production
 gateway. They work with `thnd` stopped and the network unplugged:

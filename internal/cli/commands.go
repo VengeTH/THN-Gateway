@@ -307,7 +307,7 @@ func printUsage(w interface{ Write([]byte) (int, error) }) {
 	fmt.Fprintln(w, "Tiers:")
 	fmt.Fprintln(w, "  pure        runs in-process; no daemon, no root, no network changes")
 	fmt.Fprintln(w, "  live        asks thnd for the real gateway state")
-	fmt.Fprintln(w, "  destructive changes host networking; refused in this build")
+	fmt.Fprintln(w, "  destructive changes host networking; requires confirmation and presence")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")
 	fmt.Fprintln(w, "  --json      emit machine-readable JSON")

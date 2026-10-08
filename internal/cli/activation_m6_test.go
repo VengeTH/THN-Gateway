@@ -19,6 +19,7 @@ func TestCLIActivationStatusOutput(t *testing.T) {
 		"Activation Status",
 		"State:",
 		"Can Apply:",
+		"true",
 		"false",
 		"Bound Applier:",
 		"Implemented Stages:",
@@ -52,8 +53,11 @@ func TestCLIActivationStatusJSON(t *testing.T) {
 		t.Fatalf("failed decoding JSON from thn activation status: %v\noutput: %s", err, out.String())
 	}
 
-	if data.CanApply {
-		t.Error("can_apply must be false in activation status")
+	if !data.CanApply {
+		t.Error("can_apply must be true in activation status; this build contains an apply path")
+	}
+	if !strings.Contains(data.Applier, "ProductionDriver") {
+		t.Errorf("expected ProductionDriver in applier, got %q", data.Applier)
 	}
 	if data.State == "" {
 		t.Error("state must not be empty in activation status")

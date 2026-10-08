@@ -617,7 +617,8 @@ func runActivationInspect(env *Env, args []string) ExitCode {
 }
 
 func runActivationStatus(env *Env, args []string) ExitCode {
-	m := activation.NewMachine(activation.StateDevelopment)
+	driver := execution.NewProductionDriver()
+	m := activation.NewMachineWithApplier(activation.StateDevelopment, driver)
 	report := m.Report()
 
 	if env.IsJSON {

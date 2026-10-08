@@ -10,7 +10,7 @@
 //	thn schema       pure   — in-process, no daemon, no root
 //	thn status       live   — requires thnd (or --local)
 //	thn diagnostics  live   — requires thnd (or --local)
-//	thn activate     destructive — refused in this build
+//	thn activate     destructive — changes host networking with confirmation and presence
 //
 // The pure commands are safe to run unattended, including in CI, on a
 // development machine, or against a production gateway. They cannot change

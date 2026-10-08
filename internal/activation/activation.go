@@ -804,6 +804,7 @@ func (m *Machine) Report() Report {
 	}
 	m.mu.RUnlock()
 
-	report.CanApply = app.Available()
+	_, isDisabled := app.(Disabled)
+	report.CanApply = CanApply() && app != nil && !isDisabled
 	return report
 }

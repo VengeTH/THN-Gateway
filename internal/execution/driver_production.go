@@ -54,6 +54,30 @@ func (d *ProductionDriver) Name() string {
 	return "production"
 }
 
+var _ activation.Applier = (*ProductionDriver)(nil)
+
+// Available reports whether this driver is currently authorized to act.
+func (d *ProductionDriver) Available() bool {
+	return d.CanApply()
+}
+
+// Describe explains this applier for status, inspect, and diagnostics reporting.
+func (d *ProductionDriver) Describe() string {
+	if d.CanApply() {
+		return "production Linux driver: execution.ProductionDriver (authorized)"
+	}
+	return "production Linux driver: execution.ProductionDriver (fail-closed, requires explicit authorization and all 13 gates)"
+}
+
+// Apply satisfies activation.Applier; live activation must be driven through
+// Executor.ExecutePlan with full evidence and digests.
+func (d *ProductionDriver) Apply(ctx activation.Context) error {
+	if !d.CanApply() {
+		return ErrProductionActivationDisabled
+	}
+	return nil
+}
+
 // CanApply reports whether this driver is authorized to mutate host state.
 // Permanently reports false unless explicitly authorized via Authorize.
 func (d *ProductionDriver) CanApply() bool {

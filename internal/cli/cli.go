@@ -59,7 +59,7 @@ const (
 	TierPure Tier = "pure"
 	// TierLive commands require the daemon.
 	TierLive Tier = "live"
-	// TierDestructive commands change host networking and are refused.
+	// TierDestructive commands change host networking and require explicit confirmation and presence.
 	TierDestructive Tier = "destructive"
 )
 
