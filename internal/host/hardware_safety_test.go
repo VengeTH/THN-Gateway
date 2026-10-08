@@ -36,8 +36,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // m71SourceFile is the M7.1 implementation in internal/host.
@@ -106,7 +106,7 @@ func TestM71AnalysisHasNoExecutionOrObservationPath(t *testing.T) {
 	// been used to do anything wrong.
 	for _, allowed := range []string{
 		`"fmt"`, `"net/netip"`, `"sort"`, `"strings"`,
-		`"github.com/venth/thn-gateway/internal/network"`,
+		`"github.com/VengeTH/THN-Gateway/internal/network"`,
 	} {
 		if !strings.Contains(code, allowed) {
 			t.Errorf("%s no longer imports %s; the allowlist in this test is stale", m71SourceFile, allowed)

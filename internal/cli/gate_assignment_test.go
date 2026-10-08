@@ -27,7 +27,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // mutatingNetworkingCommands are the binaries this family must not invoke.

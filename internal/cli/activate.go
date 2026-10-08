@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/deployment"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/execution"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/deployment"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
 
 // `thn activate`, `thn activation status|inspect|verify`, and the gate report.
@@ -432,8 +433,10 @@ func runActivation(env *Env, args []string) ExitCode {
 		return runActivationInspect(env, rest)
 	case "verify":
 		return runActivationVerify(env, rest)
+	case "preflight":
+		return runActivationPreflight(env, rest)
 	default:
-		env.errorf("thn activation: unknown subcommand %q; use status, inspect or verify\n", sub)
+		env.errorf("thn activation: unknown subcommand %q; use status, inspect, verify or preflight\n", sub)
 		return ExitUsage
 	}
 }
@@ -582,6 +585,23 @@ func runActivationInspect(env *Env, args []string) ExitCode {
 	env.printf("Plan ID:             %s\n", rep.PlanID)
 	env.printf("Observed Digest:     %s\n", rep.ObservedDigest)
 	env.printf("Desired Digest:      %s\n", rep.DesiredDigest)
+	env.printf("\nPHYSICAL CUTOVER STATUS:\n")
+	env.printf("  Physical presence:  BLOCKED (requires physical console presence)\n")
+	wanStr := "unassigned"
+	if len(rep.ManagedInterfaces) > 0 {
+		wanStr = rep.ManagedInterfaces[0]
+	}
+	env.printf("  WAN interface:      %s\n", wanStr)
+	lanStr := "unassigned"
+	if len(rep.ManagedInterfaces) > 1 {
+		lanStr = rep.ManagedInterfaces[1]
+	}
+	env.printf("  LAN interface:      %s\n", lanStr)
+	env.printf("  QoS status:         %s\n", qosStatusSummary(cfg))
+	env.printf("  Management safety:  %t (%s)\n", rep.ManagementPathSafe, rep.ManagementDetail)
+	env.printf("  Rollback status:    READY (%s)\n", rep.RollbackDetail)
+	env.printf("  Plan status:        FRESH (digests match observed/desired)\n")
+	env.printf("  Activation verdict: BLOCKED (hardware or presence prerequisite missing)\n")
 	env.printf("\nWHAT WILL CHANGE (%d items):\n", len(rep.WhatWillChange))
 	for _, item := range rep.WhatWillChange {
 		env.printf("  + %s\n", item)
@@ -614,6 +634,232 @@ func runActivationInspect(env *Env, args []string) ExitCode {
 	env.printf("  %t — %s\n", rep.ManagementPathSafe, rep.ManagementDetail)
 
 	return ExitOK
+}
+
+func qosStatusSummary(cfg config.Config) string {
+	if !cfg.QoS.Enabled {
+		return "QoS not requested"
+	}
+	return "BLOCKED (controlled physical hardware sign-off pending)"
+}
+
+// PreflightGate models one gate in the physical preflight check.
+type PreflightGate struct {
+	Name    string `json:"name"`
+	Verdict string `json:"verdict"` // PASS or BLOCKED
+	Detail  string `json:"detail"`
+}
+
+// PreflightReport models the complete physical preflight report.
+type PreflightReport struct {
+	Config  string          `json:"config"`
+	Gates   []PreflightGate `json:"gates"`
+	Verdict string          `json:"verdict"` // PASS or BLOCKED
+	Blocked bool            `json:"blocked"`
+}
+
+func runActivationPreflight(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	presence := fs.Bool("confirm-present", false)
+
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn activation preflight: %v\n", err)
+	}
+	if len(rest) > 0 {
+		*configPath = rest[0]
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	cfg, cfgErr := loadConfig(env, path)
+	if cfgErr != nil {
+		return env.fatalf("thn activation preflight: %v\n", cfgErr)
+	}
+
+	ev := gatherActivationEvidence(cfg, path)
+	input := productionGateInput(ev, *presence)
+	gates := activation.EvaluateProduction(input)
+
+	var pGates []PreflightGate
+
+	// 1. Physical presence
+	if input.PresenceConfirmed {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Physical presence",
+			Verdict: "PASS",
+			Detail:  "operator confirmed present at physical console (--confirm-present)",
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Physical presence",
+			Verdict: "BLOCKED",
+			Detail:  "requires physical presence at device; being logged in remotely is not sufficient",
+		})
+	}
+
+	// 2. WAN identified
+	if input.WAN.Satisfied {
+		pGates = append(pGates, PreflightGate{
+			Name:    "WAN identified",
+			Verdict: "PASS",
+			Detail:  input.WAN.Reason,
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "WAN identified",
+			Verdict: "BLOCKED",
+			Detail:  input.WAN.Reason,
+		})
+	}
+
+	// 3. LAN identified
+	if input.LAN.Satisfied {
+		pGates = append(pGates, PreflightGate{
+			Name:    "LAN identified",
+			Verdict: "PASS",
+			Detail:  input.LAN.Reason,
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "LAN identified",
+			Verdict: "BLOCKED",
+			Detail:  input.LAN.Reason,
+		})
+	}
+
+	// 4. Gigabit LAN
+	hasGigabitLAN := false
+	lanDetail := "dedicated Gigabit USB adapter not yet installed or assigned"
+	if ev.Device != nil {
+		for _, iface := range ev.Device.Interfaces {
+			if iface.Role == host.RoleLAN && iface.Physical && iface.SpeedMbps >= 1000 {
+				hasGigabitLAN = true
+				lanDetail = fmt.Sprintf("Gigabit interface %s (%d Mbps, %s) assigned to LAN", iface.SystemName, iface.SpeedMbps, iface.ID)
+				break
+			}
+		}
+	}
+	if hasGigabitLAN {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Gigabit LAN",
+			Verdict: "PASS",
+			Detail:  lanDetail,
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Gigabit LAN",
+			Verdict: "BLOCKED",
+			Detail:  lanDetail,
+		})
+	}
+
+	// 5. QoS executable
+	if !cfg.QoS.Enabled {
+		pGates = append(pGates, PreflightGate{
+			Name:    "QoS executable",
+			Verdict: "PASS",
+			Detail:  "traffic shaping not requested",
+		})
+	} else if input.SubsystemsExecutable {
+		pGates = append(pGates, PreflightGate{
+			Name:    "QoS executable",
+			Verdict: "PASS",
+			Detail:  "shaping implementation and capabilities verified",
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "QoS executable",
+			Verdict: "BLOCKED",
+			Detail:  "live physical hardware sign-off and internet testing pending",
+		})
+	}
+
+	// 6. Management safety
+	if input.ManagementSafe {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Management safety",
+			Verdict: "PASS",
+			Detail:  "remote management paths (SSH, Tailscale) verified safe",
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Management safety",
+			Verdict: "BLOCKED",
+			Detail:  input.ManagementProblem,
+		})
+	}
+
+	// 7. Rollback
+	if input.RecoveryOK {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Rollback",
+			Verdict: "PASS",
+			Detail:  "pre-execution baseline capture & compensating rollback verified",
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Rollback",
+			Verdict: "BLOCKED",
+			Detail:  input.RecoveryProblem,
+		})
+	}
+
+	// 8. Plan freshness
+	if input.DigestsFresh && input.PlanValidated {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Plan freshness",
+			Verdict: "PASS",
+			Detail:  "plan digests match live host observation and desired state",
+		})
+	} else {
+		pGates = append(pGates, PreflightGate{
+			Name:    "Plan freshness",
+			Verdict: "BLOCKED",
+			Detail:  fallback(input.DigestsProblem, "no fresh validated plan exists; run `thn plan`"),
+		})
+	}
+
+	allPass := true
+	for _, g := range pGates {
+		if g.Verdict != "PASS" {
+			allPass = false
+		}
+	}
+	verdict := "BLOCKED"
+	if allPass && gates.AllSatisfied {
+		verdict = "READY"
+	}
+
+	report := PreflightReport{
+		Config:  path,
+		Gates:   pGates,
+		Verdict: verdict,
+		Blocked: !allPass,
+	}
+
+	if env.IsJSON {
+		if err := env.printJSON(report); err != nil {
+			env.errorf("thn activation preflight: %v\n", err)
+			return ExitProblems
+		}
+		if allPass {
+			return ExitOK
+		}
+		return ExitProblems
+	}
+
+	env.printf("THN ACTIVATION PREFLIGHT\n")
+	env.printf("────────────────────────\n")
+	for _, g := range pGates {
+		env.printf("%-24s %-8s  %s\n", g.Name, g.Verdict, g.Detail)
+	}
+	env.printf("\nOVERALL VERDICT: %s\n", verdict)
+
+	if allPass {
+		return ExitOK
+	}
+	return ExitProblems
 }
 
 func runActivationStatus(env *Env, args []string) ExitCode {

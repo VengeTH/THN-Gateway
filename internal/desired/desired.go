@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // Role classifies an interface's purpose.
@@ -140,6 +140,37 @@ type QoS struct {
 
 	// OverheadPercent is the framing overhead compensation applied.
 	OverheadPercent int `json:"overhead_percent,omitempty"`
+
+	// Clients configures per-client bandwidth limits, guarantees, and priorities.
+	Clients []QoSClient `json:"clients,omitempty"`
+
+	// Groups configures aggregate bandwidth pools.
+	Groups []QoSGroup `json:"groups,omitempty"`
+
+	// DefaultPriority sets the priority for unclassified traffic.
+	DefaultPriority string `json:"default_priority,omitempty"`
+}
+
+// QoSClient is the desired traffic shaping configuration for one client or subnet.
+type QoSClient struct {
+	ID              string `json:"id"`
+	IP              string `json:"ip"`
+	MAC             string `json:"mac,omitempty"`
+	DownloadKbps    int    `json:"download_kbps"`
+	UploadKbps      int    `json:"upload_kbps"`
+	MinDownloadKbps int    `json:"min_download_kbps,omitempty"`
+	MinUploadKbps   int    `json:"min_upload_kbps,omitempty"`
+	Priority        string `json:"priority,omitempty"`
+	Group           string `json:"group,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
+}
+
+// QoSGroup is the desired bandwidth pool shared across multiple clients.
+type QoSGroup struct {
+	Name         string `json:"name"`
+	DownloadKbps int    `json:"download_kbps"`
+	UploadKbps   int    `json:"upload_kbps"`
+	Priority     string `json:"priority,omitempty"`
 }
 
 // DNS is the desired resolver state.
@@ -579,7 +610,31 @@ func FromConfigWithResolution(cfg config.Config, res host.Resolution) State {
 		DownloadKbps:    cfg.QoS.DownloadKbps,
 		UploadKbps:      cfg.QoS.UploadKbps,
 		OverheadPercent: cfg.QoS.OverheadPercent,
+		DefaultPriority: cfg.QoS.DefaultPriority,
 		Role:            "wan",
+	}
+
+	for _, c := range cfg.QoS.Clients {
+		s.QoS.Clients = append(s.QoS.Clients, QoSClient{
+			ID:              c.ID,
+			IP:              c.IP,
+			MAC:             c.MAC,
+			DownloadKbps:    c.DownloadKbps,
+			UploadKbps:      c.UploadKbps,
+			MinDownloadKbps: c.MinDownloadKbps,
+			MinUploadKbps:   c.MinUploadKbps,
+			Priority:        c.Priority,
+			Group:           c.Group,
+			Disabled:        c.Disabled,
+		})
+	}
+	for _, g := range cfg.QoS.Groups {
+		s.QoS.Groups = append(s.QoS.Groups, QoSGroup{
+			Name:         g.Name,
+			DownloadKbps: g.DownloadKbps,
+			UploadKbps:   g.UploadKbps,
+			Priority:     g.Priority,
+		})
 	}
 
 	// The shaping interface is the resolved WAN, and the stable identity

@@ -52,7 +52,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
 )
 
 // Config controls how firing instances are grouped and suppressed.

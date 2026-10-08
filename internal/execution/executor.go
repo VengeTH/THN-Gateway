@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
 
 // ExecutionOptions provides runtime context and state inputs to the Executor.
@@ -214,6 +214,27 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 	if err != nil {
 		res.FinalState = StateBlocked
 		res.Error = fmt.Sprintf("capturing pre-execution baseline backup: %v", err)
+		return res, err
+	}
+
+	// 2b. FOREIGN STATE CHECK
+	//
+	// A qdisc apply replaces the root discipline on an interface. If what is
+	// there was not put there by THN, replacing it destroys configuration
+	// whose purpose this plan never learned — an operator's hand-tuned tree,
+	// a VPN client's shaper, a container runtime's.
+	//
+	// The check runs after capture and before validation so that a refusal is
+	// based on what was actually observed, and it refuses rather than warns:
+	// the plan that would have replaced it was built from a document that
+	// never mentioned the discipline.
+	//
+	// This is the difference between "THN manages this" and "THN may rewrite
+	// whatever it finds".
+	ops, err = attachBaselines(ops, baselineSnapshot)
+	if err != nil {
+		res.FinalState = StateBlocked
+		res.Error = err.Error()
 		return res, err
 	}
 
@@ -473,6 +494,62 @@ func (e *Executor) rollback(
 	return res, cause
 }
 
+// attachBaselines binds each qdisc apply to the state captured for its
+// interface, and refuses to proceed against foreign traffic control.
+//
+// # Why this runs here
+//
+// Two reasons, both about ordering.
+//
+// It has to run after CaptureState, because the decision needs an
+// observation rather than an assumption — a refusal that says "there is
+// something there" when it has not looked would be as wrong as the silent
+// adoption it replaces.
+//
+// It has to run before Validate and Apply, so that a refusal happens before
+// anything on the host has been touched. Refusing after the first interface
+// is replaced leaves the host half-shaped, which is the partial-construction
+// state the product spec calls out.
+//
+// # Why the operations are rebuilt rather than mutated in place
+//
+// Operation values are compared and journalled. Rebuilding produces new values
+// carrying the baseline, so an operation's identity after this point includes
+// what it will restore — which is what the journal should record.
+func attachBaselines(ops []Operation, baseline *StateSnapshot) ([]Operation, error) {
+	if baseline == nil {
+		return nil, fmt.Errorf("no baseline snapshot is available, so the traffic control " +
+			"this transaction would replace cannot be established; refusing rather than " +
+			"destroying state nobody recorded")
+	}
+
+	out := make([]Operation, 0, len(ops))
+	for _, op := range ops {
+		apply, ok := op.(OpQDiscApply)
+		if !ok {
+			out = append(out, op)
+			continue
+		}
+
+		b, found := baseline.QDiscs[apply.Interface]
+		if !found {
+			return nil, fmt.Errorf("no traffic-control baseline was captured for %s, so this "+
+				"transaction cannot establish whether replacing its queue discipline would "+
+				"destroy existing configuration", apply.Interface)
+		}
+		if err := AdoptableRootQdisc(b); err != nil {
+			return nil, err
+		}
+
+		apply.PreviousQdisc = b.Root
+		apply.PreviousQdiscCaptured = b.Captured
+		apply.PreviousClasses = append([]string(nil), b.Classes...)
+		apply.PreviousFilters = append([]string(nil), b.Filters...)
+		out = append(out, apply)
+	}
+	return out, nil
+}
+
 // BackupScopeFor derives the set of state that must be captured before ops are
 // applied.
 //
@@ -502,7 +579,8 @@ func BackupScopeFor(ops []Operation, obs diff.Observed) BackupScope {
 			seenIfaces[o.Interface] = true
 		case OpNFTApplyTHNTable, OpNFTDeleteTHNTable:
 			scope.NFTables = true
-		case OpQDiscApply, OpQDiscDelete:
+		case OpQDiscApply, OpQDiscReplace, OpQDiscDelete, OpTCStateRestore,
+			OpTCClassApply, OpTCClassDelete, OpTCFilterApply, OpTCFilterDelete:
 			seenIfaces[o.Target()] = true
 			scope.QDiscs = true
 		case OpDNSApply:

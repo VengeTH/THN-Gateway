@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/firewall/policy"
 )
 
 // Render turns a policy into an nftables ruleset.

@@ -27,8 +27,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // analysisDevice builds a two-port wired gateway: one port carrying the

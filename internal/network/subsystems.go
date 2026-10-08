@@ -46,7 +46,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
 )
 
 // THNTableFamily and THNTableName identify the nftables table THN would own.

@@ -44,7 +44,7 @@ import (
 	"fmt"
 	"runtime"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // Live is the Discovery backed by the real machine.

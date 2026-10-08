@@ -59,8 +59,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/daemon"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/daemon"
 )
 
 // defaultConfigPath mirrors the compiled default configuration location.

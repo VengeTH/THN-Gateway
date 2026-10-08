@@ -28,10 +28,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/schema"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/schema"
 )
 
 // Severity classifies a finding.

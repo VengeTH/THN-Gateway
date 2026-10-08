@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/sandbox"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp/dnsmasq"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/sandbox"
 )
 
 // This file is the isolated test environment.

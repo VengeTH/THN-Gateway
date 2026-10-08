@@ -4,11 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/incidents"
-	"github.com/venth/thn-gateway/internal/rules"
-	"github.com/venth/thn-gateway/internal/ruleset"
-	"github.com/venth/thn-gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/incidents"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/ruleset"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
 )
 
 var base = time.Date(2026, 3, 14, 9, 0, 0, 0, time.UTC)

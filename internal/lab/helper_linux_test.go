@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -63,6 +64,12 @@ func TestLabHelperProcess(t *testing.T) {
 		runConnectHelper(t, args)
 	case "serve":
 		runServeHelper(t, args)
+	case "traffic-stream":
+		runTrafficStreamHelper(t, args)
+	case "traffic-sink":
+		runTrafficSinkHelper(t, args)
+	case "rtt-ping":
+		runRTTPingHelper(t, args)
 	default:
 		t.Fatalf("unknown lab helper mode %q", args[0])
 	}
@@ -243,4 +250,190 @@ func emitHelperReport(v any) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// StreamReport captures throughput measurement results.
+type StreamReport struct {
+	BytesTransferred uint64  `json:"bytes_transferred"`
+	DurationMS       int64   `json:"duration_ms"`
+	ThroughputBps    float64 `json:"throughput_bps"`
+	ThroughputMbps   float64 `json:"throughput_mbps"`
+	RemoteAddress    string  `json:"remote_address,omitempty"`
+	Error            string  `json:"error,omitempty"`
+}
+
+// RTTReport captures latency measurement results.
+type RTTReport struct {
+	SamplesMS []float64 `json:"samples_ms"`
+	MinMS     float64   `json:"min_ms"`
+	AvgMS     float64   `json:"avg_ms"`
+	MaxMS     float64   `json:"max_ms"`
+	JitterMS  float64   `json:"jitter_ms"`
+	LossCount int       `json:"loss_count"`
+	Error     string    `json:"error,omitempty"`
+}
+
+// runTrafficStreamHelper dials an endpoint and streams data for duration_ms.
+func runTrafficStreamHelper(t *testing.T, args []string) {
+	if len(args) < 3 {
+		t.Fatalf("traffic-stream takes <endpoint> <duration_ms>, got %v", args)
+	}
+	endpoint := args[1]
+	durationMS, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil || durationMS <= 0 {
+		durationMS = 1000
+	}
+
+	var rep StreamReport
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", endpoint, helperDialTimeout)
+	if err != nil {
+		rep.Error = err.Error()
+		emitHelperReport(rep)
+		return
+	}
+	defer conn.Close()
+
+	chunk := make([]byte, 16384)
+	for i := range chunk {
+		chunk[i] = byte(i % 256)
+	}
+
+	deadline := start.Add(time.Duration(durationMS) * time.Millisecond)
+	_ = conn.SetDeadline(deadline.Add(helperDialTimeout))
+
+	var total uint64
+	for time.Now().Before(deadline) {
+		n, err := conn.Write(chunk)
+		if n > 0 {
+			total += uint64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	rep.BytesTransferred = total
+	rep.DurationMS = elapsed.Milliseconds()
+	if elapsed.Seconds() > 0 {
+		rep.ThroughputBps = float64(total*8) / elapsed.Seconds()
+		rep.ThroughputMbps = rep.ThroughputBps / 1_000_000
+	}
+	emitHelperReport(rep)
+}
+
+// runTrafficSinkHelper listens on an address, accepts connections, and sinks data for duration_ms.
+func runTrafficSinkHelper(t *testing.T, args []string) {
+	if len(args) < 3 {
+		t.Fatalf("traffic-sink takes <listen_addr:port> <duration_ms>, got %v", args)
+	}
+	endpoint := args[1]
+	durationMS, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil || durationMS <= 0 {
+		durationMS = 2000
+	}
+
+	var rep StreamReport
+	ln, err := net.Listen("tcp", endpoint)
+	if err != nil {
+		rep.Error = err.Error()
+		emitHelperReport(rep)
+		return
+	}
+	defer ln.Close()
+
+	deadline := time.Now().Add(time.Duration(durationMS) * time.Millisecond)
+	_ = ln.(*net.TCPListener).SetDeadline(deadline)
+
+	conn, err := ln.Accept()
+	if err != nil {
+		rep.Error = err.Error()
+		emitHelperReport(rep)
+		return
+	}
+	defer conn.Close()
+
+	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		rep.RemoteAddress = tcp.IP.String()
+	}
+
+	start := time.Now()
+	buf := make([]byte, 32768)
+	var total uint64
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := conn.Read(buf)
+		if n > 0 {
+			total += uint64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	rep.BytesTransferred = total
+	rep.DurationMS = elapsed.Milliseconds()
+	if elapsed.Seconds() > 0 {
+		rep.ThroughputBps = float64(total*8) / elapsed.Seconds()
+		rep.ThroughputMbps = rep.ThroughputBps / 1_000_000
+	}
+	emitHelperReport(rep)
+}
+
+// runRTTPingHelper measures round-trip time latency to an endpoint.
+func runRTTPingHelper(t *testing.T, args []string) {
+	if len(args) < 3 {
+		t.Fatalf("rtt-ping takes <endpoint> <count>, got %v", args)
+	}
+	endpoint := args[1]
+	count, _ := strconv.Atoi(args[2])
+	if count <= 0 {
+		count = 5
+	}
+
+	var rep RTTReport
+	var totalMS float64
+	minMS := 1e9
+	maxMS := 0.0
+
+	for i := 0; i < count; i++ {
+		t0 := time.Now()
+		conn, err := net.DialTimeout("tcp", endpoint, 2*time.Second)
+		if err != nil {
+			rep.LossCount++
+			continue
+		}
+		rtt := time.Since(t0).Seconds() * 1000
+		conn.Close()
+
+		rep.SamplesMS = append(rep.SamplesMS, rtt)
+		totalMS += rtt
+		if rtt < minMS {
+			minMS = rtt
+		}
+		if rtt > maxMS {
+			maxMS = rtt
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if len(rep.SamplesMS) > 0 {
+		rep.MinMS = minMS
+		rep.MaxMS = maxMS
+		rep.AvgMS = totalMS / float64(len(rep.SamplesMS))
+		var devSum float64
+		for _, s := range rep.SamplesMS {
+			diff := s - rep.AvgMS
+			if diff < 0 {
+				diff = -diff
+			}
+			devSum += diff
+		}
+		rep.JitterMS = devSum / float64(len(rep.SamplesMS))
+	} else {
+		rep.Error = "all probe samples failed"
+	}
+	emitHelperReport(rep)
 }

@@ -28,10 +28,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/profile"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/profile"
 )
 
 // runDiscover implements `thn discover`.

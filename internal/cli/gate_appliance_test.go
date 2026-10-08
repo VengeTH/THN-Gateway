@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/appliance"
-	"github.com/venth/thn-gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/appliance"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
 )
 
 // This file is the gate phase for the appliance image.

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // Profile is an intended use of this machine.

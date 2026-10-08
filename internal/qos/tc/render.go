@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
 )
 
 // Render produces the traffic-shaping commands for a policy.
@@ -13,15 +13,29 @@ import (
 // imports no os/exec, so there is no path from here to applying a command.
 // That is the same guarantee the rest of THN gives, and the guard test
 // enforces it repository-wide.
-func Render(p qos.Policy, sel qos.Selection) string {
+//
+// # wan and lan are both required
+//
+// Two arguments rather than one, because a correct script needs two
+// disciplines on two interfaces. p.Interface alone names the WAN (the
+// bottleneck), and shaping only that would enforce the upload rate and leave
+// the download unshaped — the trap the product spec calls out in Section 5.
+//
+// The LAN name is a parameter rather than something inferred, because the
+// kernel interface a client sits behind is an observation, and guessing it
+// from the WAN name is how shaping ends up on the wrong link.
+func Render(p qos.Policy, sel qos.Selection, wan, lan string) string {
 	p.Algorithm = sel.Algorithm
 
 	var b strings.Builder
 
 	writeHeader(&b, p, sel)
-	writeApply(&b, p, sel)
-	writeVerification(&b, p)
-	writeRemoval(&b, p)
+	writeApply(&b, p, sel, wan, lan)
+	if !p.Enabled || p.Algorithm == qos.AlgorithmNone || sel.Algorithm == qos.AlgorithmNone {
+		return b.String()
+	}
+	writeVerification(&b, p, wan, lan)
+	writeRemoval(&b, p, wan, lan)
 	writeNotes(&b, p, sel)
 
 	return b.String()
@@ -72,22 +86,37 @@ func writeHeader(b *strings.Builder, p qos.Policy, sel qos.Selection) {
 }
 
 // writeApply emits the command that installs the qdisc.
-func writeApply(b *strings.Builder, p qos.Policy, sel qos.Selection) {
+func writeApply(b *strings.Builder, p qos.Policy, sel qos.Selection, wan, lan string) {
 	fmt.Fprintf(b, "# --- apply --------------------------------------------------------\n")
 	fmt.Fprintf(b, "#\n")
 
-	iface := p.Interface
-	if iface == "" {
-		fmt.Fprintf(b, "# No interface is configured, so no command can be generated.\n")
-		fmt.Fprintf(b, "\n")
+	if wan == "" || lan == "" {
+		fmt.Fprintf(b, "# Both a WAN and a LAN interface are required: the WAN egress carries\n")
+		fmt.Fprintf(b, "# the clients' upload and the LAN egress carries their download. With\n")
+		fmt.Fprintf(b, "# only one of them resolved, no correct pair of disciplines can be built.\n")
+		fmt.Fprintf(b, "#\n")
+		fmt.Fprintf(b, "#   wan = %s\n", orNoneText(wan))
+		fmt.Fprintf(b, "#   lan = %s\n\n", orNoneText(lan))
 		return
 	}
 
+	if len(p.Clients) > 0 {
+		writeHierarchicalShaper(b, p, wan, lan)
+		return
+	}
+
+	// fq_codel has no rate option, so it cannot enforce a configured limit in
+	// either direction. Installing it and calling it shaping would be the
+	// silent degradation the spec forbids; it is still rendered, because the
+	// operator asked for it and its queue control is a real improvement, but
+	// the limitation travels with the command.
 	switch sel.Algorithm {
 	case qos.AlgorithmCake:
-		writeCake(b, p, iface)
+		writeCake(b, p, wan, DirectionUpload)
+		writeCake(b, p, lan, DirectionDownload)
 	case qos.AlgorithmFqCodel:
-		writeFqCodel(b, p, iface)
+		writeFqCodel(b, p, wan, "upload")
+		writeFqCodel(b, p, lan, "download")
 	case qos.AlgorithmNone:
 		fmt.Fprintf(b, "# The algorithm is \"none\"; no shaping will be applied.\n\n")
 	default:
@@ -95,64 +124,189 @@ func writeApply(b *strings.Builder, p qos.Policy, sel qos.Selection) {
 	}
 }
 
-// writeCake emits the CAKE command.
+// orNoneText renders an empty interface name for a diagnostic line.
+func orNoneText(s string) string {
+	if s == "" {
+		return "(unresolved)"
+	}
+	return s
+}
+
+// writeHierarchicalShaper emits an HTB class hierarchy with leaf CAKE qdiscs
+// for per-client bandwidth limits, guarantees, and priorities.
+func writeHierarchicalShaper(b *strings.Builder, p qos.Policy, wan, lan string) {
+	fmt.Fprintf(b, "# --- hierarchical per-client shaping (HTB + CAKE) -----------------\n#\n")
+	fmt.Fprintf(b, "# 1. Uplink (WAN egress: %s)\n", wan)
+	if rootArgs, err := HTBRootArgs(wan, "99"); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(rootArgs))
+	}
+	upWire := p.Bandwidth.Effective(qos.Upload)
+	if rootClass, err := HTBClassArgs(wan, "1:", "1:1", upWire, upWire, 0); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(rootClass))
+	}
+	// Priority 1: Management traffic (mark 0x1) directing to Class 1:1 (unrestricted)
+	if fltMgmt, err := FilterFwmarkArgs(wan, "1:", 1, "0x1", "1:1"); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(fltMgmt))
+	}
+	for i, c := range p.Clients {
+		if c.Disabled {
+			continue
+		}
+		classID := fmt.Sprintf("1:%d0", i+1)
+		leafHandle := fmt.Sprintf("%d0:", i+1)
+		markHex := fmt.Sprintf("0x%x", (i+1)*16)
+		prioBand := c.Priority.HTBPrio()
+		clientUp := c.UploadKbps
+		minUp := c.MinUploadKbps
+		if minUp <= 0 {
+			minUp = clientUp / 10
+			if minUp < 100 {
+				minUp = 100
+			}
+		}
+		if clsArgs, err := HTBClassArgs(wan, "1:1", classID, minUp, clientUp, prioBand); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(clsArgs))
+		}
+		if leafArgs, err := CakeLeafArgs(wan, classID, leafHandle, false); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(leafArgs))
+		}
+		if fltFw, err := FilterFwmarkArgs(wan, "1:", 10, markHex, classID); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(fltFw))
+		}
+		if fltIP, err := FilterIPArgs(wan, "1:", 20, c.IP, true, classID); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(fltIP))
+		}
+	}
+	// WAN default class
+	if defCls, err := HTBClassArgs(wan, "1:1", "1:99", 100, upWire, 3); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(defCls))
+	}
+	if defLeaf, err := CakeLeafArgs(wan, "1:99", "99:", false); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(defLeaf))
+	}
+
+	fmt.Fprintf(b, "\n# 2. Downlink (LAN egress: %s)\n", lan)
+	if rootArgs, err := HTBRootArgs(lan, "99"); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(rootArgs))
+	}
+	downWire := p.Bandwidth.Effective(qos.Download)
+	if rootClass, err := HTBClassArgs(lan, "1:", "1:1", downWire, downWire, 0); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(rootClass))
+	}
+	// Priority 1: Management traffic (mark 0x1) directing to Class 1:1
+	if fltMgmt, err := FilterFwmarkArgs(lan, "1:", 1, "0x1", "1:1"); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(fltMgmt))
+	}
+	for i, c := range p.Clients {
+		if c.Disabled {
+			continue
+		}
+		classID := fmt.Sprintf("1:%d0", i+1)
+		leafHandle := fmt.Sprintf("%d0:", i+1)
+		markHex := fmt.Sprintf("0x%x", (i+1)*16)
+		prioBand := c.Priority.HTBPrio()
+		clientDown := c.DownloadKbps
+		minDown := c.MinDownloadKbps
+		if minDown <= 0 {
+			minDown = clientDown / 10
+			if minDown < 100 {
+				minDown = 100
+			}
+		}
+		if clsArgs, err := HTBClassArgs(lan, "1:1", classID, minDown, clientDown, prioBand); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(clsArgs))
+		}
+		if leafArgs, err := CakeLeafArgs(lan, classID, leafHandle, true); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(leafArgs))
+		}
+		if fltFw, err := FilterFwmarkArgs(lan, "1:", 10, markHex, classID); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(fltFw))
+		}
+		if fltIP, err := FilterIPArgs(lan, "1:", 20, c.IP, false, classID); err == nil {
+			fmt.Fprintf(b, "%s\n", scriptLine(fltIP))
+		}
+	}
+	// LAN default class
+	if defCls, err := HTBClassArgs(lan, "1:1", "1:99", 100, downWire, 3); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(defCls))
+	}
+	if defLeaf, err := CakeLeafArgs(lan, "1:99", "99:", true); err == nil {
+		fmt.Fprintf(b, "%s\n", scriptLine(defLeaf))
+	}
+	fmt.Fprintf(b, "\n")
+}
+
+// writeCake emits the CAKE command for one direction.
 //
-// CAKE's bandwidth is the wire rate, not the payload rate, so the configured
-// figures are raised by the overhead allowance before being passed. Shaping at
-// exactly the provisioned payload rate would leave the link permanently
-// under-utilised by about a tenth.
-func writeCake(b *strings.Builder, p qos.Policy, iface string) {
-	down := p.Bandwidth.Effective(qos.Download)
-	up := p.Bandwidth.Effective(qos.Upload)
+// The arguments come from CakeArgs, not from a format string here. M7.4 built
+// them inline and got four of them wrong: `uplink`, `target`, `interval` and
+// `quantum` are not CAKE options, and tc rejects a command containing any of
+// them with `What is "X"?`. A second hand-written copy of this command is what
+// let the renderer and the production driver drift apart, so there is only
+// one now.
+func writeCake(b *strings.Builder, p qos.Policy, iface string, dir Direction) {
+	args, err := CakeArgs(p.WithInterface(iface), dir, p.MTU)
+	if err != nil {
+		fmt.Fprintf(b, "# No CAKE command can be generated for %s: %v\n\n", dir, err)
+		return
+	}
+	full, err := QDiscReplaceArgs(iface, "cake", args...)
+	if err != nil {
+		fmt.Fprintf(b, "# No CAKE command can be generated for %s: %v\n\n", dir, err)
+		return
+	}
 
 	fmt.Fprintf(b, "# CAKE is rate-aware: it shapes toward the configured bandwidth and\n")
 	fmt.Fprintf(b, "# keeps this device's queue short, which is what reduces bufferbloat.\n")
 	fmt.Fprintf(b, "#\n")
-	fmt.Fprintf(b, "# The rates below include %d%% framing overhead, so the payload rate\n",
+	fmt.Fprintf(b, "# This discipline shapes %s on %s. A qdisc shapes egress, so the\n", dir, iface)
+	if dir == DirectionUpload {
+		fmt.Fprintf(b, "# WAN egress is the clients' upload; their download is shaped by the\n")
+		fmt.Fprintf(b, "# separate discipline below, on the LAN egress.\n")
+	} else {
+		fmt.Fprintf(b, "# LAN egress is the clients' download. The WAN ingress is never\n")
+		fmt.Fprintf(b, "# egressed, so no qdisc on the WAN can shape it.\n")
+	}
+	fmt.Fprintf(b, "#\n")
+	fmt.Fprintf(b, "# The rate includes %d%% framing overhead, so the payload rate reaches\n",
 		overheadPercent(p))
-	fmt.Fprintf(b, "# reaches the configured %dkbit/s down and %dkbit/s up.\n",
+	fmt.Fprintf(b, "# the configured %dkbit/s down and %dkbit/s up.\n",
 		p.Bandwidth.DownloadKbps, p.Bandwidth.UploadKbps)
+	fmt.Fprintf(b, "#\n")
+	fmt.Fprintf(b, "%s\n", scriptLine(full))
 	fmt.Fprintf(b, "\n")
+}
 
-	var args []string
-	args = append(args, "tc qdisc replace dev "+iface+" root cake")
+// scriptLine renders an argument vector as a runnable shell line.
+//
+// The "tc " prefix is added here rather than in QDiscReplaceArgs because the
+// drivers invoke tc through exec and pass only the arguments, while this
+// script is offered to an operator to run through sh. Prefixing in the shared
+// builder would put a stray program name into the driver's exec arguments.
+func scriptLine(args []string) string { return "tc " + Join(args) }
 
-	if down > 0 {
-		args = append(args, "bandwidth", fmt.Sprintf("%dkbit", down))
+// directionOf maps a shaping direction onto the policy's bandwidth direction.
+func directionOf(d Direction) qos.Direction {
+	if d == DirectionUpload {
+		return qos.Upload
 	}
-	if up > 0 {
-		args = append(args, "uplink", fmt.Sprintf("%dkbit", up))
-	}
-
-	args = append(args, "target", fmt.Sprintf("%dms", p.Limits.TargetMS))
-	args = append(args, "interval", fmt.Sprintf("%dms", p.Limits.IntervalMS))
-	if p.Limits.Quantum > 0 {
-		args = append(args, "quantum", fmt.Sprintf("%d", p.Limits.Quantum))
-	}
-
-	// besteffort distributes bandwidth by flow rather than per-packet, which
-	// is what stops one bulk transfer from starving interactive traffic.
-	args = append(args, "besteffort")
-
-	// diffserv4 honours the DSCP markings that interactive traffic already
-	// carries, so a marked packet is not delayed behind an unmarked one.
-	args = append(args, "diffserv4")
-
-	fmt.Fprintf(b, "%s\n", strings.Join(args, " "))
-	fmt.Fprintf(b, "\n")
+	return qos.Download
 }
 
 // writeFqCodel emits the fq_codel command and states its limitation.
 //
 // fq_codel has no rate parameters. That is not an oversight in the rendering:
 // it is the reason the fallback is reported as a degradation.
-func writeFqCodel(b *strings.Builder, p qos.Policy, iface string) {
-	quantum := p.Limits.Quantum
-	if quantum <= 0 {
-		quantum = p.MTU
+func writeFqCodel(b *strings.Builder, p qos.Policy, iface, dir string) {
+	args, err := FqCodelArgs(p.WithInterface(iface), p.MTU)
+	if err != nil {
+		fmt.Fprintf(b, "# No fq_codel command can be generated: %v\n\n", err)
+		return
 	}
-	if quantum <= 0 {
-		quantum = 1500
+	full, err := QDiscReplaceArgs(iface, "fq_codel", args...)
+	if err != nil {
+		fmt.Fprintf(b, "# No fq_codel command can be generated: %v\n\n", err)
+		return
 	}
 
 	fmt.Fprintf(b, "# fq_codel has no rate parameters and cannot enforce a bandwidth.\n")
@@ -160,21 +314,32 @@ func writeFqCodel(b *strings.Builder, p qos.Policy, iface string) {
 	fmt.Fprintf(b, "# jitter on this device, but the bottleneck queue upstream still\n")
 	fmt.Fprintf(b, "# fills under load. The configured %dkbit/s down and %dkbit/s up\n",
 		p.Bandwidth.DownloadKbps, p.Bandwidth.UploadKbps)
-	fmt.Fprintf(b, "# rates are NOT applied.\n")
+	fmt.Fprintf(b, "# rates are NOT applied. This is a degraded substitute, not a\n")
+	fmt.Fprintf(b, "# fulfilment of the request.\n")
+	fmt.Fprintf(b, "#\n")
+	fmt.Fprintf(b, "# limit    10240   queue depth in packets\n")
+	fmt.Fprintf(b, "# flows    1024    number of per-flow queues\n")
+	fmt.Fprintf(b, "# quantum  %-8d bytes per round, should match the MTU\n\n", argsValue(args, "quantum"))
+
+	fmt.Fprintf(b, "%s\n", scriptLine(full))
 	fmt.Fprintf(b, "\n")
+}
 
-	fmt.Fprintf(b, "# limit    %s   queue depth in packets\n", "10240")
-	fmt.Fprintf(b, "# flows    %s   number of per-flow queues\n", "1024")
-	fmt.Fprintf(b, "# quantum  %s   bytes per round, should match the MTU\n\n", fmt.Sprintf("%d", quantum))
-
-	args := []string{
-		"tc qdisc replace dev " + iface + " root fq_codel",
-		"limit 10240",
-		"flows 1024",
-		fmt.Sprintf("quantum %d", quantum),
+// argsValue returns the value following an option token.
+func argsValue(args []string, opt string) int {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == opt {
+			n := 0
+			for _, c := range args[i+1] {
+				if c < '0' || c > '9' {
+					return 0
+				}
+				n = n*10 + int(c-'0')
+			}
+			return n
+		}
 	}
-	fmt.Fprintf(b, "%s\n", strings.Join(args, " "))
-	fmt.Fprintf(b, "\n")
+	return 0
 }
 
 // overheadPercent renders the configured overhead allowance.
@@ -187,8 +352,12 @@ func overheadPercent(p qos.Policy) int {
 
 // writeVerification emits the read-only commands an operator should run after
 // applying, so they can confirm the result rather than assume it.
-func writeVerification(b *strings.Builder, p qos.Policy) {
-	if p.Interface == "" {
+//
+// Two interfaces are checked because two disciplines were installed. Checking
+// only one would let a correct upload policy and a broken download policy look
+// like a working pair.
+func writeVerification(b *strings.Builder, p qos.Policy, wan, lan string) {
+	if wan == "" && lan == "" {
 		return
 	}
 
@@ -196,8 +365,14 @@ func writeVerification(b *strings.Builder, p qos.Policy) {
 	fmt.Fprintf(b, "#\n")
 	fmt.Fprintf(b, "# Read-only. Run these after applying to confirm the result.\n")
 	fmt.Fprintf(b, "#\n")
-	fmt.Fprintf(b, "#   tc -s qdisc show dev %s\n", p.Interface)
-	fmt.Fprintf(b, "#   thn qos stats --interface %s\n", p.Interface)
+	for _, iface := range distinctIfaces(wan, lan) {
+		fmt.Fprintf(b, "#   tc -s qdisc show dev %s\n", iface)
+		fmt.Fprintf(b, "#   thn qos stats --interface %s\n", iface)
+	}
+	fmt.Fprintf(b, "#\n")
+	fmt.Fprintf(b, "# Confirm BOTH report a root discipline with the bandwidth you\n")
+	fmt.Fprintf(b, "# configured. A discipline that exists but carries no rate is\n")
+	fmt.Fprintf(b, "# installed and unshaped, which reads as success.\n")
 	fmt.Fprintf(b, "#\n")
 	fmt.Fprintf(b, "# A healthy shaper shows a high overlimit count and a low drop\n")
 	fmt.Fprintf(b, "# count under load. The reverse means the shaped rate is below the\n")
@@ -205,18 +380,33 @@ func writeVerification(b *strings.Builder, p qos.Policy) {
 	fmt.Fprintf(b, "\n")
 }
 
-// writeRemoval emits the teardown command.
-func writeRemoval(b *strings.Builder, p qos.Policy) {
-	if p.Interface == "" {
-		return
+// distinctIfaces returns the non-empty interfaces without duplicates, in a
+// stable order. A single-interface gateway has WAN and LAN resolved to
+// different devices, but a test or a lab may pass the same name twice and the
+// script should not then print the same verification twice.
+func distinctIfaces(ifaces ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, i := range ifaces {
+		if i == "" || seen[i] {
+			continue
+		}
+		seen[i] = true
+		out = append(out, i)
 	}
+	return out
+}
 
-	fmt.Fprintf(b, "# --- remove ------------------------------------------------------\n")
-	fmt.Fprintf(b, "#\n")
-	fmt.Fprintf(b, "# Replaces the root qdisc with pfifo_fast, which is the kernel default.\n")
-	fmt.Fprintf(b, "# Undoing this removes all shaping, so bufferbloat returns.\n")
-	fmt.Fprintf(b, "\n")
-	fmt.Fprintf(b, "# tc qdisc replace dev %s root pfifo_fast\n\n", p.Interface)
+// writeRemoval emits the teardown commands.
+func writeRemoval(b *strings.Builder, p qos.Policy, wan, lan string) {
+	for _, iface := range distinctIfaces(wan, lan) {
+		fmt.Fprintf(b, "# --- remove %s -------------------------------------------------\n", iface)
+		fmt.Fprintf(b, "#\n")
+		fmt.Fprintf(b, "# Replaces the root qdisc with pfifo_fast, which is the kernel\n")
+		fmt.Fprintf(b, "# default. Undoing this removes all shaping, so bufferbloat returns.\n")
+		fmt.Fprintf(b, "#\n")
+		fmt.Fprintf(b, "#   tc qdisc replace dev %s root pfifo_fast\n\n", iface)
+	}
 }
 
 // writeNotes emits the closing reminders.

@@ -117,6 +117,9 @@ var allowedInConfigFields = []string{
 	"DownloadKbps",
 	"UploadKbps",
 	"OverheadPercent",
+	"Clients",
+	"Groups",
+	"DefaultPriority",
 }
 
 // TestPolicyFieldsAreReachableFromConfiguration walks every policy struct the

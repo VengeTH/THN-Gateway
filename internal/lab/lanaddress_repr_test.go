@@ -45,9 +45,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // gatewayLinkJSON is `ip -j -d link show` inside the gateway namespace once

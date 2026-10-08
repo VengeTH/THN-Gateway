@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/state"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // dellHostFixture simulates the real Dell host observed in M3.

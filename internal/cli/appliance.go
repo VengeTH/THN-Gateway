@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/appliance"
+	"github.com/VengeTH/THN-Gateway/internal/appliance"
 )
 
 // This file implements `thn appliance`.

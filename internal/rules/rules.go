@@ -45,7 +45,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
 )
 
 // Truth is the result of evaluating a condition.

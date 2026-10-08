@@ -43,7 +43,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
 )
 
 // Verdict is the outcome of a health check.

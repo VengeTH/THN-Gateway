@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -172,15 +173,53 @@ func (d *LinuxDriver) Execute(ctx context.Context, op Operation) error {
 		return err
 
 	case OpQDiscApply:
-		args := []string{"qdisc", "replace", "dev", o.Interface, "root", o.Algorithm}
-		if o.DownloadKbps > 0 || o.UploadKbps > 0 {
-			args = append(args, "bandwidth", fmt.Sprintf("%dkbit", o.DownloadKbps), "upload", fmt.Sprintf("%dkbit", o.UploadKbps))
+		// Shared builder, shared with the production driver and with
+		// `thn qos render`. See the identical case in driver_production.go
+		// for why there is no second copy of this command.
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply traffic control: %w", err)
 		}
-		_, _, err := d.runner.Run(ctx, "tc", args...)
+		_, _, err = d.runner.Run(ctx, "tc", args...)
 		return err
+
+	case OpQDiscReplace:
+		args, err := splitTCSpec(o.Spec)
+		if err != nil {
+			return fmt.Errorf("refusing to restore the captured qdisc: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCStateRestore:
+		return RestoreTcBaseline(ctx, d.runner, o.Baseline)
 
 	case OpQDiscDelete:
 		_, _, err := d.runner.Run(ctx, "tc", "qdisc", "del", "dev", o.Interface, "root")
+		return err
+
+	case OpTCClassApply:
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply tc class: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCClassDelete:
+		_, _, err := d.runner.Run(ctx, "tc", "class", "del", "dev", o.Interface, "classid", o.ClassID)
+		return err
+
+	case OpTCFilterApply:
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply tc filter: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCFilterDelete:
+		_, _, err := d.runner.Run(ctx, "tc", "filter", "del", "dev", o.Interface, "parent", o.Parent, "prio", strconv.Itoa(o.Prio))
 		return err
 
 	case OpDNSApply:
@@ -290,6 +329,29 @@ func (d *LinuxDriver) applyTHNTable(ctx context.Context, o OpNFTApplyTHNTable) e
 		}
 	}
 
+	if len(o.QoSClassificationRules) > 0 {
+		if err := run("add", "chain", "inet", "thn", "qos_prerouting",
+			"{", "type", "filter", "hook", "prerouting", "priority", "mangle", ";", "policy", "accept", ";", "}"); err != nil {
+			return err
+		}
+		// Management traffic protection: SSH port 22 and Tailscale port 41641 to/from the local host.
+		// Using fib daddr/saddr local ensures arbitrary transit LAN traffic to external port 22
+		// cannot spoof the management exemption and bypass client shaping limits.
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "tcp", "dport", "22", "fib", "daddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "tcp", "sport", "22", "fib", "saddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "udp", "dport", "41641", "fib", "daddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "udp", "sport", "41641", "fib", "saddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "iifname", "tailscale0", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "oifname", "tailscale0", "meta", "mark", "set", "0x1", "return")
+
+		for _, rule := range o.QoSClassificationRules {
+			if rule.ClientIP != "" && rule.MarkHex != "" {
+				_ = run("add", "rule", "inet", "thn", "qos_prerouting", "ip", "saddr", rule.ClientIP, "meta", "mark", "set", rule.MarkHex)
+				_ = run("add", "rule", "inet", "thn", "qos_prerouting", "ip", "daddr", rule.ClientIP, "meta", "mark", "set", rule.MarkHex)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -372,7 +434,48 @@ func (d *LinuxDriver) CaptureState(ctx context.Context, scope BackupScope) (*Sta
 		}
 	}
 
+	// 6. Traffic control.
+	//
+	// This section did not exist. QDiscs was declared on the snapshot, was
+	// compared by MatchesBaseline, and was never written — so the comparison
+	// iterated over an empty map, passed, and certified rollbacks that had
+	// restored no traffic control at all.
+	//
+	// It is captured when the scope asks for it, and the capture is marked
+	// whether or not it succeeded. An uncaptured baseline has to be
+	// distinguishable from an empty one, or the absence of a capture reads as
+	// agreement.
+	if scope.QDiscs {
+		for _, iface := range scope.Interfaces {
+			baseline := CaptureTcBaseline(ctx, d, iface)
+			snap.QDiscs[iface] = baseline
+		}
+		snap.MarkCaptured("qdiscs")
+	}
+
 	return snap, nil
+}
+
+// RunTCOutput runs a read-only tc query.
+//
+// It exists so CaptureTcBaseline can read tc without gaining the ability to
+// write to it: the interface it accepts has exactly one method, and that
+// method takes tc arguments without being able to check them. The write paths
+// are OpQDiscApply, OpQDiscReplace and OpQDiscDelete, and none of them is
+// reachable through this.
+func (d *LinuxDriver) RunTCOutput(ctx context.Context, args ...string) (string, error) {
+	// Read-only verbs only. This is a second, narrower guard on top of the
+	// tc allowlist, and it exists because the allowlist permits inspection
+	// generally while a baseline capture needs the narrower guarantee.
+	switch {
+	case len(args) >= 2 && args[0] == "qdisc" && (args[1] == "show" || args[1] == "list"):
+	case len(args) >= 2 && args[0] == "class" && (args[1] == "show" || args[1] == "list"):
+	case len(args) >= 2 && args[0] == "filter" && (args[1] == "show" || args[1] == "list"):
+	default:
+		return "", fmt.Errorf("RunTCOutput permits only show/list queries, got %v", args)
+	}
+	stdout, _, err := d.runner.Run(ctx, "tc", args...)
+	return stdout, err
 }
 
 // VerifyHealth queries Linux state to evaluate post-apply health checks.

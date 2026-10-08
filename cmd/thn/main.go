@@ -21,7 +21,7 @@ package main
 import (
 	"os"
 
-	"github.com/venth/thn-gateway/internal/cli"
+	"github.com/VengeTH/THN-Gateway/internal/cli"
 )
 
 func main() {

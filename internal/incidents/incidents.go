@@ -46,8 +46,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
 )
 
 // Status is where an incident is in its lifecycle.

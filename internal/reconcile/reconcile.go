@@ -43,8 +43,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/authority"
-	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
 )
 
 // Reason classifies why the gateway refused.

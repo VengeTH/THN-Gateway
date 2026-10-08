@@ -25,7 +25,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // hostFixture reads a checked-in host capture from testdata/hosts.

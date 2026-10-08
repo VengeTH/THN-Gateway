@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/firewall"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/firewall"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // Observation is one look at the host.

@@ -19,6 +19,11 @@ func TestCanonicalTopologyAddressing(t *testing.T) {
 		t.Fatalf("canonical topology is invalid: %v", err)
 	}
 
+	top2 := CanonicalWithTwoClients()
+	if err := top2.Validate(); err != nil {
+		t.Fatalf("canonical with two clients topology is invalid: %v", err)
+	}
+
 	lan, ok := top.GatewayLAN()
 	if !ok {
 		t.Fatal("canonical topology declares no LAN interface")

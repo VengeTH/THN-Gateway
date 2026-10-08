@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/artifact"
+	"github.com/VengeTH/THN-Gateway/internal/artifact"
 )
 
 // These tests drive the lifecycle commands end to end.

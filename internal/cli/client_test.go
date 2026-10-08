@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/daemon"
-	"github.com/venth/thn-gateway/internal/logging"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/daemon"
+	"github.com/VengeTH/THN-Gateway/internal/logging"
 )
 
 // startDaemon brings a real thnd up on a temporary socket.

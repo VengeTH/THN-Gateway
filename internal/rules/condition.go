@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
 )
 
 // This file holds the condition vocabulary. Conditions are built from a small

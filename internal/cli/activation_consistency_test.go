@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
 )
 
 // Regression coverage ensuring activation status consistency, truthfulness,

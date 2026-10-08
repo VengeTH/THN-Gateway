@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
 )
 
 // Render produces the reviewable command set for a netconfig policy.

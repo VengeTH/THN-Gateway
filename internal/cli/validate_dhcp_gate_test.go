@@ -20,8 +20,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
 )
 
 // dhcpGateCase is one row of the top-level DHCP matrix.

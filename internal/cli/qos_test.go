@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/config"
 )
 
 // qosConfigFile writes a configuration with QoS enabled and returns its path.
@@ -213,8 +213,11 @@ func TestQoSRenderProducesTheCommand(t *testing.T) {
 	if !strings.Contains(stdout, "tc qdisc replace dev eth0 root cake") {
 		t.Errorf("no CAKE command was rendered:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "bandwidth 110000kbit") {
-		t.Errorf("the wire rate is wrong; overhead was not applied:\n%s", stdout)
+	if !strings.Contains(stdout, "bandwidth 22Mbit") {
+		t.Errorf("the upload wire rate is wrong; overhead was not applied:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "tc qdisc replace dev eth1 root cake bandwidth 110Mbit") {
+		t.Errorf("the download discipline was not rendered on LAN egress:\n%s", stdout)
 	}
 }
 
@@ -253,7 +256,8 @@ func TestQoSRenderToFileWritesIntoTheSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the script was not written into the sandbox root: %v", err)
 	}
-	if !strings.Contains(string(data), "tc qdisc replace dev eth0 root cake") {
+	if !strings.Contains(string(data), "tc qdisc replace dev eth0 root cake") ||
+		!strings.Contains(string(data), "tc qdisc replace dev eth1 root cake") {
 		t.Errorf("the written script has no command:\n%s", data)
 	}
 }

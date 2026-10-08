@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // Rendering for `thn interface`.

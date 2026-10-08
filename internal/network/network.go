@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
 )
 
 // LinkState is the administrative/operational state of an interface.

@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/firewall/nft"
-	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
-	"github.com/venth/thn-gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/firewall/nft"
+	fwpolicy "github.com/VengeTH/THN-Gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // policyFromConfig derives a firewall policy from a configuration document.

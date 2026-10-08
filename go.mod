@@ -1,4 +1,4 @@
-module github.com/venth/thn-gateway
+module github.com/VengeTH/THN-Gateway
 
 go 1.26.0
 

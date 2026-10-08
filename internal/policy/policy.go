@@ -49,10 +49,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/qos"
-	"github.com/venth/thn-gateway/internal/schedule"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/schedule"
 )
 
 // Kind names a class of policy. It is what a binding refers to, so that one

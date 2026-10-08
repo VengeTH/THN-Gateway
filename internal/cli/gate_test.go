@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/config"
 )
 
 // This file and its siblings implement the gateway gate: an end-to-end check

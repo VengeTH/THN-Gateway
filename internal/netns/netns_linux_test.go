@@ -12,14 +12,13 @@
 package netns_test
 
 import (
-	"fmt"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/netns"
-	"github.com/venth/thn-gateway/internal/qos"
-	qostc "github.com/venth/thn-gateway/internal/qos/tc"
+	"github.com/VengeTH/THN-Gateway/internal/netns"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
 )
 
 // testIface is the dummy interface shaping is attached to inside the
@@ -94,6 +93,25 @@ func TestNamespaceIsIsolated(t *testing.T) {
 // TestRenderedCakeCommandIsAcceptedByTheKernel is the point of the whole
 // harness. The render tests check the text; this checks that a real kernel
 // accepts it.
+//
+// # This test used to be able to pass while proving nothing
+//
+// It previously contained:
+//
+//	if strings.Contains(err.Error(), "uplink") {
+//	    t.Skipf("skipping: this tc version does not support uplink option: %v", err)
+//	}
+//
+// `uplink` was one of the four options M7.4 emitted that modern CAKE does not
+// have, so the rejection it was skipping on was not a kernel-version
+// difference — it was THN generating a command tc cannot parse. The skip
+// turned the one test capable of catching the defect into a green no-op, and
+// the suite reported that CAKE worked.
+//
+// There is no skip here now. If the kernel refuses what THN renders, that is
+// a defect in THN and the test fails. `requireCake` still skips when the
+// kernel genuinely has no CAKE at all, which is a different fact and is
+// stated as such.
 func TestRenderedCakeCommandIsAcceptedByTheKernel(t *testing.T) {
 	ns := newNamespace(t)
 	requireCake(t, ns)
@@ -101,18 +119,18 @@ func TestRenderedCakeCommandIsAcceptedByTheKernel(t *testing.T) {
 	p := policy()
 	script := qostc.Render(p, qos.Selection{
 		Algorithm: qos.AlgorithmCake, Requested: qos.AlgorithmCake, Available: true,
-	})
+	}, "wan0", "lan0")
 
 	// Pull the arguments straight out of the rendered command rather than
 	// re-deriving them. Re-deriving would test the test, not the renderer.
-	args := renderedArgs(t, script)
-	t.Logf("applying: cake %s", strings.Join(args, " "))
+	cmd, args := renderedCommand(t, script)
+	t.Logf("applying: %s", cmd)
 
 	if err := ns.ApplyCake(testIface, args); err != nil {
-		if strings.Contains(err.Error(), "uplink") {
-			t.Skipf("skipping: this tc version does not support uplink option: %v", err)
-		}
-		t.Fatalf("the kernel rejected the rendered CAKE command: %v", err)
+		t.Fatalf("the kernel rejected the rendered CAKE command.\n"+
+			"command: %s\nerror: %v\n\n"+
+			"A rejection here means THN emitted an option tc's CAKE parser does not "+
+			"accept. Compare against iproute2's tc/q_cake.c cake_parse_opt.", cmd, err)
 	}
 
 	// Confirm it is actually there, not merely accepted.
@@ -148,8 +166,8 @@ func TestRenderedFqCodelCommandIsAcceptedByTheKernel(t *testing.T) {
 
 	script := qostc.Render(p, qos.Selection{
 		Algorithm: qos.AlgorithmFqCodel, Requested: qos.AlgorithmFqCodel, Available: true,
-	})
-	args := renderedArgs(t, script)
+	}, "wan0", "lan0")
+	_, args := renderedCommand(t, script)
 
 	if err := ns.ApplyFqCodel(testIface, args); err != nil {
 		t.Fatalf("the kernel rejected the rendered fq_codel command: %v", err)
@@ -194,9 +212,14 @@ func TestKernelReportsTheShapedRate(t *testing.T) {
 		t.Fatalf("overhead arithmetic: got %d/%d, want 110000/22000", down, up)
 	}
 
-	args := []string{
-		"bandwidth", fmt.Sprintf("%dkbit", down),
-	}
+	// The upload discipline is exercised because it is the one that lands on a
+	// WAN, and the dummy interface plays the WAN here. 22 Mbit is small enough
+	// to measure and large enough that the unit is unambiguous.
+	script := qostc.Render(p, qos.Selection{
+		Algorithm: qos.AlgorithmCake, Requested: qos.AlgorithmCake, Available: true,
+	}, "wan0", "lan0")
+	cmd, args := renderedCommandFor(t, script, "wan0")
+	t.Logf("applying: %s", cmd)
 
 	if err := ns.ApplyCake(testIface, args); err != nil {
 		t.Fatalf("applying CAKE: %v", err)
@@ -221,10 +244,10 @@ func TestKernelReportsTheShapedRate(t *testing.T) {
 	if got > 1000 {
 		got = int((float64(got)*8)/1_000_000 + 0.5)
 	}
-	if got < 100 || got > 120 {
-		t.Errorf("kernel reports %d Mbps; the configured rate was 110", got)
+	if got < 18 || got > 26 {
+		t.Errorf("kernel reports %d Mbps; the upload rate THN asked for was 22", got)
 	}
-	t.Logf("configured 110 Mbit/s, kernel reports %d Mbit/s", got)
+	t.Logf("asked for 22 Mbit/s, kernel reports %d Mbit/s", got)
 }
 
 // TestStatisticsParseFromARealKernel closes the loop: the parser that
@@ -390,12 +413,18 @@ func TestNamespaceFileIsGoneAfterClose(t *testing.T) {
 	}
 }
 
-// renderedArgs extracts tc's cake/fq_codel arguments from a rendered script.
+// renderedCommand extracts the first tc qdisc command from a rendered script
+// and returns it with the algorithm's arguments.
 //
 // This deliberately parses the renderer's output rather than rebuilding the
 // argument list. A test that rebuilds the list tests itself; this one tests
 // what an operator would actually run.
-func renderedArgs(t *testing.T, script string) []string {
+//
+// The script contains one command per direction, so a caller needing a
+// specific direction's command should look for the interface it targets —
+// renderedCommandFor does that. A test that took whichever came first would
+// check the upload discipline and call the download path verified.
+func renderedCommand(t *testing.T, script string) (string, []string) {
 	t.Helper()
 
 	for _, line := range strings.Split(script, "\n") {
@@ -416,9 +445,30 @@ func renderedArgs(t *testing.T, script string) []string {
 		if fields[kindIdx] != "cake" && fields[kindIdx] != "fq_codel" {
 			t.Fatalf("unexpected algorithm in %q", trimmed)
 		}
-		return fields[kindIdx+1:]
+		return trimmed, fields[kindIdx+1:]
 	}
 
 	t.Fatal("the rendered script contains no tc command")
-	return nil
+	return "", nil
+}
+
+// renderedCommandFor extracts the tc command targeting a given interface.
+//
+// The namespace has one dummy interface, so an interface-targeted lookup is
+// how a caller picks which direction it is about to exercise.
+func renderedCommandFor(t *testing.T, script, iface string) (string, []string) {
+	t.Helper()
+
+	prefix := "tc qdisc replace dev " + iface + " root "
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		return trimmed, fields[6:]
+	}
+
+	t.Fatalf("the rendered script contains no command for %s:\n%s", iface, script)
+	return "", nil
 }

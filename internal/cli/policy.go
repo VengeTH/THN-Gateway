@@ -4,9 +4,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/policy"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/policy"
 )
 
 // This file implements `thn policy`.

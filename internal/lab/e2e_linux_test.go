@@ -40,9 +40,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/execution"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
 
 // TestEndToEndLANToWAN proves a LAN client reaches the WAN side through THN.

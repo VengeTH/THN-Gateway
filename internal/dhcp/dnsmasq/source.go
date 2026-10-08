@@ -5,8 +5,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/sandbox"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/sandbox"
 )
 
 // LeaseSource reads leases from a dnsmasq lease file.

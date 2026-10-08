@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/assistant"
-	"github.com/venth/thn-gateway/internal/ruleset"
+	"github.com/VengeTH/THN-Gateway/internal/assistant"
+	"github.com/VengeTH/THN-Gateway/internal/ruleset"
 )
 
 // This file is the gate phase for the assistant layer.

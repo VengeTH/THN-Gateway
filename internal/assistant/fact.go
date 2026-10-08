@@ -52,7 +52,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
 )
 
 // Kind classifies a fact, and exists so that a reader — human or model — can

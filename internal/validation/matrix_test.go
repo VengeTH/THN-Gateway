@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // writeFile writes a document for the loader tests.

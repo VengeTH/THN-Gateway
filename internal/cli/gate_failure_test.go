@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/planner"
-	"github.com/venth/thn-gateway/internal/recovery"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/recovery"
 )
 
 // This file holds the failure and rollback phases of the gate.

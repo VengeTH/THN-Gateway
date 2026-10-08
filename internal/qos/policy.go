@@ -39,8 +39,66 @@ package qos
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+// Priority is a traffic classification priority tier.
+type Priority string
+
+const (
+	PriorityCritical Priority = "critical"
+	PriorityHigh     Priority = "high"
+	PriorityNormal   Priority = "normal"
+	PriorityLow      Priority = "low"
+)
+
+// String returns the string representation.
+func (p Priority) String() string {
+	if p == "" {
+		return string(PriorityNormal)
+	}
+	return string(p)
+}
+
+// HTBPrio maps a priority onto HTB's 0-7 integer priority band.
+// 0 is the highest priority band, 3 is the lowest for THN's standard tiers.
+func (p Priority) HTBPrio() int {
+	switch strings.ToLower(string(p)) {
+	case "critical":
+		return 0
+	case "high":
+		return 1
+	case "normal":
+		return 2
+	case "low":
+		return 3
+	default:
+		return 2
+	}
+}
+
+// ClientPolicy defines bandwidth ceilings, guarantees, and priority for one client or subnet.
+type ClientPolicy struct {
+	ID              string   `json:"id"`
+	IP              string   `json:"ip"`
+	MAC             string   `json:"mac,omitempty"`
+	DownloadKbps    int      `json:"download_kbps"`
+	UploadKbps      int      `json:"upload_kbps"`
+	MinDownloadKbps int      `json:"min_download_kbps,omitempty"`
+	MinUploadKbps   int      `json:"min_upload_kbps,omitempty"`
+	Priority        Priority `json:"priority"`
+	Group           string   `json:"group,omitempty"`
+	Disabled        bool     `json:"disabled,omitempty"`
+}
+
+// GroupPolicy defines an aggregate bandwidth pool shared across multiple clients.
+type GroupPolicy struct {
+	Name         string   `json:"name"`
+	DownloadKbps int      `json:"download_kbps"`
+	UploadKbps   int      `json:"upload_kbps"`
+	Priority     Priority `json:"priority"`
+}
 
 // Algorithm is a traffic-shaping algorithm.
 type Algorithm string
@@ -214,6 +272,15 @@ type Policy struct {
 	// used to cross-check the configured rate and is never rendered: tc does
 	// not need it, and a stale value must not reach the command line.
 	LinkSpeedMbps int `json:"link_speed_mbps,omitempty"`
+
+	// Clients configures per-client bandwidth limits, guarantees, and priorities.
+	Clients []ClientPolicy `json:"clients,omitempty"`
+
+	// Groups configures aggregate bandwidth pools.
+	Groups []GroupPolicy `json:"groups,omitempty"`
+
+	// DefaultPriority sets the priority for unclassified traffic (default: "normal").
+	DefaultPriority Priority `json:"default_priority,omitempty"`
 
 	// Comments are emitted verbatim in rendered output.
 	Comments []string `json:"comments,omitempty"`

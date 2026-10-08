@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // Store helpers for the assignment tests.

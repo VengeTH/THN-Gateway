@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dns"
-	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	"github.com/venth/thn-gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	fwpolicy "github.com/VengeTH/THN-Gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
 )
 
 // This file holds the coherence, routing, NAT and firewall phases of the gate.

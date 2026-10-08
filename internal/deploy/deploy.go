@@ -47,7 +47,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/health"
+	"github.com/VengeTH/THN-Gateway/internal/health"
 )
 
 // Stage is a point in a rollout.

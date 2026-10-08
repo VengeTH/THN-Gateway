@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/daemon"
+	"github.com/VengeTH/THN-Gateway/internal/daemon"
 )
 
 // daemonTimeout bounds one request to thnd.

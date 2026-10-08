@@ -39,13 +39,13 @@ package validation
 import (
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dns"
-	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/multiwan"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	"github.com/venth/thn-gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	fwpolicy "github.com/VengeTH/THN-Gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/multiwan"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
 )
 
 // Subsystem field prefixes.

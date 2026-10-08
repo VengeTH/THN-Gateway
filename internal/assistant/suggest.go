@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
 )
 
 // Correlation assistance: proposing groupings and suppressions a human has not

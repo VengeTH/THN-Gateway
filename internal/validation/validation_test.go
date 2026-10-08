@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
 )
 
 // valid returns a configuration that passes every check.

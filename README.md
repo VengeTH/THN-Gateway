@@ -1004,6 +1004,30 @@ QoS intent is content-addressed in the desired digest:
 - Activation stays gated by `assertActivationRemainsGated`: QoS intent did not
   make it reachable without physical presence and explicit authorization.
 
+### Production QoS enforcement, per-client limits and priorities (Phase 2)
+
+Phase 2 implements production QoS enforcement semantics while maintaining all safety invariants:
+
+1. **Directional Separation**:
+   - Upload is shaped on WAN egress (traffic leaving the gateway to the internet).
+   - Download is shaped on LAN egress (traffic arriving from the internet heading to LAN clients).
+2. **Per-Client Limits and Hierarchical Scheduling**:
+   - HTB class hierarchy with leaf CAKE/FQ-CoDel disciplines.
+   - Per-client download & upload ceilings (`download_kbps`, `upload_kbps`).
+   - Guaranteed minimum bandwidth reservations (`min_download_kbps`, `min_upload_kbps`).
+   - Priority classes (`critical`, `high`, `normal`, `low`) mapped to HTB priority bands.
+   - Flow fairness and low latency under load enforced by leaf CAKE DRR++ and COBALT AQM.
+3. **Classification & Management Protection**:
+   - Packets classified via nftables in `table inet thn` (prerouting hook, priority mangle).
+   - Management traffic (SSH port 22, Tailscale port 41641) explicitly exempted and protected from throttling.
+   - Matched by `tc filter` via fwmark with redundant IP match fallbacks.
+4. **Safety & Rollback**:
+   - Strict `tc` argument validation without shell execution.
+   - Pre-mutation baseline capture of qdiscs, classes, and filters.
+   - Foreign unmanaged qdiscs protected (fail closed).
+   - Compensating rollback restores complete traffic control tree.
+   - Production activation remains strictly blocked until physical hardware gates pass.
+
 ## Multi-WAN intent, routing policy and load balancing (M7.5)
 
 A resilient gateway often requires multiple Internet connections — whether for

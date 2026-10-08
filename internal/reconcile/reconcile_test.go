@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/authority"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/reconcile"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/reconcile"
 )
 
 var at = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

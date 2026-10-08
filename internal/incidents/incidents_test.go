@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/incidents"
-	"github.com/venth/thn-gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/incidents"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
 )
 
 var base = time.Date(2026, 3, 14, 9, 0, 0, 0, time.UTC)

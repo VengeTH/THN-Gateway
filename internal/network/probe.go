@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
 )
 
 // Structured records of what THN asked the host, and what came back.

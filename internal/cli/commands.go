@@ -8,23 +8,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/firewall"
-	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/multiwan"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/planner"
-	"github.com/venth/thn-gateway/internal/qos"
-	"github.com/venth/thn-gateway/internal/schema"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/firewall"
+	fwpolicy "github.com/VengeTH/THN-Gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/multiwan"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/schema"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // commands is the dispatch table.
@@ -458,7 +458,7 @@ func roleAssignments(cfg config.Config) []host.Assignment {
 // The conversion lives here rather than in internal/diff so that the diff
 // package stays independent of the desired model and can be tested without it.
 func desiredFor(d desired.State) diff.Desired {
-	return diff.Desired{
+	w := diff.Desired{
 		WANName:         d.WAN.Name,
 		WANPresent:      d.WAN.Present,
 		WANUp:           d.WAN.Up,
@@ -480,9 +480,29 @@ func desiredFor(d desired.State) diff.Desired {
 		QoSInterface:    d.QoS.Interface,
 		QoSDownloadKbps: d.QoS.DownloadKbps,
 		QoSUploadKbps:   d.QoS.UploadKbps,
-		DNSPresent:      d.DNS.Present,
-		DNSServers:      d.DNS.Servers,
+		// The framing allowance changes the rate the kernel receives, so it
+		// is compared like any other shaping parameter rather than being
+		// applied silently at render time.
+		QoSOverheadPercent: d.QoS.OverheadPercent,
+		// The MTU sizes fq_codel's quantum, so like the overhead it is a
+		// shaping parameter that has to survive to the command line.
+		QoSMTU:     d.LAN.MTU,
+		DNSPresent: d.DNS.Present,
+		DNSServers: d.DNS.Servers,
 	}
+
+	for _, c := range d.QoS.Clients {
+		if !c.Disabled {
+			w.QoSClients = append(w.QoSClients, diff.QoSClientDiff{
+				ID:           c.ID,
+				IP:           c.IP,
+				DownloadKbps: c.DownloadKbps,
+				UploadKbps:   c.UploadKbps,
+				Priority:     c.Priority,
+			})
+		}
+	}
+	return w
 }
 
 // runValidate implements `thn validate`.

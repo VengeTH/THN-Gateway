@@ -3,7 +3,7 @@ package authority_test
 import (
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
 )
 
 // admin is the principal used where the role is not the subject of the test.

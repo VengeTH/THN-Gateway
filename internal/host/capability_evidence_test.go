@@ -40,7 +40,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // unprivilegedHost is a host whose probe tools are installed but unqueryable —

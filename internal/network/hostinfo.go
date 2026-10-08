@@ -49,7 +49,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
 )
 
 // HostInfo supplies the facts `ip` cannot be relied upon to report.

@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/venth/thn-gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
 )
 
 // ProductionAuth carries the required authorization inputs for production execution.
@@ -220,15 +221,63 @@ func (d *ProductionDriver) Execute(ctx context.Context, op Operation) error {
 		return err
 
 	case OpQDiscApply:
-		args := []string{"qdisc", "replace", "dev", o.Interface, "root", o.Algorithm}
-		if o.DownloadKbps > 0 || o.UploadKbps > 0 {
-			args = append(args, "bandwidth", fmt.Sprintf("%dkbit", o.DownloadKbps), "upload", fmt.Sprintf("%dkbit", o.UploadKbps))
+		// The argument vector comes from the shared builder in
+		// internal/qos/tc, the same one `thn qos render` uses.
+		//
+		// It used to be formatted inline here, and the two copies drifted:
+		// this one emitted `bandwidth <d>kbit upload <u>kbit` while the
+		// renderer emitted `uplink`. Neither is a CAKE option, so both were
+		// rejected, and a second hand-written copy of one command is what let
+		// that go unnoticed.
+		//
+		// An error here is a refusal, not a best-effort fallback: an
+		// unshaped discipline would install successfully and look healthy.
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply traffic control: %w", err)
 		}
-		_, _, err := d.runner.Run(ctx, "tc", args...)
+		_, _, err = d.runner.Run(ctx, "tc", args...)
 		return err
+
+	case OpQDiscReplace:
+		// Restoring a captured baseline. The spec was validated structurally
+		// by splitTCSpec when it was captured, and again by Validate.
+		args, err := splitTCSpec(o.Spec)
+		if err != nil {
+			return fmt.Errorf("refusing to restore the captured qdisc: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCStateRestore:
+		return RestoreTcBaseline(ctx, d.runner, o.Baseline)
 
 	case OpQDiscDelete:
 		_, _, err := d.runner.Run(ctx, "tc", "qdisc", "del", "dev", o.Interface, "root")
+		return err
+
+	case OpTCClassApply:
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply tc class: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCClassDelete:
+		_, _, err := d.runner.Run(ctx, "tc", "class", "del", "dev", o.Interface, "classid", o.ClassID)
+		return err
+
+	case OpTCFilterApply:
+		args, err := o.Args()
+		if err != nil {
+			return fmt.Errorf("refusing to apply tc filter: %w", err)
+		}
+		_, _, err = d.runner.Run(ctx, "tc", args...)
+		return err
+
+	case OpTCFilterDelete:
+		_, _, err := d.runner.Run(ctx, "tc", "filter", "del", "dev", o.Interface, "parent", o.Parent, "prio", strconv.Itoa(o.Prio))
 		return err
 
 	case OpDNSApply:
@@ -330,6 +379,29 @@ func (d *ProductionDriver) applyTHNTable(ctx context.Context, o OpNFTApplyTHNTab
 		}
 	}
 
+	if len(o.QoSClassificationRules) > 0 {
+		if err := run("add", "chain", "inet", "thn", "qos_prerouting",
+			"{", "type", "filter", "hook", "prerouting", "priority", "mangle", ";", "policy", "accept", ";", "}"); err != nil {
+			return err
+		}
+		// Management traffic protection: SSH port 22 and Tailscale port 41641 to/from the local host.
+		// Using fib daddr/saddr local ensures arbitrary transit LAN traffic to external port 22
+		// cannot spoof the management exemption and bypass client shaping limits.
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "tcp", "dport", "22", "fib", "daddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "tcp", "sport", "22", "fib", "saddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "udp", "dport", "41641", "fib", "daddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "udp", "sport", "41641", "fib", "saddr", "type", "local", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "iifname", "tailscale0", "meta", "mark", "set", "0x1", "return")
+		_ = run("add", "rule", "inet", "thn", "qos_prerouting", "oifname", "tailscale0", "meta", "mark", "set", "0x1", "return")
+
+		for _, rule := range o.QoSClassificationRules {
+			if rule.ClientIP != "" && rule.MarkHex != "" {
+				_ = run("add", "rule", "inet", "thn", "qos_prerouting", "ip", "saddr", rule.ClientIP, "meta", "mark", "set", rule.MarkHex)
+				_ = run("add", "rule", "inet", "thn", "qos_prerouting", "ip", "daddr", rule.ClientIP, "meta", "mark", "set", rule.MarkHex)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -410,7 +482,34 @@ func (d *ProductionDriver) CaptureState(ctx context.Context, scope BackupScope) 
 		}
 	}
 
+	// 6. Traffic control.
+	//
+	// Absent before this, on both drivers. See the identical section in
+	// linux_driver.go: the snapshot carried a QDiscs field, MatchesBaseline
+	// compared it, and nothing ever populated it.
+	if scope.QDiscs {
+		for _, iface := range scope.Interfaces {
+			baseline := CaptureTcBaseline(ctx, d, iface)
+			snap.QDiscs[iface] = baseline
+		}
+		snap.MarkCaptured("qdiscs")
+	}
+
 	return snap, nil
+}
+
+// RunTCOutput runs a read-only tc query. See linux_driver.go for why the
+// capability is narrower than the tc allowlist.
+func (d *ProductionDriver) RunTCOutput(ctx context.Context, args ...string) (string, error) {
+	switch {
+	case len(args) >= 2 && args[0] == "qdisc" && (args[1] == "show" || args[1] == "list"):
+	case len(args) >= 2 && args[0] == "class" && (args[1] == "show" || args[1] == "list"):
+	case len(args) >= 2 && args[0] == "filter" && (args[1] == "show" || args[1] == "list"):
+	default:
+		return "", fmt.Errorf("RunTCOutput permits only show/list queries, got %v", args)
+	}
+	stdout, _, err := d.runner.Run(ctx, "tc", args...)
+	return stdout, err
 }
 
 func (d *ProductionDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (HealthResult, error) {

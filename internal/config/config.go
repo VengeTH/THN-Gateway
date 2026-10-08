@@ -33,7 +33,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/venth/thn-gateway/internal/policy"
+	"github.com/VengeTH/THN-Gateway/internal/policy"
 )
 
 // SchemaVersion is the configuration schema version. It is written into the
@@ -256,6 +256,28 @@ type FirewallConfig struct {
 	AdminSources []string `yaml:"admin_sources"`
 }
 
+// QoSClientConfig configures bandwidth ceilings, guarantees and priority for one client or subnet.
+type QoSClientConfig struct {
+	ID              string `yaml:"id" json:"id"`
+	IP              string `yaml:"ip" json:"ip"`
+	MAC             string `yaml:"mac,omitempty" json:"mac,omitempty"`
+	DownloadKbps    int    `yaml:"download_kbps" json:"download_kbps"`
+	UploadKbps      int    `yaml:"upload_kbps" json:"upload_kbps"`
+	MinDownloadKbps int    `yaml:"min_download_kbps,omitempty" json:"min_download_kbps,omitempty"`
+	MinUploadKbps   int    `yaml:"min_upload_kbps,omitempty" json:"min_upload_kbps,omitempty"`
+	Priority        string `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Group           string `yaml:"group,omitempty" json:"group,omitempty"`
+	Disabled        bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+}
+
+// QoSGroupConfig configures an aggregate bandwidth pool shared across multiple clients.
+type QoSGroupConfig struct {
+	Name         string `yaml:"name" json:"name"`
+	DownloadKbps int    `yaml:"download_kbps" json:"download_kbps"`
+	UploadKbps   int    `yaml:"upload_kbps" json:"upload_kbps"`
+	Priority     string `yaml:"priority,omitempty" json:"priority,omitempty"`
+}
+
 // QoSConfig controls traffic shaping intent.
 type QoSConfig struct {
 	Enabled bool `yaml:"enabled"`
@@ -281,6 +303,15 @@ type QoSConfig struct {
 	// its 10 percent default rather than shaping at the payload rate, which
 	// would leave the link permanently a tenth under-utilised.
 	OverheadPercent int `yaml:"overhead_percent"`
+
+	// Clients configures per-client bandwidth limits, guarantees, and priorities.
+	Clients []QoSClientConfig `yaml:"clients,omitempty" json:"clients,omitempty"`
+
+	// Groups configures aggregate bandwidth pools.
+	Groups []QoSGroupConfig `yaml:"groups,omitempty" json:"groups,omitempty"`
+
+	// DefaultPriority sets the priority for unclassified traffic (default: "normal").
+	DefaultPriority string `yaml:"default_priority,omitempty" json:"default_priority,omitempty"`
 }
 
 // MultiWANConfig controls multi-uplink routing, failover and load balancing.
@@ -1157,6 +1188,73 @@ func (c Config) Validate() ValidationResult {
 			v.Add("qos.upload_kbps", SeverityWarning,
 				fmt.Sprintf("upload rate (%d kbps) exceeds download rate (%d kbps), which is unusual for a WAN uplink",
 					c.QoS.UploadKbps, c.QoS.DownloadKbps))
+		}
+
+		// Phase 2: Per-client policy and group validation
+		seenClientIDs := make(map[string]bool)
+		seenClientIPs := make(map[string]bool)
+		var totalMinDown, totalMinUp int
+
+		for i, client := range c.QoS.Clients {
+			prefix := fmt.Sprintf("qos.clients[%d]", i)
+			if client.ID == "" {
+				v.Add(prefix+".id", SeverityError, "client id must not be empty")
+			} else if seenClientIDs[client.ID] {
+				v.Add(prefix+".id", SeverityError, fmt.Sprintf("duplicate client id %q", client.ID))
+			} else {
+				seenClientIDs[client.ID] = true
+			}
+
+			if client.IP == "" {
+				v.Add(prefix+".ip", SeverityError, "client ip must not be empty")
+			} else {
+				if _, err := netip.ParseAddr(client.IP); err != nil {
+					if _, err := netip.ParsePrefix(client.IP); err != nil {
+						v.Add(prefix+".ip", SeverityError, fmt.Sprintf("invalid client ip or cidr %q", client.IP))
+					}
+				}
+				if seenClientIPs[client.IP] {
+					v.Add(prefix+".ip", SeverityError, fmt.Sprintf("duplicate client ip match %q", client.IP))
+				} else {
+					seenClientIPs[client.IP] = true
+				}
+			}
+
+			if client.DownloadKbps <= 0 {
+				v.Add(prefix+".download_kbps", SeverityError, "client download_kbps must be positive")
+			}
+			if client.UploadKbps <= 0 {
+				v.Add(prefix+".upload_kbps", SeverityError, "client upload_kbps must be positive")
+			}
+			if client.MinDownloadKbps < 0 {
+				v.Add(prefix+".min_download_kbps", SeverityError, "min_download_kbps cannot be negative")
+			}
+			if client.MinUploadKbps < 0 {
+				v.Add(prefix+".min_upload_kbps", SeverityError, "min_upload_kbps cannot be negative")
+			}
+			if client.MinDownloadKbps > 0 && client.MinDownloadKbps > client.DownloadKbps {
+				v.Add(prefix+".min_download_kbps", SeverityError, "min_download_kbps cannot exceed download_kbps")
+			}
+			if client.MinUploadKbps > 0 && client.MinUploadKbps > client.UploadKbps {
+				v.Add(prefix+".min_upload_kbps", SeverityError, "min_upload_kbps cannot exceed upload_kbps")
+			}
+			if client.Priority != "" {
+				switch strings.ToLower(client.Priority) {
+				case "critical", "high", "normal", "low":
+				default:
+					v.Add(prefix+".priority", SeverityError, fmt.Sprintf("invalid priority %q; must be critical, high, normal, or low", client.Priority))
+				}
+			}
+
+			totalMinDown += client.MinDownloadKbps
+			totalMinUp += client.MinUploadKbps
+		}
+
+		if c.QoS.DownloadKbps > 0 && totalMinDown > c.QoS.DownloadKbps {
+			v.Add("qos.clients", SeverityError, fmt.Sprintf("sum of guaranteed client download rates (%d kbps) exceeds total link download capacity (%d kbps)", totalMinDown, c.QoS.DownloadKbps))
+		}
+		if c.QoS.UploadKbps > 0 && totalMinUp > c.QoS.UploadKbps {
+			v.Add("qos.clients", SeverityError, fmt.Sprintf("sum of guaranteed client upload rates (%d kbps) exceeds total link upload capacity (%d kbps)", totalMinUp, c.QoS.UploadKbps))
 		}
 	}
 

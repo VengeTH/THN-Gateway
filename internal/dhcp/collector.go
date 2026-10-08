@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/sandbox"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/sandbox"
 )
 
 // LeaseSource reads leases from a backing server.

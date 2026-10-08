@@ -42,9 +42,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/rules"
-	"github.com/venth/thn-gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
 )
 
 // Rule names, as they appear in incidents.

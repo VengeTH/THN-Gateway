@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/artifact"
-	"github.com/venth/thn-gateway/internal/deploy"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/health"
-	"github.com/venth/thn-gateway/internal/rollback"
+	"github.com/VengeTH/THN-Gateway/internal/artifact"
+	"github.com/VengeTH/THN-Gateway/internal/deploy"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/health"
+	"github.com/VengeTH/THN-Gateway/internal/rollback"
 )
 
 // This file implements `thn verify`, `thn health`, `thn rollout` and

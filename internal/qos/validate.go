@@ -2,6 +2,8 @@ package qos
 
 import (
 	"fmt"
+	"net/netip"
+	"strings"
 )
 
 // Severity classifies a validation finding.
@@ -132,6 +134,21 @@ const (
 	// CodeAlgorithmUnusable means neither the requested algorithm nor its
 	// fallback is available on this host.
 	CodeAlgorithmUnusable = "qos-algorithm-unusable"
+
+	// CodeClientRateInvalid means a client-specific rate ceiling or guarantee is invalid.
+	CodeClientRateInvalid = "qos-client-rate-invalid"
+
+	// CodeClientIPInvalid means a client IP or CIDR match could not be parsed.
+	CodeClientIPInvalid = "qos-client-ip-invalid"
+
+	// CodeClientConflict means duplicate client IDs or IP matches were defined.
+	CodeClientConflict = "qos-client-conflict"
+
+	// CodeClientPriorityInvalid means an unrecognised priority tier was requested.
+	CodeClientPriorityInvalid = "qos-client-priority-invalid"
+
+	// CodeGuaranteedRateExceeded means the sum of guaranteed client rates exceeds link capacity.
+	CodeGuaranteedRateExceeded = "qos-guaranteed-rate-exceeded"
 )
 
 // Finding is a single validation result.
@@ -272,9 +289,88 @@ func Validate(p Policy, avail Availability) Result {
 	validateBandwidth(&r, p)
 	validateLimits(&r, p, alg)
 	validateSelection(&r, p, alg, avail)
+	validateClients(&r, p)
 
 	r.finalise()
 	return r
+}
+
+// validateClients checks per-client bandwidth limits, guarantees, and priorities.
+func validateClients(r *Result, p Policy) {
+	if len(p.Clients) == 0 {
+		return
+	}
+
+	seenIDs := make(map[string]bool)
+	seenIPs := make(map[string]bool)
+	var totalMinDown, totalMinUp int
+
+	for i, c := range p.Clients {
+		fld := fmt.Sprintf("clients[%d]", i)
+		if c.ID == "" {
+			r.errorc(CodeClientConflict, fld+".id", "client id must not be empty", "name the client rule")
+		} else if seenIDs[c.ID] {
+			r.errorc(CodeClientConflict, fld+".id", fmt.Sprintf("duplicate client id %q", c.ID), "client ids must be unique")
+		} else {
+			seenIDs[c.ID] = true
+		}
+
+		if c.IP == "" {
+			r.errorc(CodeClientIPInvalid, fld+".ip", "client ip match must not be empty", "specify a client ip or cidr")
+		} else {
+			if _, err := netip.ParseAddr(c.IP); err != nil {
+				if _, err := netip.ParsePrefix(c.IP); err != nil {
+					r.errorc(CodeClientIPInvalid, fld+".ip", fmt.Sprintf("invalid client ip or cidr %q", c.IP), "use an address like 10.77.0.100 or 10.77.0.0/24")
+				}
+			}
+			if seenIPs[c.IP] {
+				r.errorc(CodeClientConflict, fld+".ip", fmt.Sprintf("duplicate client ip match %q", c.IP), "client match addresses must not overlap identically")
+			} else {
+				seenIPs[c.IP] = true
+			}
+		}
+
+		if c.DownloadKbps <= 0 {
+			r.errorc(CodeClientRateInvalid, fld+".download_kbps", "client download rate must be positive", "specify a positive download_kbps")
+		}
+		if c.UploadKbps <= 0 {
+			r.errorc(CodeClientRateInvalid, fld+".upload_kbps", "client upload rate must be positive", "specify a positive upload_kbps")
+		}
+		if c.MinDownloadKbps < 0 {
+			r.errorc(CodeClientRateInvalid, fld+".min_download_kbps", "guaranteed minimum download rate cannot be negative", "")
+		}
+		if c.MinUploadKbps < 0 {
+			r.errorc(CodeClientRateInvalid, fld+".min_upload_kbps", "guaranteed minimum upload rate cannot be negative", "")
+		}
+		if c.MinDownloadKbps > 0 && c.MinDownloadKbps > c.DownloadKbps {
+			r.errorc(CodeClientRateInvalid, fld+".min_download_kbps", "guaranteed minimum download rate exceeds maximum download rate", "set min <= max")
+		}
+		if c.MinUploadKbps > 0 && c.MinUploadKbps > c.UploadKbps {
+			r.errorc(CodeClientRateInvalid, fld+".min_upload_kbps", "guaranteed minimum upload rate exceeds maximum upload rate", "set min <= max")
+		}
+
+		if c.Priority != "" {
+			switch strings.ToLower(string(c.Priority)) {
+			case "critical", "high", "normal", "low":
+			default:
+				r.errorc(CodeClientPriorityInvalid, fld+".priority", fmt.Sprintf("unknown priority tier %q", c.Priority), "use critical, high, normal, or low")
+			}
+		}
+
+		totalMinDown += c.MinDownloadKbps
+		totalMinUp += c.MinUploadKbps
+	}
+
+	if p.Bandwidth.DownloadKbps > 0 && totalMinDown > p.Bandwidth.DownloadKbps {
+		r.errorc(CodeGuaranteedRateExceeded, "clients",
+			fmt.Sprintf("sum of guaranteed client download rates (%d kbps) exceeds total link download capacity (%d kbps)", totalMinDown, p.Bandwidth.DownloadKbps),
+			"reduce guaranteed client minimums to fit within provisioned bandwidth")
+	}
+	if p.Bandwidth.UploadKbps > 0 && totalMinUp > p.Bandwidth.UploadKbps {
+		r.errorc(CodeGuaranteedRateExceeded, "clients",
+			fmt.Sprintf("sum of guaranteed client upload rates (%d kbps) exceeds total link upload capacity (%d kbps)", totalMinUp, p.Bandwidth.UploadKbps),
+			"reduce guaranteed client minimums to fit within provisioned bandwidth")
+	}
 }
 
 // validateAlgorithm checks the requested algorithm.

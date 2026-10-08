@@ -18,16 +18,59 @@ type BackupScope struct {
 }
 
 // StateSnapshot captures the network configuration state of managed resources prior to mutation.
+//
+// # Why QDiscs is a map of structured baselines and not map[string]string
+//
+// The original field was map[string]string holding an algorithm name, compared
+// by equality in MatchesBaseline. Two problems, and the first is the serious
+// one:
+//
+//	THN never populated it.
+//
+// Both CaptureState implementations omitted qdiscs entirely, so the map was
+// always empty, so MatchesBaseline's qdisc loop iterated over nothing and
+// passed. A rollback that restored no traffic control reported itself VERIFIED.
+// The check was not absent — it was present, empty, and asserting success,
+// which is worse than not having it.
+//
+// So QDiscs is map[string]TcBaseline, where TcBaseline.Captured distinguishes
+// "there was nothing there" from "THN did not look". A baseline that was never
+// captured now fails the comparison instead of passing it.
 type StateSnapshot struct {
-	CapturedAt         time.Time           `json:"captured_at"`
-	Links              map[string]string   `json:"links"`
-	Addresses          map[string][]string `json:"addresses"`
-	DefaultRoute       string              `json:"default_route"`
-	Sysctls            map[string]string   `json:"sysctls"`
-	NFTablesTHNPresent bool                `json:"nftables_thn_present"`
-	NFTablesTHNContent string              `json:"nftables_thn_content,omitempty"`
-	QDiscs             map[string]string   `json:"qdiscs,omitempty"`
-	DNSResolvers       []string            `json:"dns_resolvers,omitempty"`
+	CapturedAt         time.Time             `json:"captured_at"`
+	Links              map[string]string     `json:"links"`
+	Addresses          map[string][]string   `json:"addresses"`
+	DefaultRoute       string                `json:"default_route"`
+	Sysctls            map[string]string     `json:"sysctls"`
+	NFTablesTHNPresent bool                  `json:"nftables_thn_present"`
+	NFTablesTHNContent string                `json:"nftables_thn_content,omitempty"`
+	QDiscs             map[string]TcBaseline `json:"qdiscs,omitempty"`
+	DNSResolvers       []string              `json:"dns_resolvers,omitempty"`
+	// Captures records which subsystems were actually read.
+	//
+	// A snapshot that did not read a subsystem it was scoped for is not a
+	// baseline for it. Without this the absence of a capture is
+	// indistinguishable from an absence of state, and both compare equal.
+	Captures map[string]bool `json:"captures,omitempty"`
+}
+
+// CapturedSubsystem reports whether a subsystem was actually read.
+func (s *StateSnapshot) CapturedSubsystem(name string) bool {
+	if s == nil || s.Captures == nil {
+		return false
+	}
+	return s.Captures[name]
+}
+
+// MarkCaptured records that a subsystem was read.
+func (s *StateSnapshot) MarkCaptured(name string) {
+	if s == nil {
+		return
+	}
+	if s.Captures == nil {
+		s.Captures = make(map[string]bool)
+	}
+	s.Captures[name] = true
 }
 
 // NewStateSnapshot allocates an empty snapshot with initialized maps.
@@ -37,7 +80,8 @@ func NewStateSnapshot() *StateSnapshot {
 		Links:      make(map[string]string),
 		Addresses:  make(map[string][]string),
 		Sysctls:    make(map[string]string),
-		QDiscs:     make(map[string]string),
+		QDiscs:     make(map[string]TcBaseline),
+		Captures:   make(map[string]bool),
 	}
 }
 
@@ -51,7 +95,9 @@ func (s *StateSnapshot) Clone() *StateSnapshot {
 		Sysctls:            make(map[string]string, len(s.Sysctls)),
 		NFTablesTHNPresent: s.NFTablesTHNPresent,
 		NFTablesTHNContent: s.NFTablesTHNContent,
-		QDiscs:             make(map[string]string, len(s.QDiscs)),
+		QDiscs:             make(map[string]TcBaseline, len(s.QDiscs)),
+		DNSResolvers:       append([]string(nil), s.DNSResolvers...),
+		Captures:           make(map[string]bool, len(s.Captures)),
 	}
 	for k, v := range s.Links {
 		c.Links[k] = v
@@ -63,10 +109,16 @@ func (s *StateSnapshot) Clone() *StateSnapshot {
 		c.Sysctls[k] = v
 	}
 	for k, v := range s.QDiscs {
-		c.QDiscs[k] = v
+		// The baseline holds slices, so it is copied rather than aliased. A
+		// shallow copy would let a later mutation of the original rewrite
+		// the baseline a rollback depends on.
+		baseline := v
+		baseline.Classes = append([]string(nil), v.Classes...)
+		baseline.Filters = append([]string(nil), v.Filters...)
+		c.QDiscs[k] = baseline
 	}
-	if s.DNSResolvers != nil {
-		c.DNSResolvers = append([]string(nil), s.DNSResolvers...)
+	for k, v := range s.Captures {
+		c.Captures[k] = v
 	}
 	return c
 }
@@ -157,10 +209,59 @@ func (s *StateSnapshot) MatchesBaseline(current *StateSnapshot) (bool, []string)
 	}
 
 	// Compare qdiscs
-	for iface, wantQDisc := range s.QDiscs {
-		gotQDisc := current.QDiscs[iface]
-		if gotQDisc != wantQDisc {
-			diffs = append(diffs, fmt.Sprintf("interface %s qdisc mismatch: got %q, want baseline %q", iface, gotQDisc, wantQDisc))
+	//
+	// This loop previously iterated over an always-empty map, because no
+	// CaptureState populated it, and reported success every time. A rollback
+	// that had removed a qdisc and restored nothing was certified as
+	// verified.
+	//
+	// The three cases are distinguished deliberately:
+	//
+	//	baseline captured, kind matches     -> restored
+	//	baseline captured, kind differs     -> not restored; report it
+	//	baseline never captured              -> NOT VERIFIED; report that
+	//
+	// The third is the one that matters most. An uncaptured baseline cannot
+	// be compared, and treating "I do not know what was there" as "it is the
+	// same" is how a rollback certifies a host nobody can reconstruct.
+	for iface, baseline := range s.QDiscs {
+		current, ok := current.QDiscs[iface]
+
+		if !baseline.Captured {
+			diffs = append(diffs, fmt.Sprintf(
+				"interface %s: traffic control was never captured before the transaction, "+
+					"so its restoration cannot be verified", iface))
+			continue
+		}
+		if !ok || !current.Captured {
+			diffs = append(diffs, fmt.Sprintf(
+				"interface %s: traffic control could not be read after rollback", iface))
+			continue
+		}
+		if !baseline.Empty() {
+			if baseline.Root != current.Root {
+				diffs = append(diffs, fmt.Sprintf(
+					"interface %s root qdisc mismatch: got %q, want baseline %q",
+					iface, current.Root, baseline.Root))
+			}
+			if !slices.Equal(current.Classes, baseline.Classes) {
+				diffs = append(diffs, fmt.Sprintf(
+					"interface %s class mismatch: got %d class(es), want baseline %d",
+					iface, len(current.Classes), len(baseline.Classes)))
+			}
+			if !slices.Equal(current.Filters, baseline.Filters) {
+				diffs = append(diffs, fmt.Sprintf(
+					"interface %s filter mismatch: got %d filter(s), want baseline %d",
+					iface, len(current.Filters), len(baseline.Filters)))
+			}
+			continue
+		}
+		// The baseline was the kernel default, so restoration means the
+		// interface must now be carrying no explicit root discipline.
+		if !current.Empty() {
+			diffs = append(diffs, fmt.Sprintf(
+				"interface %s: rollback left %q in place; the baseline had no root qdisc",
+				iface, current.Root))
 		}
 	}
 

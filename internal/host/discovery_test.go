@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // The five hosts. Each returns the kernel-level observation; FromSnapshot is

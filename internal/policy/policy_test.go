@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/policy"
-	"github.com/venth/thn-gateway/internal/qos"
-	"github.com/venth/thn-gateway/internal/schedule"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/policy"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/schedule"
 )
 
 var at = time.Date(2026, 3, 14, 12, 0, 0, 0, time.UTC) // a Saturday, midday

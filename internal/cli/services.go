@@ -8,16 +8,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/multiwan"
-	"github.com/venth/thn-gateway/internal/qos"
-	"github.com/venth/thn-gateway/internal/sandbox"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp/dnsmasq"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/multiwan"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/sandbox"
 )
 
 // dhcpPolicyFromConfig derives a DHCP policy from configuration.

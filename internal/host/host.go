@@ -60,7 +60,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // Role is a logical purpose an interface is asked to serve.

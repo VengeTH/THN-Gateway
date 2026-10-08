@@ -4,10 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/authority"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/reconcile"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/reconcile"
 )
 
 // This file is the gate phase for the fleet control plane's safety boundary.

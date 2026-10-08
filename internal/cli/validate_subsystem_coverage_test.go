@@ -19,12 +19,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dns"
-	fwpolicy "github.com/venth/thn-gateway/internal/firewall/policy"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	fwpolicy "github.com/VengeTH/THN-Gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // auditConfig is a document that trips something in several subsystems at once.

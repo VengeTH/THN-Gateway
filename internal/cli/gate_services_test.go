@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dhcp/dnsmasq"
-	"github.com/venth/thn-gateway/internal/dns"
-	"github.com/venth/thn-gateway/internal/qos"
-	qostc "github.com/venth/thn-gateway/internal/qos/tc"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp/dnsmasq"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
 )
 
 // This file holds the DHCP, DNS and traffic-shaping phases of the gate.
@@ -521,9 +521,10 @@ func TestGateQoSConfiguredRateReachesTheCommand(t *testing.T) {
 	}
 	script := jsonString(t, doc, "script")
 
-	requireContains(t, "the shaping script", script, "bandwidth 110000kbit")
-	requireContains(t, "the shaping script", script, "uplink 22000kbit")
+	requireContains(t, "the shaping script", script, "bandwidth 22Mbit")
+	requireContains(t, "the shaping script", script, "bandwidth 110Mbit")
 	requireContains(t, "the shaping script", script, "dev "+gateWANIface+" root cake")
+	requireContains(t, "the shaping script", script, "dev "+gateLANIface+" root cake")
 }
 
 // TestGateQoSDegradesLoudlyOnAHostWithoutCake is the property the whole

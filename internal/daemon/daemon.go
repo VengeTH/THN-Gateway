@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/logging"
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/logging"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // Config is how the daemon is started.

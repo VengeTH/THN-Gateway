@@ -41,15 +41,15 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/execution"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/planner"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // activationEvidence is everything the safety gates read, gathered once.
@@ -236,6 +236,24 @@ func executableSubsystems(cfg config.Config) (bool, string) {
 		missing = append(missing,
 			"dns.enabled is true but THN implements no DNS server; "+
 				"set dns.enabled=false and let clients use their upstream resolvers")
+	}
+	if cfg.QoS.Enabled {
+		// Production QoS activation remains strictly blocked until every
+		// required enforcement condition is satisfied on real hardware.
+		//
+		// Even though Phase 2 implements per-client shaping, class trees,
+		// filters, and isolated namespace traffic tests, this machine has not
+		// yet undergone controlled real-hardware traffic verification.
+		// Activating without that would claim demonstrated enforcement where
+		// only code and lab tests exist.
+		missing = append(missing,
+			"qos.enabled is true, but production QoS activation remains strictly blocked until all enforcement gates pass: "+
+				"[1] algorithm supported, [2] kernel modules (sch_cake/sch_htb) verified, [3] tc class/filter capabilities observed, "+
+				"[4] download enforcement verified, [5] upload enforcement verified, [6] priority enforcement verified, "+
+				"[7] fairness verified, [8] latency/bufferbloat verified, [9] baseline capture verified, "+
+				"[10] compensating rollback verified, [11] management traffic path protected (SSH/Tailscale), "+
+				"[12] foreign qdiscs confirmed absent/conflict-free. "+
+				"Set qos.enabled=false to activate, or complete controlled physical hardware testing.")
 	}
 	if len(missing) == 0 {
 		return true, ""

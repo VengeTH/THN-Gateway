@@ -35,10 +35,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
 )
 
 // Action classifies the reconciliation operation on a resource.
@@ -410,6 +410,10 @@ func ComputeDesiredDigest(des desired.State) string {
 	// plan step where an operator can act on them.
 	fmt.Fprintf(h, "qosrole=%s:%s:%d;",
 		des.QoS.Role, des.QoS.StableID, des.QoS.OverheadPercent)
+	for _, c := range des.QoS.Clients {
+		fmt.Fprintf(h, "qosclient=%s:%s:%d:%d:%d:%d:%s:%t;",
+			c.ID, c.IP, c.DownloadKbps, c.UploadKbps, c.MinDownloadKbps, c.MinUploadKbps, c.Priority, c.Disabled)
+	}
 	sortDNS := append([]string(nil), des.DNS.Servers...)
 	sort.Strings(sortDNS)
 	fmt.Fprintf(h, "dns=%t:%s;", des.DNS.Present, strings.Join(sortDNS, ","))
@@ -764,7 +768,7 @@ func actionFor(c diff.Change) Action {
 	case "lan-address-remove":
 		return ActionDelete
 	case "wan-link-state", "lan-link-state", "default-route-gateway", "ip-forwarding",
-		"firewall-empty", "qos-algorithm", "resolvers":
+		"firewall-empty", "qos-algorithm", "qos-rate", "qos-policy", "resolvers":
 		return ActionUpdate
 	case "wan-name-mismatch", "lan-name-mismatch":
 		return ActionConflict
@@ -840,7 +844,7 @@ func rollbackFor(c diff.Change) *RollbackInfo {
 		if device != "" {
 			rb.RestoreCommands = []string{fmt.Sprintf("tc qdisc del dev %s root", device)}
 		}
-	case "qos-algorithm":
+	case "qos-algorithm", "qos-rate", "qos-policy":
 		device := qosDevice(c.Desired)
 		if device != "" && c.Current != "" {
 			rb.RestoreCommands = []string{fmt.Sprintf("tc qdisc replace dev %s root %s", device, c.Current)}
@@ -1047,6 +1051,9 @@ func qosDesiredText(d desired.QoS, cap qos.Evidence) string {
 	}
 	if d.DownloadKbps > 0 || d.UploadKbps > 0 {
 		parts = append(parts, fmt.Sprintf("download=%dkbit/s upload=%dkbit/s", d.DownloadKbps, d.UploadKbps))
+	}
+	if len(d.Clients) > 0 {
+		parts = append(parts, fmt.Sprintf("clients=%d", len(d.Clients)))
 	}
 	// The capability verdict is rendered into the step because it is the
 	// prerequisite an operator has to resolve. It is deliberately not in the
@@ -1291,8 +1298,8 @@ func summaryFor(c diff.Change) string {
 		return "populate the empty firewall ruleset"
 	case "qos-absent":
 		return "install the configured queue discipline"
-	case "qos-algorithm":
-		return "replace the queue discipline with the configured algorithm"
+	case "qos-algorithm", "qos-rate", "qos-policy":
+		return "reconcile traffic control to match configured policy"
 	case "resolvers":
 		return "replace the resolver set"
 	default:
@@ -1318,7 +1325,7 @@ func reversibilityFor(c diff.Change) string {
 func isDisruptive(c diff.Change) bool {
 	switch c.ID {
 	case "lan-address-remove", "default-route-gateway",
-		"firewall-absent", "firewall-empty", "qos-absent", "qos-algorithm":
+		"firewall-absent", "firewall-empty", "qos-absent", "qos-algorithm", "qos-rate", "qos-policy":
 		return true
 	default:
 		return c.Risk == diff.RiskCritical
@@ -1357,7 +1364,7 @@ func commandsFor(c diff.Change) []string {
 	case "firewall-absent", "firewall-empty":
 		return firewallCommands(c.Desired)
 
-	case "qos-absent", "qos-algorithm":
+	case "qos-absent", "qos-algorithm", "qos-rate", "qos-policy":
 		return qosCommands(c)
 
 	case "resolvers":
@@ -1541,7 +1548,7 @@ func (p *Plan) simulate() {
 		case id == "default-route-add" || id == "default-route-gateway":
 			sim.Consequences = append(sim.Consequences,
 				"traffic would leave through the configured default gateway")
-		case id == "qos-absent" || id == "qos-algorithm":
+		case id == "qos-absent" || id == "qos-algorithm" || id == "qos-rate" || id == "qos-policy":
 			sim.Consequences = append(sim.Consequences,
 				"outbound traffic would be shaped by the configured queue discipline")
 		}
@@ -1562,7 +1569,7 @@ func (p *Plan) simulate() {
 		case "default-route-gateway":
 			sim.Disruptions = append(sim.Disruptions,
 				fmt.Sprintf("%s: the current default route would be replaced, which would drop any session using it", s.ID))
-		case "qos-absent", "qos-algorithm":
+		case "qos-absent", "qos-algorithm", "qos-rate", "qos-policy":
 			sim.Disruptions = append(sim.Disruptions,
 				fmt.Sprintf("%s: traffic on the shaped interface would pause briefly while the queue discipline is replaced", s.ID))
 		}

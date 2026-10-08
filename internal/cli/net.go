@@ -5,10 +5,10 @@ import (
 	"net/netip"
 	"os"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/netconfig"
-	netnft "github.com/venth/thn-gateway/internal/netconfig/nft"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/netconfig"
+	netnft "github.com/VengeTH/THN-Gateway/internal/netconfig/nft"
 )
 
 // policyFromConfig derives a data-plane policy from configuration.

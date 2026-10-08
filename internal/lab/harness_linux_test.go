@@ -51,13 +51,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/execution"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/netns"
-	"github.com/venth/thn-gateway/internal/network"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/netns"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
 
 const (
@@ -228,6 +228,11 @@ func (s *labServer) shutdown() {
 // The skip message states exactly what was missing. A suite that quietly stops
 // testing something is worse than one that admits it could not.
 func newHarness(t *testing.T) *harness {
+	return newHarnessWithTopology(t, Canonical())
+}
+
+// newHarnessWithTopology builds a disposable lab with a specific topology, or skips the test.
+func newHarnessWithTopology(t *testing.T, top Topology) *harness {
 	t.Helper()
 
 	if os.Getenv(liveGateEnv) != "1" {
@@ -240,9 +245,8 @@ func newHarness(t *testing.T) *harness {
 		t.Skip("skipping: `nft` is not on PATH; the live lab needs nftables")
 	}
 
-	top := Canonical()
 	if err := top.Validate(); err != nil {
-		t.Fatalf("canonical lab topology is invalid: %v", err)
+		t.Fatalf("lab topology is invalid: %v", err)
 	}
 
 	h := &harness{
@@ -253,14 +257,6 @@ func newHarness(t *testing.T) *harness {
 		runners: map[string]*namespaceRunner{},
 	}
 
-	// Registered BEFORE anything is built, and that ordering is the point.
-	//
-	// Every build step below ends in t.Fatalf on failure, which ends the test
-	// immediately. A cleanup registered afterwards would never run, and the
-	// process would exit with up to three live namespaces — which do not
-	// disappear because the test binary did. The next run would then either
-	// collide with them or silently inherit a half-built topology from a run
-	// that failed for an unrelated reason.
 	t.Cleanup(h.teardown)
 
 	h.buildNamespaces()
@@ -1009,6 +1005,94 @@ func (h *harness) startTargetServer() *labServer {
 // something real to fail to reach.
 func (h *harness) startClientListener() *labServer {
 	return h.startServer(ClientNamespace, fmt.Sprintf("%s:%d", ClientIP, clientListenPort))
+}
+
+// startTrafficSink starts a streaming receiver endpoint inside a namespace.
+func (h *harness) startTrafficSink(namespaceName, endpoint string, durationMS int) (*labServer, <-chan StreamReport) {
+	h.t.Helper()
+	ns, ok := h.ns[namespaceName]
+	if !ok {
+		h.t.Fatalf("no lab namespace named %s", namespaceName)
+	}
+
+	reportChan := make(chan StreamReport, 1)
+	srv := &labServer{
+		done: make(chan struct{}),
+		stop: filepath.Join(h.workDir, fmt.Sprintf("sink-stop-%s-%d", namespaceName, time.Now().UnixNano())),
+	}
+
+	go func() {
+		defer close(srv.done)
+		out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+			"--", "traffic-sink", endpoint, fmt.Sprintf("%d", durationMS))
+		if err != nil && !strings.Contains(out, helperMarker) {
+			h.t.Logf("traffic sink in %s exited: %v (out: %s)", namespaceName, err, out)
+		}
+		var rep StreamReport
+		if line := helperLine(out); line != "" {
+			_ = json.Unmarshal([]byte(line), &rep)
+		}
+		reportChan <- rep
+	}()
+
+	h.mu.Lock()
+	h.servers = append(h.servers, srv)
+	h.mu.Unlock()
+
+	h.waitForListener(ns, endpoint)
+	return srv, reportChan
+}
+
+// streamTraffic transmits sustained traffic from a namespace toward endpoint.
+func (h *harness) streamTraffic(namespaceName, endpoint string, durationMS int) (StreamReport, error) {
+	h.t.Helper()
+	ns, ok := h.ns[namespaceName]
+	if !ok {
+		return StreamReport{}, fmt.Errorf("no lab namespace named %s", namespaceName)
+	}
+
+	out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+		"--", "traffic-stream", endpoint, fmt.Sprintf("%d", durationMS))
+	if err != nil && !strings.Contains(out, helperMarker) {
+		return StreamReport{}, fmt.Errorf("stream traffic in %s failed: %w (out: %s)", namespaceName, err, out)
+	}
+
+	line := helperLine(out)
+	if line == "" {
+		return StreamReport{}, fmt.Errorf("stream traffic in %s produced no report line (out: %s)", namespaceName, out)
+	}
+
+	var rep StreamReport
+	if err := json.Unmarshal([]byte(line), &rep); err != nil {
+		return StreamReport{}, fmt.Errorf("unmarshaling stream report: %w (line: %s)", err, line)
+	}
+	return rep, nil
+}
+
+// measureRTT measures round-trip time from a namespace to an endpoint.
+func (h *harness) measureRTT(namespaceName, endpoint string, count int) (RTTReport, error) {
+	h.t.Helper()
+	ns, ok := h.ns[namespaceName]
+	if !ok {
+		return RTTReport{}, fmt.Errorf("no lab namespace named %s", namespaceName)
+	}
+
+	out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
+		"--", "rtt-ping", endpoint, fmt.Sprintf("%d", count))
+	if err != nil && !strings.Contains(out, helperMarker) {
+		return RTTReport{}, fmt.Errorf("rtt-ping in %s failed: %w (out: %s)", namespaceName, err, out)
+	}
+
+	line := helperLine(out)
+	if line == "" {
+		return RTTReport{}, fmt.Errorf("rtt-ping in %s produced no report line (out: %s)", namespaceName, out)
+	}
+
+	var rep RTTReport
+	if err := json.Unmarshal([]byte(line), &rep); err != nil {
+		return RTTReport{}, fmt.Errorf("unmarshaling rtt report: %w (line: %s)", err, line)
+	}
+	return rep, nil
 }
 
 // ------------------------------------------------------------ small helpers

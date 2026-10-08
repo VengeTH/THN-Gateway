@@ -28,9 +28,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/gateway"
-	"github.com/venth/thn-gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // intentConfig is a complete, internally coherent gateway document.
@@ -503,8 +503,8 @@ func TestIntentAddsNoExecutionPath(t *testing.T) {
 	// An allow-list rather than a denylist, so a new import fails the test
 	// instead of quietly widening what this layer can reach.
 	allowed := map[string]bool{
-		"github.com/venth/thn-gateway/internal/config": true,
-		"github.com/venth/thn-gateway/internal/host":   true,
+		"github.com/VengeTH/THN-Gateway/internal/config": true,
+		"github.com/VengeTH/THN-Gateway/internal/host":   true,
 		"fmt":       true,
 		"net/netip": true,
 		"sort":      true,

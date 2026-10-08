@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/dns"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dns"
 )
 
 // Directives emitted by the renderer, in the order they are written.

@@ -172,6 +172,27 @@ qos:
   # it at 0 to take THN's 10% default; 8 to 12 is the realistic range.
   overhead_percent: 0
 
+  # Phase 2: Per-client bandwidth allocations and priority tiers.
+  # When configured, THN builds a classful HTB hierarchy on WAN (upload) and
+  # LAN (download), attaching leaf CAKE qdiscs and nftables fwmarks to enforce
+  # independent limits, guarantees, and priority scheduling.
+  # clients:
+  #   - id: neighbor-a
+  #     ip: 10.77.0.100
+  #     download_kbps: 20000
+  #     upload_kbps: 5000
+  #     priority: low
+  #   - id: neighbor-b
+  #     ip: 10.77.0.101
+  #     download_kbps: 30000
+  #     upload_kbps: 10000
+  #     priority: normal
+  #   - id: admin-workstation
+  #     ip: 10.77.0.50
+  #     download_kbps: 100000
+  #     upload_kbps: 20000
+  #     priority: critical
+
 paths:
   config: /etc/thn/config.yaml
   state_dir: /var/lib/thn

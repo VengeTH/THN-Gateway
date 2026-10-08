@@ -27,14 +27,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/deployment"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/planner"
-	"github.com/venth/thn-gateway/internal/state"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/deployment"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
 // runReadiness implements `thn readiness`.
@@ -152,6 +152,31 @@ func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string) ac
 	g := activation.RoleGate{Role: string(r), Selector: asked}
 
 	if iface, ok := res.Assigned[r]; ok {
+		// Production Gigabit LAN prerequisite (Phase 2.3 & 2.4):
+		// Fast Ethernet (100 Mbps) or the rejected 100M USB adapter (enx00e099001812) cannot satisfy production LAN.
+		if r == host.RoleLAN {
+			if iface.SystemName == "enx00e099001812" || strings.HasPrefix(iface.ID, "hw:9d216fa27c73ed97") {
+				g.Satisfied = false
+				g.Interface = iface.SystemName
+				g.Reason = fmt.Sprintf("interface %s (%s) is a 100 Mbps Fast Ethernet adapter and is explicitly rejected for production LAN use; install the dedicated Gigabit USB adapter",
+					iface.SystemName, iface.ID)
+				return g
+			}
+			if iface.Physical && iface.Kind == host.KindEthernet && iface.SpeedMbps > 0 && iface.SpeedMbps < 1000 {
+				g.Satisfied = false
+				g.Interface = iface.SystemName
+				g.Reason = fmt.Sprintf("interface %s operates at %d Mbps; production LAN requires a Gigabit Ethernet interface (>= 1000 Mbps); install the dedicated Gigabit USB adapter",
+					iface.SystemName, iface.SpeedMbps)
+				return g
+			}
+			if iface.Kind == host.KindWireless {
+				g.Satisfied = false
+				g.Interface = iface.SystemName
+				g.Reason = fmt.Sprintf("interface %s is wireless and cannot satisfy the physical wired LAN gateway role", iface.SystemName)
+				return g
+			}
+		}
+
 		g.Satisfied = true
 		g.Interface = iface.SystemName
 		g.Capability = string(host.CapRouting)

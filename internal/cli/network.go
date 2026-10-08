@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // This file implements `thn network inspect`.

@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/assistant"
-	"github.com/venth/thn-gateway/internal/correlation"
-	"github.com/venth/thn-gateway/internal/rules"
-	"github.com/venth/thn-gateway/internal/ruleset"
-	"github.com/venth/thn-gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/assistant"
+	"github.com/VengeTH/THN-Gateway/internal/correlation"
+	"github.com/VengeTH/THN-Gateway/internal/rules"
+	"github.com/VengeTH/THN-Gateway/internal/ruleset"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
 )
 
 // This file implements `thn explain`, `thn ask` and `thn suggest`.

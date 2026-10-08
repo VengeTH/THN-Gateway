@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/firewall/policy"
+	"github.com/VengeTH/THN-Gateway/internal/firewall/policy"
 )
 
 // configured returns a policy with both interfaces identified.

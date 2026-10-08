@@ -4,10 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
 )
 
 func TestStructuredOperationsValidation(t *testing.T) {
@@ -48,11 +49,37 @@ func TestStructuredOperationsValidation(t *testing.T) {
 		{"invalid nft NAT iface", OpNFTApplyTHNTable{InboundPolicy: "drop", NATInterfaces: []string{"eth0;evil"}}, true},
 		{"valid nft delete table", OpNFTDeleteTHNTable{}, false},
 
-		// QDisc ops
-		{"valid qdisc cake", OpQDiscApply{Interface: "eth0", Algorithm: "cake", DownloadKbps: 50000, UploadKbps: 10000}, false},
-		{"valid qdisc fq_codel", OpQDiscApply{Interface: "eth0", Algorithm: "fq_codel"}, false},
-		{"invalid qdisc algorithm", OpQDiscApply{Interface: "eth0", Algorithm: "unknown_algo"}, true},
+		// QDisc ops.
+		//
+		// An apply now names ONE direction and carries that direction's rate.
+		// The M7.4 form — one operation with both DownloadKbps and
+		// UploadKbps, and no direction — could only have produced a
+		// single discipline, which on a gateway shapes exactly one of the
+		// two rates the operator asked for.
+		{"valid qdisc cake upload", OpQDiscApply{Interface: "eth0", Algorithm: "cake", Direction: qostc.DirectionUpload, Kbps: 10000}, false},
+		{"valid qdisc cake download", OpQDiscApply{Interface: "eth1", Algorithm: "cake", Direction: qostc.DirectionDownload, Kbps: 50000}, false},
+		{"valid qdisc fq_codel", OpQDiscApply{Interface: "eth0", Algorithm: "fq_codel", Direction: qostc.DirectionUpload, Kbps: 10000}, false},
+		{"invalid qdisc algorithm", OpQDiscApply{Interface: "eth0", Algorithm: "unknown_algo", Direction: qostc.DirectionUpload, Kbps: 10000}, true},
+		// A rate-unaware discipline cannot enforce a limit, so installing
+		// one as the requested policy would be a silent downgrade.
+		{"qdisc pfifo_fast as an apply", OpQDiscApply{Interface: "eth0", Algorithm: "pfifo_fast", Direction: qostc.DirectionUpload, Kbps: 10000}, true},
+		// An apply with no rate is the exact shape PlanToOperations used to
+		// produce by dropping the configured figures.
+		{"qdisc with no rate", OpQDiscApply{Interface: "eth0", Algorithm: "cake", Direction: qostc.DirectionUpload}, true},
+		// A qdisc shapes one direction; an unnamed one cannot be built.
+		{"qdisc with no direction", OpQDiscApply{Interface: "eth0", Algorithm: "cake", Kbps: 10000}, true},
 		{"valid qdisc delete", OpQDiscDelete{Interface: "eth0"}, false},
+
+		// TC Class ops
+		{"valid tc class", OpTCClassApply{Interface: "eth0", Parent: "1:1", ClassID: "1:10", RateKbps: 1000, CeilKbps: 5000, Priority: 1}, false},
+		{"invalid tc class iface", OpTCClassApply{Interface: "eth0;evil", Parent: "1:1", ClassID: "1:10", RateKbps: 1000, CeilKbps: 5000}, true},
+		{"valid tc class delete", OpTCClassDelete{Interface: "eth0", ClassID: "1:10"}, false},
+
+		// TC Filter ops
+		{"valid tc filter fw", OpTCFilterApply{Interface: "eth0", Parent: "1:", Protocol: "ip", Prio: 1, Handle: "0x10", MatchKind: "fw", TargetClassID: "1:10"}, false},
+		{"valid tc filter ip", OpTCFilterApply{Interface: "eth0", Parent: "1:", Protocol: "ip", Prio: 2, IP: "10.77.0.100", MatchKind: "src_ip", TargetClassID: "1:10"}, false},
+		{"invalid tc filter iface", OpTCFilterApply{Interface: "eth0;evil", Parent: "1:", TargetClassID: "1:10"}, true},
+		{"valid tc filter delete", OpTCFilterDelete{Interface: "eth0", Parent: "1:", Prio: 1}, false},
 
 		// DNS ops
 		{"valid dns", OpDNSApply{Servers: []string{"1.1.1.1", "9.9.9.9"}}, false},

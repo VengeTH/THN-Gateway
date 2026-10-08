@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/guard"
-	"github.com/venth/thn-gateway/internal/netns"
-	"github.com/venth/thn-gateway/internal/qos"
-	qostc "github.com/venth/thn-gateway/internal/qos/tc"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/netns"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
 )
 
 // qosPolicyFromConfig derives a shaping policy from configuration.
@@ -47,6 +48,31 @@ func qosPolicyFromConfig(cfg config.Config) qos.Policy {
 
 	p.MTU = cfg.Network.MTU
 	p.FallbackToFqCodel = true
+
+	// Phase 2: Per-client policies and group pools
+	for _, c := range cfg.QoS.Clients {
+		p.Clients = append(p.Clients, qos.ClientPolicy{
+			ID:              c.ID,
+			IP:              c.IP,
+			MAC:             c.MAC,
+			DownloadKbps:    c.DownloadKbps,
+			UploadKbps:      c.UploadKbps,
+			MinDownloadKbps: c.MinDownloadKbps,
+			MinUploadKbps:   c.MinUploadKbps,
+			Priority:        qos.Priority(c.Priority),
+			Group:           c.Group,
+			Disabled:        c.Disabled,
+		})
+	}
+	for _, g := range cfg.QoS.Groups {
+		p.Groups = append(p.Groups, qos.GroupPolicy{
+			Name:         g.Name,
+			DownloadKbps: g.DownloadKbps,
+			UploadKbps:   g.UploadKbps,
+			Priority:     qos.Priority(g.Priority),
+		})
+	}
+	p.DefaultPriority = qos.Priority(cfg.QoS.DefaultPriority)
 
 	// CAKE's defaults are correct for CAKE. fq_codel's quantum is the
 	// interface MTU instead, and leaving CAKE's value in place there costs
@@ -90,16 +116,104 @@ func runQoS(env *Env, args []string) ExitCode {
 }
 
 // qosPolicy loads configuration and derives the shaping policy.
-func qosPolicy(env *Env, configPath string) (qos.Policy, string, ExitCode) {
+//
+// The config is returned alongside the policy because rendering needs the role
+// assignments to resolve the WAN and LAN interfaces, and re-reading the file
+// here would be a second parse that could disagree with the first.
+func qosPolicy(env *Env, configPath string) (qos.Policy, config.Config, string, ExitCode) {
 	path := env.resolveConfigPath(configPath)
 
 	cfg, err := loadConfig(env, path)
 	if err != nil {
 		env.errorf("thn qos: %v\n", err)
-		return qos.Policy{}, path, ExitProblems
+		return qos.Policy{}, config.Config{}, path, ExitProblems
 	}
 
-	return qosPolicyFromConfig(cfg), path, ExitOK
+	return qosPolicyFromConfig(cfg), cfg, path, ExitOK
+}
+
+// qosShapingInterfaces reports the (wan, lan) kernel names a shaping script
+// should attach to.
+//
+// # Why both, and why they come from roles
+//
+// A qdisc shapes egress. On a gateway that makes the WAN's egress the clients'
+// upload and the LAN's egress their download, so a correct pair of disciplines
+// needs both interfaces. M7.4 had one, which is why its script could only ever
+// have shaped one direction.
+//
+// The names come from the operator's role assignments rather than from
+// qos.interface, because the WAN is named there and the LAN is not: shaping
+// binds to the logical roles exactly as validation and planning already do, so
+// a document that says `qos.interface: wan` and a document that names the
+// kernel device both produce the same pair of disciplines.
+//
+// Roles are resolved against a live observation when one is available. When it
+// is not — `thn qos render` in CI, against a document — the configured
+// selectors are returned verbatim, and an unresolved selector simply produces
+// no command for that direction rather than a wrong one.
+func qosShapingInterfaces(cfg config.Config, p qos.Policy) (wan, lan string) {
+	// A host observation, when there is one, outranks the configured name:
+	// the kernel name is what a command needs and the selector is what the
+	// operator wrote.
+	if _, _, _, dev := observeHost(cfg); dev != nil {
+		res := host.Resolve(dev, roleAssignments(cfg))
+		if i, ok := roleInterface(res, host.RoleWAN); ok {
+			wan = i.SystemName
+		}
+		if i, ok := roleInterface(res, host.RoleLAN); ok {
+			lan = i.SystemName
+		}
+	}
+
+	if wan == "" {
+		wan = roleSelectorToName(cfg.Network.WAN)
+	}
+	if lan == "" {
+		lan = roleSelectorToName(cfg.Network.LAN)
+	}
+
+	// qos.interface is an explicit WAN selector and wins when it is a kernel
+	// name rather than a role, which is the case an operator reaches for when
+	// they want to shape a link that is not the assigned WAN.
+	if isKernelInterfaceName(p.Interface) {
+		wan = p.Interface
+	}
+	return wan, lan
+}
+
+// roleSelectorToName returns a selector that is already a kernel name.
+//
+// A stable identity like "hw:7c6170fd7f34317a" or a role name like "wan" is
+// not something tc accepts, so it is dropped rather than passed through. tc
+// would reject it, and a script full of rejected commands is worse than one
+// that plainly says the interface is unresolved.
+func roleSelectorToName(sel string) string {
+	if isKernelInterfaceName(sel) {
+		return sel
+	}
+	return ""
+}
+
+// isKernelInterfaceName reports whether a string is plausibly a kernel
+// interface name.
+//
+// Linux allows letters, digits, underscore, dot and dash, with a 15-character
+// limit. A stable identity contains ':' and a role name is a bare word; the
+// length bound additionally keeps a MAC-derived selector out.
+func isKernelInterfaceName(s string) bool {
+	if s == "" || len(s) > 15 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '-' || c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // assumedQoSAvailability builds an availability set from flags.
@@ -145,7 +259,7 @@ func runQoSValidate(env *Env, args []string) ExitCode {
 		*configPath = rest[0]
 	}
 
-	p, path, code := qosPolicy(env, *configPath)
+	p, _, path, code := qosPolicy(env, *configPath)
 	if code != ExitOK {
 		return code
 	}
@@ -245,7 +359,7 @@ func runQoSRender(env *Env, args []string) ExitCode {
 		*configPath = rest[0]
 	}
 
-	p, path, code := qosPolicy(env, *configPath)
+	p, cfg, path, code := qosPolicy(env, *configPath)
 	if code != ExitOK {
 		return code
 	}
@@ -260,7 +374,8 @@ func runQoSRender(env *Env, args []string) ExitCode {
 		return ExitProblems
 	}
 
-	script := qostc.Render(p, result.Selection)
+	wan, lan := qosShapingInterfaces(cfg, p)
+	script := qostc.Render(p, result.Selection, wan, lan)
 
 	if *out == "" {
 		if env.IsJSON {

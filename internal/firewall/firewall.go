@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
 )
 
 // Status summarises whether a capability is active on the host.

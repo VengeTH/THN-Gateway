@@ -39,8 +39,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/recovery"
-	"github.com/venth/thn-gateway/internal/rollback"
+	"github.com/VengeTH/THN-Gateway/internal/recovery"
+	"github.com/VengeTH/THN-Gateway/internal/rollback"
 )
 
 // Phases of the activation transaction, in the order they must occur.

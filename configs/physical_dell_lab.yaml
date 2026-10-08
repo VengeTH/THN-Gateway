@@ -1,0 +1,38 @@
+schema_version: 1
+gateway:
+  name: thn-gateway
+  generation: 1
+network:
+  # Stable hardware identity for physical onboard Intel Gigabit Ethernet (enp0s31f6)
+  wan: hw:ba41136cb1291dff
+  # Stable hardware identity for existing USB Ethernet adapter (enx00e099001812)
+  # NOTE: Physical lab preflight identifies this adapter as Fast Ethernet (100M only).
+  # The dedicated Gigabit USB adapter must be attached before physical activation.
+  lan: hw:9d216fa27c73ed97
+  lan_prefix: 10.77.0.1/24
+  mtu: 1500
+nat:
+  enabled: true
+  masquerade:
+    enabled: true
+    outbound: wan
+firewall:
+  enabled: true
+qos:
+  enabled: true
+  algorithm: cake
+  interface: wan
+  download_kbps: 100000
+  upload_kbps: 20000
+  overhead_percent: 10
+  clients:
+    - id: client-a
+      ip: 10.77.0.100
+      download_kbps: 20000
+      upload_kbps: 5000
+      priority: high
+    - id: client-b
+      ip: 10.77.0.101
+      download_kbps: 30000
+      upload_kbps: 10000
+      priority: normal

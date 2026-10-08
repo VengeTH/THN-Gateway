@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // dhcpFinding builds one DHCP finding.

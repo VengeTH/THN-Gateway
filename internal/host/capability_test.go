@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // nowFixture is the observation time for every fixture. Fixed so that two

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/deploy"
-	"github.com/venth/thn-gateway/internal/health"
+	"github.com/VengeTH/THN-Gateway/internal/deploy"
+	"github.com/VengeTH/THN-Gateway/internal/health"
 )
 
 var at = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

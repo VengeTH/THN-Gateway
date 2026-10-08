@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/schedule"
+	"github.com/VengeTH/THN-Gateway/internal/schedule"
 )
 
 // mustClock builds a wall clock or fails the test.

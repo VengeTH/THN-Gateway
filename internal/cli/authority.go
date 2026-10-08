@@ -4,10 +4,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/authority"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/reconcile"
+	"github.com/VengeTH/THN-Gateway/internal/authority"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/reconcile"
 )
 
 // This file implements `thn authority` and `thn reconcile`.

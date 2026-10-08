@@ -64,7 +64,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // Verdict is the overall outcome of checking a QoS intent.
@@ -216,6 +216,15 @@ type Intent struct {
 	// intent exists.
 	ObservedQdiscs []string `json:"observed_qdiscs,omitempty"`
 
+	// Clients carries per-client bandwidth limits and priorities.
+	Clients []ClientPolicy `json:"clients,omitempty"`
+
+	// Groups carries aggregate bandwidth pools.
+	Groups []GroupPolicy `json:"groups,omitempty"`
+
+	// DefaultPriority sets the priority for unclassified traffic.
+	DefaultPriority Priority `json:"default_priority,omitempty"`
+
 	// Policy is the document-shaped model the rest of the package consumes.
 	Policy Policy `json:"-"`
 }
@@ -263,20 +272,23 @@ func (r Report) bySeverity(s Severity) []Finding {
 // reading a document live in exactly one function.
 func FromPolicy(p Policy, role LANRole, cap Evidence, observed []string) Intent {
 	in := Intent{
-		Enabled:        p.Enabled,
-		Role:           RoleWAN,
-		RoleSelector:   role.Selector,
-		RoleDeclared:   role.Declared,
-		RoleResolved:   role.Resolved,
-		RoleConflict:   role.Conflict,
-		RoleInterface:  role.Interface,
-		RoleStableID:   role.StableID,
-		Algorithm:      p.Algorithm,
-		Bandwidth:      p.Bandwidth,
-		Limits:         p.Limits,
-		Capability:     cap,
-		ObservedQdiscs: sortedQdiscs(observed),
-		Policy:         p,
+		Enabled:         p.Enabled,
+		Role:            RoleWAN,
+		RoleSelector:    role.Selector,
+		RoleDeclared:    role.Declared,
+		RoleResolved:    role.Resolved,
+		RoleConflict:    role.Conflict,
+		RoleInterface:   role.Interface,
+		RoleStableID:    role.StableID,
+		Algorithm:       p.Algorithm,
+		Bandwidth:       p.Bandwidth,
+		Limits:          p.Limits,
+		Capability:      cap,
+		ObservedQdiscs:  sortedQdiscs(observed),
+		Clients:         append([]ClientPolicy(nil), p.Clients...),
+		Groups:          append([]GroupPolicy(nil), p.Groups...),
+		DefaultPriority: p.DefaultPriority,
+		Policy:          p,
 	}
 
 	// The policy's own interface is replaced with the role-resolved name so

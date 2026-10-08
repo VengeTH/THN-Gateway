@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -194,10 +195,124 @@ func validateSysctlArgs(args []string) error {
 	return fmt.Errorf("unsupported sysctl arguments %v", args)
 }
 
+// validateTCArgs enforces the tc grammar structurally.
+//
+// # Why this is now a grammar check and not a length check
+//
+// It used to be:
+//
+//	if len(args) < 2 { return fmt.Errorf("tc requires at least object and action") }
+//	return nil
+//
+// which accepts anything of sufficient length, including commands this file's
+// callers never intended to be constructible. The allowlist's job on the write
+// path is not to be exhaustive — a new caller will want verbs that do not
+// exist yet — it is to make the shapes that are dangerous impossible to spell
+// by accident.
+//
+// # The three rules
+//
+//  1. The object must be one of qdisc, class, filter, classmap, chain, mangle.
+//  2. The verb must be a known tc verb. Unknown verbs are refused rather
+//     than passed through, because a typo in a verb produces a command that
+//     fails at the kernel with a message that names neither the typo nor THN.
+//  3. A qdisc/class/filter that acts must name a device, and the device must
+//     look like a device name.
+//
+// # What this does not do
+//
+// It does not enumerate every tc verb, and it is not a general tc grammar.
+// It refuses the shapes that mutate more than the operation asked for and
+// lets the structured Operation types carry the intent. The write path is
+// reached only through OpQDiscApply, OpQDiscReplace and OpQDiscDelete, which
+// build their own arguments; this function is the backstop for the case where
+// one of those is wrong.
 func validateTCArgs(args []string) error {
-	// tc qdisc replace/del/show dev <iface> ...
 	if len(args) < 2 {
-		return fmt.Errorf("tc requires at least object and action")
+		return fmt.Errorf("tc requires at least an object and a verb")
 	}
+
+	obj := args[0]
+	switch obj {
+	case "qdisc", "class", "filter", "classmap", "chain", "mangle":
+	default:
+		return fmt.Errorf("unsupported tc object %q; permitted: qdisc, class, filter, "+
+			"classmap, chain, mangle", obj)
+	}
+
+	verb := args[1]
+	switch verb {
+	case "add", "replace", "del", "delete", "change", "show", "list":
+	default:
+		return fmt.Errorf("unsupported tc verb %q for object %q", verb, obj)
+	}
+
+	// Every acting verb names a device. A `tc qdisc replace` without one has
+	// no target, which the kernel resolves against nothing and which would
+	// read as a successful no-op.
+	if verb != "show" && verb != "list" {
+		dev := ""
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "dev" {
+				dev = args[i+1]
+				break
+			}
+		}
+		if dev == "" {
+			return fmt.Errorf("tc %s %s names no device", obj, verb)
+		}
+		if !ifaceRegex.MatchString(dev) {
+			return fmt.Errorf("tc %s %s names an invalid device %q", obj, verb, dev)
+		}
+	}
+
+	// A qdisc replace/add must state which kind it is installing. Without a
+	// kind, tc rejects it — and the rejection is the only thing standing
+	// between this and an unshaped discipline, so it is checked here where the
+	// error can name the cause.
+	if obj == "qdisc" && verb != "del" && verb != "delete" {
+		kind := ""
+		for i := 0; i < len(args); i++ {
+			if args[i] == "root" {
+				// root [handle <h>] <kind> OR root <kind>
+				if i+1 < len(args) {
+					if args[i+1] == "handle" && i+3 < len(args) {
+						kind = args[i+3]
+						break
+					} else if args[i+1] != "handle" {
+						kind = args[i+1]
+						break
+					}
+				}
+			}
+			if args[i] == "parent" {
+				// parent <parent_id> [handle <h>] <kind> OR parent <parent_id> <kind>
+				if i+2 < len(args) {
+					if args[i+2] == "handle" && i+4 < len(args) {
+						kind = args[i+4]
+						break
+					} else if args[i+2] != "handle" {
+						kind = args[i+2]
+						break
+					}
+				}
+			}
+		}
+		if kind == "" {
+			return fmt.Errorf("tc %s %s names neither a root nor a parent qdisc kind; "+
+				"an unshaped discipline would install successfully and report success", obj, verb)
+		}
+		if !tcQdiscKind.MatchString(kind) {
+			return fmt.Errorf("unsupported qdisc kind %q", kind)
+		}
+	}
+
 	return nil
 }
+
+// tcQdiscKind matches a discipline name tc recognises.
+//
+// A conservative set rather than a pattern: an unknown kind is refused here
+// rather than reaching the kernel, and refusing is the correct outcome for a
+// name this build has no reason to believe in.
+var tcQdiscKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)

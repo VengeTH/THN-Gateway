@@ -158,6 +158,10 @@ type Observed struct {
 	QoSActive bool
 	// QoSAlgorithm is the detected algorithm.
 	QoSAlgorithm string
+	// QoSUploadKbps is the observed shaped rate, when readable.
+	QoSUploadKbps int
+	// QoSClientCount is the observed count of configured client classes/filters.
+	QoSClientCount int
 
 	// Resolvers are the observed resolvers, when THN could read them.
 	Resolvers []string
@@ -217,11 +221,36 @@ type Desired struct {
 	QoSDownloadKbps int
 	// QoSUploadKbps is the shaped upload rate.
 	QoSUploadKbps int
+	// QoSOverheadPercent is the framing allowance applied when deriving the
+	// rate the kernel is given.
+	//
+	// It reaches the command line, so it belongs in the observed/desired
+	// comparison rather than being applied only at render time. Zero means
+	// "not configured" and qos/tc substitutes its own default.
+	QoSOverheadPercent int
+	// QoSMTU is the interface MTU, which sizes fq_codel's quantum.
+	//
+	// Carried for the same reason as the overhead: a quantum that does not
+	// match the interface costs measurable throughput, so it is a shaping
+	// parameter and must survive to the command rather than being re-derived.
+	QoSMTU int
+
+	// QoSClients carries the requested client bandwidth policies and priorities.
+	QoSClients []QoSClientDiff
 
 	// DNSPresent reports whether a resolver set was configured.
 	DNSPresent bool
 	// DNSServers is the intended resolver set.
 	DNSServers []string
+}
+
+// QoSClientDiff is the desired state of one client's shaping policy.
+type QoSClientDiff struct {
+	ID           string
+	IP           string
+	DownloadKbps int
+	UploadKbps   int
+	Priority     string
 }
 
 // unobservableReason explains a pending item produced by an unobservable host.
@@ -569,17 +598,59 @@ func (d *differ) compareQoS() {
 			Desired:   d.qosDesired(),
 			Reason:    fmt.Sprintf("this host uses %s for shaping but the configuration specifies %s", d.obs.QoSAlgorithm, d.want.QoSAlgorithm),
 		})
+		return
+	}
+
+	// Rate drift: observed rate differs from desired rate
+	if d.obs.QoSUploadKbps > 0 && d.want.QoSUploadKbps > 0 && d.obs.QoSUploadKbps != d.want.QoSUploadKbps {
+		d.add(Change{
+			ID:        "qos-rate",
+			Kind:      KindDrift,
+			Risk:      RiskMedium,
+			Subsystem: "qdisc",
+			Field:     "qos.upload_kbps",
+			Current:   fmt.Sprintf("%d kbps", d.obs.QoSUploadKbps),
+			Desired:   d.qosDesired(),
+			Reason:    fmt.Sprintf("observed upload rate (%d kbps) differs from configured rate (%d kbps)", d.obs.QoSUploadKbps, d.want.QoSUploadKbps),
+		})
+		return
+	}
+
+	// Policy drift: client hierarchy differs from observed state
+	if len(d.want.QoSClients) > 0 && d.obs.QoSClientCount != len(d.want.QoSClients) {
+		d.add(Change{
+			ID:        "qos-policy",
+			Kind:      KindDrift,
+			Risk:      RiskMedium,
+			Subsystem: "qdisc",
+			Field:     "qos.clients",
+			Current:   fmt.Sprintf("%d active classes", d.obs.QoSClientCount),
+			Desired:   d.qosDesired(),
+			Reason:    fmt.Sprintf("observed class hierarchy (%d classes) differs from configured client policies (%d clients)", d.obs.QoSClientCount, len(d.want.QoSClients)),
+		})
 	}
 }
 
 // qosDesired renders the intended shaping target as a structured string.
 //
-// The form is "algorithm on device down=N up=N". It is a string so that the
-// change carries everything a renderer needs in one field, and so that a plan
-// step never has to reach back into the desired state to draw a command.
+// The form is "algorithm on device down=N up=N overhead=N mtu=N client[...]".
+// It is a string so that the change carries everything a renderer needs in one
+// field, and so that a plan step never has to reach back into the desired state
+// to draw a command.
 func (d *differ) qosDesired() string {
-	return fmt.Sprintf("%s on %s down=%d up=%d",
-		d.want.QoSAlgorithm, d.want.QoSInterface, d.want.QoSDownloadKbps, d.want.QoSUploadKbps)
+	base := fmt.Sprintf("%s on %s down=%d up=%d overhead=%d mtu=%d",
+		d.want.QoSAlgorithm, d.want.QoSInterface,
+		d.want.QoSDownloadKbps, d.want.QoSUploadKbps,
+		d.want.QoSOverheadPercent, d.want.QoSMTU)
+	if len(d.want.QoSClients) > 0 {
+		var clientSpecs []string
+		for _, c := range d.want.QoSClients {
+			clientSpecs = append(clientSpecs, fmt.Sprintf("client[%s:%s:down=%d:up=%d:prio=%s]",
+				c.ID, c.IP, c.DownloadKbps, c.UploadKbps, c.Priority))
+		}
+		base += " " + strings.Join(clientSpecs, " ")
+	}
+	return base
 }
 
 // compareResolvers diffs the resolver set.

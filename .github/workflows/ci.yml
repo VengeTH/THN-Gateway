@@ -272,6 +272,26 @@ jobs:
             echo "$t ran"
           done
 
+          # QoS live traffic scenarios (Phase 2):
+          for t in TestQoSScenarioAUploadCap \
+                   TestQoSScenarioBDownloadCap \
+                   TestQoSScenarioCIndependentClients \
+                   TestQoSScenarioDPriorityContention \
+                   TestQoSScenarioEFairnessFlowIsolation \
+                   TestQoSScenarioEBetweenClientFairness \
+                   TestQoSScenarioFUnmanagedDefaultPolicy \
+                   TestQoSLatencyUnderSaturation \
+                   TestQoSFirewallMarkCannotBypassPolicy \
+                   TestQoSManagementExemptionCannotBeSpoofedByTransitTraffic \
+                   TestQoSFailureInjectionAndRollback \
+                   TestQoSRollbackRestoresBaseline; do
+            if grep -q -- "--- SKIP: $t" /tmp/lab.log; then
+              echo "$t SKIPPED"
+            elif grep -q -- "--- PASS: $t" /tmp/lab.log; then
+              echo "$t ran and passed"
+            fi
+          done
+
           # The unit half of M6.2/M6.3 runs everywhere, so a skip here would mean
           # the package was not built at all.
           for t in TestCanonicalTopologyAddressing \
@@ -298,7 +318,7 @@ jobs:
             echo
             echo "the lab left namespaces behind:"
             echo "$leftovers"
-            for ns in thn-m62-gateway thn-m62-client thn-m62-wan; do
+            for ns in thn-m62-gateway thn-m62-client thn-m62-client-b thn-m62-wan; do
               sudo ip netns delete "$ns" 2>/dev/null || true
             done
             exit 1

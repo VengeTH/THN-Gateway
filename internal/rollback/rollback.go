@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/artifact"
-	"github.com/venth/thn-gateway/internal/recovery"
+	"github.com/VengeTH/THN-Gateway/internal/artifact"
+	"github.com/VengeTH/THN-Gateway/internal/recovery"
 )
 
 // Target is a named point a gateway could be returned to.

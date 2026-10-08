@@ -84,6 +84,12 @@ const (
 	// ClientIP is ClientAddress without its prefix length.
 	ClientIP = "10.77.0.100"
 
+	// ClientBAddress is a second test client's LAN-side address for multi-client contention tests.
+	ClientBAddress = "10.77.0.101/24"
+
+	// ClientBIP is ClientBAddress without its prefix length.
+	ClientBIP = "10.77.0.101"
+
 	// WANPrefix is the disposable upstream segment. It is deliberately not the
 	// LAN block: the two are separate segments so that "the packet left the
 	// LAN" is visible in the addresses rather than inferred from a router.
@@ -108,6 +114,7 @@ const (
 const (
 	GatewayNamespace = "thn-m62-gateway"
 	ClientNamespace  = "thn-m62-client"
+	ClientBNamespace = "thn-m62-client-b"
 	TargetNamespace  = "thn-m62-wan"
 )
 
@@ -118,8 +125,9 @@ const (
 	GatewayWANInterface = "thnwan0"
 	GatewayLANInterface = "thnlan0"
 
-	ClientLANInterface = "thnlan0"
-	TargetWANInterface = "thnwan0"
+	ClientLANInterface  = "thnlan0"
+	ClientBLANInterface = "thnlan0"
+	TargetWANInterface  = "thnwan0"
 )
 
 // The gateway-side veth ports.
@@ -129,8 +137,9 @@ const (
 // so that Validate can account for every name that will exist in the gateway
 // namespace, including the ones THN does not manage.
 const (
-	GatewayWANPort = "vwan0"
-	GatewayLANPort = "vlan0"
+	GatewayWANPort  = "vwan0"
+	GatewayLANPort  = "vlan0"
+	GatewayLANPortB = "vlan1"
 
 	// UnmanagedInterface is the interface THN must never touch. A dummy,
 	// which is also not assignable, so it cannot be picked up by a role.
@@ -336,6 +345,33 @@ func Canonical() Topology {
 			{Namespace: TargetNamespace, Destination: LANPrefix, Via: GatewayWANIP, Device: TargetWANInterface},
 		},
 	}
+}
+
+// CanonicalWithTwoClients returns the disposable topology with two distinct LAN clients
+// attached to the gateway's LAN bridge, sharing the same 10.77.0.0/24 subnet.
+func CanonicalWithTwoClients() Topology {
+	t := Canonical()
+	t.Interfaces = append(t.Interfaces, Interface{
+		Namespace: ClientBNamespace,
+		Name:      ClientBLANInterface,
+		Address:   ClientBAddress,
+		Up:        true,
+		Baseline:  true,
+	})
+	t.Ports = append(t.Ports, Port{
+		Namespace:     ClientBNamespace,
+		End:           ClientBLANInterface,
+		Port:          GatewayLANPortB,
+		PortNamespace: GatewayNamespace,
+		Master:        GatewayLANInterface,
+	})
+	t.Routes = append(t.Routes, Route{
+		Namespace:   ClientBNamespace,
+		Destination: "default",
+		Via:         GatewayIP,
+		Device:      ClientBLANInterface,
+	})
+	return t
 }
 
 // Validate checks that the topology is internally coherent.

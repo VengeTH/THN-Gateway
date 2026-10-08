@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
 )
 
 // drift builds a drift change with the given identity.

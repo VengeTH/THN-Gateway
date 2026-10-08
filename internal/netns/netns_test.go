@@ -5,8 +5,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/netns"
-	"github.com/venth/thn-gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/netns"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
 )
 
 // TestAvailableIsHonestOnEveryPlatform runs everywhere, including on the

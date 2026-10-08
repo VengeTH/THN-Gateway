@@ -26,13 +26,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/desired"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/execution"
-	"github.com/venth/thn-gateway/internal/host"
-	"github.com/venth/thn-gateway/internal/planner"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/config"
+	"github.com/VengeTH/THN-Gateway/internal/desired"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/host"
+	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
 
 // assertActivationRemainsGated asserts the property every milestone guard in
@@ -277,6 +277,16 @@ func TestActivationIsBlockedByAnUnimplementedSubsystem(t *testing.T) {
 	}
 
 	cfg.DNS.Enabled = false
+	cfg.QoS.Enabled = true
+	ok, problem = executableSubsystems(cfg)
+	if ok {
+		t.Fatal("a document requesting QoS passed the executability check before physical hardware validation")
+	}
+	if !strings.Contains(problem, "qos.enabled") {
+		t.Errorf("problem = %q; it must name the setting to change", problem)
+	}
+
+	cfg.QoS.Enabled = false
 	if ok, problem := executableSubsystems(cfg); !ok {
 		t.Errorf("a document requesting neither subsystem was blocked: %s", problem)
 	}

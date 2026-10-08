@@ -191,8 +191,20 @@ func (d *SimulatedDriver) applyStateMutation(op Operation) error {
 		d.state.NFTablesTHNContent = ""
 	case OpQDiscApply:
 		// QDisc applied
+	case OpQDiscReplace:
+		// Captured qdisc restored
 	case OpQDiscDelete:
 		// QDisc removed
+	case OpTCClassApply:
+		// TC class applied
+	case OpTCClassDelete:
+		// TC class removed
+	case OpTCFilterApply:
+		// TC filter applied
+	case OpTCFilterDelete:
+		// TC filter removed
+	case OpTCStateRestore:
+		// Captured state restored
 	}
 	return nil
 }
@@ -200,7 +212,19 @@ func (d *SimulatedDriver) applyStateMutation(op Operation) error {
 func (d *SimulatedDriver) CaptureState(ctx context.Context, scope BackupScope) (*StateSnapshot, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.state.Clone(), nil
+	snapshot := d.state.Clone()
+	if scope.QDiscs {
+		for _, iface := range scope.Interfaces {
+			if _, ok := snapshot.QDiscs[iface]; !ok {
+				snapshot.QDiscs[iface] = TcBaseline{
+					Device:   iface,
+					Captured: true,
+				}
+			}
+		}
+		snapshot.MarkCaptured("qdiscs")
+	}
+	return snapshot, nil
 }
 
 func (d *SimulatedDriver) VerifyHealth(ctx context.Context, checks []HealthCheck) (HealthResult, error) {

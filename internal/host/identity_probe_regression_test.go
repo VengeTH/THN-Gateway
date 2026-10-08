@@ -18,7 +18,7 @@ package host
 import (
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // TestMultipleInterfacesReferencingSamePhysicalDevice verifies that when

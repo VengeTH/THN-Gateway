@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
 )
 
 // BackendName identifies this backend on the leases it reports.

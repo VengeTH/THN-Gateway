@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
-	"github.com/venth/thn-gateway/internal/deployment"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/activation"
+	"github.com/VengeTH/THN-Gateway/internal/deployment"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // This file is the gate phase for phases 1 to 3.

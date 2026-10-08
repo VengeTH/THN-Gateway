@@ -41,8 +41,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/guard"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/guard"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // TestARanCommandIsNeverScoredAsAbsent is the core assertion.

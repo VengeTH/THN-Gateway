@@ -61,7 +61,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/VengeTH/THN-Gateway/internal/network"
 )
 
 // Wireless operating modes, taken from the observation layer's vocabulary.

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	qostc "github.com/venth/thn-gateway/internal/qos/tc"
-	"github.com/venth/thn-gateway/internal/signals"
-	"github.com/venth/thn-gateway/internal/validation"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
+	"github.com/VengeTH/THN-Gateway/internal/signals"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // Helpers shared by the signals tests. They live in a separate file so the

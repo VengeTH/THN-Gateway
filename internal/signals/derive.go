@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/dhcp"
-	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/identity"
-	"github.com/venth/thn-gateway/internal/network"
-	qostc "github.com/venth/thn-gateway/internal/qos/tc"
-	"github.com/venth/thn-gateway/internal/validation"
+	"github.com/VengeTH/THN-Gateway/internal/dhcp"
+	"github.com/VengeTH/THN-Gateway/internal/diff"
+	"github.com/VengeTH/THN-Gateway/internal/identity"
+	"github.com/VengeTH/THN-Gateway/internal/network"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
+	"github.com/VengeTH/THN-Gateway/internal/validation"
 )
 
 // This file projects the observation types THN already has into the signal

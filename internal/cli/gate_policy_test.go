@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/policy"
-	"github.com/venth/thn-gateway/internal/qos"
-	"github.com/venth/thn-gateway/internal/schedule"
+	"github.com/VengeTH/THN-Gateway/internal/policy"
+	"github.com/VengeTH/THN-Gateway/internal/qos"
+	"github.com/VengeTH/THN-Gateway/internal/schedule"
 )
 
 // This file is the gate phase for the policy layer: device policies, bandwidth

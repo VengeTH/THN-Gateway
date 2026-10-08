@@ -96,6 +96,11 @@ func TestSafeExecPermittedCommands(t *testing.T) {
 		{"ip", "route", "replace", "default", "via", "192.168.1.1"},
 		{"ip", "route", "del", "default"},
 		{"tc", "qdisc", "replace", "dev", "eth0", "root", "cake"},
+		{"tc", "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "htb", "default", "99"},
+		{"tc", "qdisc", "replace", "dev", "eth0", "parent", "1:10", "handle", "10:", "cake", "unlimited", "besteffort"},
+		{"tc", "class", "replace", "dev", "eth0", "parent", "1:1", "classid", "1:10", "htb", "rate", "1Mbit", "ceil", "5Mbit", "prio", "1"},
+		{"tc", "filter", "replace", "dev", "eth0", "parent", "1:", "protocol", "ip", "prio", "1", "handle", "0x10", "fw", "classid", "1:10"},
+		{"tc", "filter", "replace", "dev", "eth0", "parent", "1:", "protocol", "ip", "prio", "2", "u32", "match", "ip", "src", "10.77.0.100/32", "flowid", "1:10"},
 		{"tc", "qdisc", "del", "dev", "eth0", "root"},
 	}
 
