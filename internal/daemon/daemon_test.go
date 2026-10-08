@@ -73,7 +73,16 @@ func start(t *testing.T, cfg daemon.Config) *daemon.Daemon {
 func ask(t *testing.T, path, verb string) map[string]any {
 	t.Helper()
 
-	conn, err := net.Dial("unix", path)
+	var conn net.Conn
+	var err error
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = net.Dial("unix", path)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
 		t.Fatalf("dialling %s: %v", path, err)
 	}
