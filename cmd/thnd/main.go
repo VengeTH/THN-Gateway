@@ -212,6 +212,7 @@ func parseArgs(args []string) (daemon.Config, bool, bool, error) {
 
 	cfg := daemon.Config{
 		Mode:         daemon.ModeDevelopment,
+		Doc:          doc,
 		Socket:       doc.Paths.Socket,
 		StateDB:      doc.Paths.StateDB,
 		QoSInterface: doc.QoS.Interface,

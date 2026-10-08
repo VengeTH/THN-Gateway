@@ -16,6 +16,7 @@ import (
 
 	"github.com/VengeTH/THN-Gateway/internal/config"
 	"github.com/VengeTH/THN-Gateway/internal/logging"
+	"github.com/VengeTH/THN-Gateway/internal/management"
 	"github.com/VengeTH/THN-Gateway/internal/state"
 )
 
@@ -23,6 +24,9 @@ import (
 type Config struct {
 	// Mode is the operating mode. Cannot be ModeActive in this build.
 	Mode Mode
+
+	// Doc is the configuration document.
+	Doc config.Config
 
 	// Socket is the unix socket path to listen on.
 	Socket string
@@ -289,6 +293,50 @@ func init() {
 			Description: "confirm the daemon is answering",
 			run: func(d *Daemon) (any, error) {
 				return map[string]string{"pong": "thnd"}, nil
+			},
+		},
+		"clients": {
+			Name:        "clients",
+			Description: "report connected devices, IPs, MACs and policies",
+			run: func(d *Daemon) (any, error) {
+				col := management.NewCollector(d.cfg.Doc, d.store)
+				return col.GatherClients(context.Background()), nil
+			},
+		},
+		"interfaces": {
+			Name:        "interfaces",
+			Description: "report interfaces preserving stable hardware identities",
+			run: func(d *Daemon) (any, error) {
+				col := management.NewCollector(d.cfg.Doc, d.store)
+				return col.GatherInterfaces(), nil
+			},
+		},
+		"networks": {
+			Name:        "networks",
+			Description: "report network zones and VLAN/isolation models",
+			run: func(d *Daemon) (any, error) {
+				col := management.NewCollector(d.cfg.Doc, d.store)
+				return col.GatherNetworks(), nil
+			},
+		},
+		"monitoring": {
+			Name:        "monitoring",
+			Description: "report consolidated system, WAN and gateway vitals",
+			run: func(d *Daemon) (any, error) {
+				col := management.NewCollector(d.cfg.Doc, d.store)
+				return map[string]any{
+					"gateway": col.GatherStatus(),
+					"system":  col.GatherSystem(),
+					"wan":     col.GatherWAN(),
+				}, nil
+			},
+		},
+		"events": {
+			Name:        "events",
+			Description: "report alerts, notifications and audit history",
+			run: func(d *Daemon) (any, error) {
+				col := management.NewCollector(d.cfg.Doc, d.store)
+				return col.GatherEvents(context.Background()), nil
 			},
 		},
 	}

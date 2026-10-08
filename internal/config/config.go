@@ -92,6 +92,12 @@ type Config struct {
 	// Activation governs the state machine and its safety gates.
 	Activation ActivationConfig `yaml:"activation"`
 
+	// Management controls the local management API and dashboard server policy.
+	Management ManagementConfig `yaml:"management"`
+
+	// Networks defines logical networks and future VLAN / client-isolation zones.
+	Networks []NetworkDefinition `yaml:"networks"`
+
 	// Policies holds named settings that can be selected per device and per
 	// time.
 	//
@@ -540,6 +546,38 @@ type ActivationConfig struct {
 	RequirePhysicalPresence bool `yaml:"require_physical_presence"`
 }
 
+// ManagementConfig governs the management service, binding policy and roles.
+type ManagementConfig struct {
+	// Enabled controls whether the management plane and dashboard are available.
+	Enabled bool `yaml:"enabled"`
+
+	// BindAddress is the network address and port to bind the management HTTP server.
+	// Defaults to 127.0.0.1:8080. For LAN access, configure a LAN/MGMT address.
+	BindAddress string `yaml:"bind_address"`
+
+	// AllowedNetworks specifies CIDRs permitted to query and manage the gateway.
+	AllowedNetworks []string `yaml:"allowed_networks"`
+
+	// WANAccess must remain false. The dashboard is never exposed to the public Internet.
+	WANAccess bool `yaml:"wan_access"`
+
+	// SessionTTL defines duration before an authenticated operator session expires.
+	SessionTTL time.Duration `yaml:"session_ttl"`
+}
+
+// NetworkDefinition establishes the model for future VLANs and client-isolation zones.
+type NetworkDefinition struct {
+	ID                 string `yaml:"id" json:"id"`
+	Name               string `yaml:"name" json:"name"`
+	Role               string `yaml:"role" json:"role"` // MGMT, LAN, GUEST, DMZ
+	VLANID             int    `yaml:"vlan_id" json:"vlan_id"`
+	Subnet             string `yaml:"subnet" json:"subnet"`
+	Gateway            string `yaml:"gateway" json:"gateway"`
+	InternetAccess     bool   `yaml:"internet_access" json:"internet_access"`
+	ClientIsolation    bool   `yaml:"client_isolation" json:"client_isolation"`
+	InterNetworkPolicy string `yaml:"inter_network_policy" json:"inter_network_policy"` // isolated, restricted, open
+}
+
 // Severity classifies a validation finding.
 type Severity string
 
@@ -763,6 +801,59 @@ func Defaults() Config {
 			AutoRecover:             false,
 			HealthCheckInterval:     30 * time.Second,
 			RequirePhysicalPresence: true,
+		},
+		Management: ManagementConfig{
+			Enabled:         true,
+			BindAddress:     "127.0.0.1:8080",
+			AllowedNetworks: []string{"10.10.99.0/24", "10.77.0.0/24", "127.0.0.0/8"},
+			WANAccess:       false,
+			SessionTTL:      24 * time.Hour,
+		},
+		Networks: []NetworkDefinition{
+			{
+				ID:                 "mgmt",
+				Name:               "Management",
+				Role:               "MGMT",
+				VLANID:             99,
+				Subnet:             "10.10.99.0/24",
+				Gateway:            "10.10.99.1",
+				InternetAccess:     true,
+				ClientIsolation:    true,
+				InterNetworkPolicy: "isolated",
+			},
+			{
+				ID:                 "lan",
+				Name:               "Family LAN",
+				Role:               "LAN",
+				VLANID:             10,
+				Subnet:             "10.77.0.0/24",
+				Gateway:            "10.77.0.1",
+				InternetAccess:     true,
+				ClientIsolation:    false,
+				InterNetworkPolicy: "restricted",
+			},
+			{
+				ID:                 "neighbors",
+				Name:               "Neighbors",
+				Role:               "LAN",
+				VLANID:             20,
+				Subnet:             "10.10.20.0/24",
+				Gateway:            "10.10.20.1",
+				InternetAccess:     true,
+				ClientIsolation:    true,
+				InterNetworkPolicy: "isolated",
+			},
+			{
+				ID:                 "guest",
+				Name:               "Guest Network",
+				Role:               "GUEST",
+				VLANID:             30,
+				Subnet:             "10.10.30.0/24",
+				Gateway:            "10.10.30.1",
+				InternetAccess:     true,
+				ClientIsolation:    true,
+				InterNetworkPolicy: "isolated",
+			},
 		},
 	}
 }
@@ -1308,6 +1399,48 @@ func (c Config) Validate() ValidationResult {
 	if !c.Activation.RequirePhysicalPresence {
 		v.Add("activation.require_physical_presence", SeverityError,
 			"must remain true: THN is developed remotely against an unattended device, so root access alone must not be sufficient to activate")
+	}
+
+	// --- Management ---
+	if c.Management.WANAccess {
+		v.Add("management.wan_access", SeverityError,
+			"WAN access to management service is strictly prohibited by safety policy")
+	}
+
+	// --- Networks (VLAN and Isolation model) ---
+	seenVLANs := make(map[int]string)
+	seenNets := make(map[string]bool)
+	for idx, net := range c.Networks {
+		field := fmt.Sprintf("networks[%d]", idx)
+		if strings.TrimSpace(net.ID) == "" {
+			v.Add(field+".id", SeverityError, "network id must not be empty")
+		} else if seenNets[net.ID] {
+			v.Add(field+".id", SeverityError, fmt.Sprintf("duplicate network id %q", net.ID))
+		}
+		seenNets[net.ID] = true
+
+		if net.VLANID < 0 || net.VLANID > 4094 {
+			v.Add(field+".vlan_id", SeverityError, fmt.Sprintf("VLAN ID %d out of valid range (0-4094)", net.VLANID))
+		} else if net.VLANID > 0 {
+			if prev, ok := seenVLANs[net.VLANID]; ok {
+				v.Add(field+".vlan_id", SeverityError, fmt.Sprintf("VLAN ID %d already assigned to network %q", net.VLANID, prev))
+			}
+			seenVLANs[net.VLANID] = net.ID
+		}
+
+		if net.Subnet != "" {
+			pfx, err := netip.ParsePrefix(net.Subnet)
+			if err != nil {
+				v.Add(field+".subnet", SeverityError, fmt.Sprintf("invalid subnet CIDR %q", net.Subnet))
+			} else if net.Gateway != "" {
+				gw, err := netip.ParseAddr(net.Gateway)
+				if err != nil {
+					v.Add(field+".gateway", SeverityError, fmt.Sprintf("invalid gateway IP %q", net.Gateway))
+				} else if !pfx.Contains(gw) {
+					v.Add(field+".gateway", SeverityError, fmt.Sprintf("gateway %s is outside subnet %s", gw, pfx))
+				}
+			}
+		}
 	}
 
 	return v

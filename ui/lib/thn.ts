@@ -58,6 +58,12 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   validate: [],
   plan: [],
   schema: [],
+  clients: [],
+  interfaces: [],
+  networks: [],
+  monitoring: [],
+  events: [],
+  management: ["status", "check"],
 };
 
 export type ThnCommand = keyof typeof ALLOWED;
@@ -99,12 +105,34 @@ const TIMEOUT_MS = 15_000;
  * laptop it is a local build, because the console is useless without one and
  * saying so plainly is better than failing to spawn.
  */
-function binaryPath(): string {
+async function resolveBinary(): Promise<string | null> {
   const override = process.env.THN_BINARY;
   if (override && override.length > 0) {
-    return override;
+    try {
+      await access(override, constants.X_OK);
+      return override;
+    } catch {
+      return null;
+    }
   }
-  return path.join(process.cwd(), "..", "thn");
+
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const candidates = [
+    path.join(process.cwd(), "..", `thn${ext}`),
+    path.join(process.cwd(), "..", "bin", `thn${ext}`),
+    path.join(process.cwd(), `thn${ext}`),
+    path.join(process.cwd(), "bin", `thn${ext}`),
+  ];
+
+  for (const c of candidates) {
+    try {
+      await access(c, constants.X_OK);
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 function isAllowed(command: string, sub: string | undefined): boolean {
@@ -152,18 +180,15 @@ export async function thn<T>(argv: readonly string[]): Promise<ThnResult<T>> {
     };
   }
 
-  const bin = binaryPath();
-
-  try {
-    await access(bin, constants.X_OK);
-  } catch {
+  const bin = await resolveBinary();
+  if (!bin) {
     return {
       ok: false,
       error: {
         kind: "binary-missing",
-        message: `The thn binary was not found at ${bin}.`,
+        message: "The thn binary was not found in workspace.",
         detail:
-          "Build it with `go build -o thn ./cmd/thn`, or set THN_BINARY to its path. " +
+          "Build it with `go build -o bin/thn ./cmd/thn`, or set THN_BINARY to its path. " +
           "The console reads through the binary and has no other source of truth.",
         command: printable,
       },

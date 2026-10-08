@@ -224,6 +224,42 @@ var commands = map[string]Command{
 		Summary: "describe and verify the appliance image (manifest, verify, status)",
 		Run:     runAppliance,
 	},
+	"clients": {
+		Name:    "clients",
+		Tier:    TierPure,
+		Summary: "report connected devices, IPs, MACs and policies",
+		Run:     runClients,
+	},
+	"interfaces": {
+		Name:    "interfaces",
+		Tier:    TierPure,
+		Summary: "report interfaces preserving stable hardware identities",
+		Run:     runInterfaces,
+	},
+	"networks": {
+		Name:    "networks",
+		Tier:    TierPure,
+		Summary: "report network zones and VLAN/isolation models",
+		Run:     runNetworks,
+	},
+	"monitoring": {
+		Name:    "monitoring",
+		Tier:    TierPure,
+		Summary: "report consolidated system, WAN and gateway vitals",
+		Run:     runMonitoring,
+	},
+	"events": {
+		Name:    "events",
+		Tier:    TierPure,
+		Summary: "report alerts, notifications and audit history",
+		Run:     runEvents,
+	},
+	"management": {
+		Name:    "management",
+		Tier:    TierPure,
+		Summary: "inspect or serve the local LAN-only management service",
+		Run:     runManagement,
+	},
 }
 
 // Run dispatches a command line and returns the process exit code.

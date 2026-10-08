@@ -1623,3 +1623,79 @@ journalctl -u thnd
 
 `thn` never opens the state database. It talks to `thnd` over the socket, so
 there is structurally a single writer and no SQLite locking question to answer.
+
+## Management, Monitoring & Mobile Dashboard Foundation (M8)
+
+M8 establishes the local management plane, read-only monitoring architecture, and mobile-first dashboard for the THN gateway appliance:
+
+> **Goal**: A non-technical household operator can open the THN gateway from a phone on the local network (e.g. `http://10.10.99.1:8080`) and understand the health of the Internet and network without touching Ubuntu, SSH, or a terminal.
+
+### Architecture
+
+```
+Phone / Browser (Mobile Web UI)
+      ↓
+THN Management API (/api/v1/...)
+      ↓
+thnd (Daemon) / local collector
+      ↓
+existing validated state/control mechanisms
+      ↓
+Linux (Kernel)
+```
+
+The management plane is strictly a **control plane**:
+- It never executes arbitrary Linux shell commands.
+- It never bypasses the existing activation/planning/validation architecture.
+- It exposes normalized models consuming existing backend state.
+
+### Management API Endpoints
+
+The management service provides clean JSON REST endpoints:
+
+- `GET /api/v1/status` — Normalized gateway summary, uptime, readiness and health
+- `GET /api/v1/system` — CPU load, memory, disk vitals, and hardware temperature
+- `GET /api/v1/interfaces` — Observed interfaces preserving stable hardware IDs (`hw:...`)
+- `GET /api/v1/wan` — Uplink health, default gateway reachability, latency, and DNS status
+- `GET /api/v1/clients` — Connected device inventory, friendly names, IP/MAC bindings, and policy state
+- `GET /api/v1/qos` — Traffic shaping state, per-client limits, guarantees, and priority tiers
+- `GET /api/v1/firewall` — Firewall and NAT operational status and protected services
+- `GET /api/v1/management` — Management network architecture and bind policy
+- `GET /api/v1/networks` — Network zones, subnets, and VLAN/client-isolation data models
+- `GET /api/v1/events` — Alert notifications and state change history
+- `GET /api/v1/health` — Subsystem health check
+- `POST /api/v1/auth/login` — Session establishment with PBKDF2-HMAC-SHA256 password verification
+- `POST /api/v1/auth/logout` — Session termination
+- `GET /api/v1/auth/me` — Authenticated role inspection
+- `POST /api/v1/clients/{id}/block` — Operator toggle to block/disable a client device
+- `POST /api/v1/qos/toggle` — Operator toggle for client traffic policy
+- `POST /api/v1/events/{id}/ack` — Acknowledge an alert notification
+
+### Security & LAN-Only Exposure
+
+1. **LAN-Only Bind Policy**: Management server binds exclusively to local/LAN addresses (e.g. `127.0.0.1:8080`, `10.10.99.1:8080`). All requests are verified against `management.allowed_networks` CIDRs.
+2. **WAN Access Prohibited**: `management.wan_access` is false by default. Attempting to expose the management server to the public Internet fails safety validation.
+3. **Role-Based Access Control (RBAC)**:
+   - `Viewer`: Read-only access to status, connected devices, traffic, and vitals.
+   - `Operator`: View privileges plus safe predefined actions (block/unblock clients, toggle QoS policy, acknowledge alerts).
+   - `Administrator`: Full configuration review and activation rights.
+4. **Audit Trail**: All management actions are recorded in SQLite `management_audit` table with timestamp, actor, role, action, target, and outcome.
+
+### Network Segmentation & Client Isolation Foundation
+
+M8 introduces the data model for multi-zone networking:
+- **Management (MGMT)**: `10.10.99.0/24` (VLAN 99, isolated)
+- **Family (LAN)**: `10.77.0.0/24` (VLAN 10, shared inter-client)
+- **Neighbors (LAN)**: `10.10.20.0/24` (VLAN 20, client-isolated)
+- **Guest (GUEST)**: `10.10.30.0/24` (VLAN 30, client-isolated)
+
+**Client Isolation Semantics**: Devices within an isolated zone cannot reach one another (`Neighbor A ↮ Neighbor B`), while maintaining independent uplink connectivity to the Internet.
+
+### Scope Boundaries & Invariants
+
+- **M8 does NOT activate VLANs.**
+- **M8 does NOT implement DHCP runtime.**
+- **M8 does NOT implement DNS runtime.**
+- **M8 does NOT expose management to WAN.**
+- **M8 does NOT replace or weaken the existing activation safety system.**
+

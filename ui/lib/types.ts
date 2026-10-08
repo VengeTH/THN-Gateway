@@ -341,3 +341,125 @@ export interface RenderResponse {
 export interface PageError {
   error: ThnError;
 }
+
+// ---------------------------------------------------- M8 Management Models
+
+export interface GatewayStatus {
+  hostname: string;
+  version: string;
+  uptime: string;
+  uptime_seconds: number;
+  activation_state: string;
+  readiness_state: string;
+  health_state: string;
+  internet_status: string;
+  wan_status: string;
+  active_clients: number;
+  total_clients: number;
+  qos_status: string;
+  firewall_status: string;
+  nat_status: string;
+  client_isolation: string;
+  observed_at: string;
+}
+
+export interface SystemMetrics {
+  cpu_usage_percent: number;
+  cpu_load_average: [number, number, number];
+  memory_used_bytes: number;
+  memory_available_bytes: number;
+  memory_total_bytes: number;
+  storage_used_bytes: number;
+  storage_available_bytes: number;
+  storage_total_bytes: number;
+  temperature_celsius: number;
+  status: string;
+}
+
+export interface InterfaceMonitoring {
+  name: string;
+  stable_id: string;
+  role: string;
+  state: string;
+  physical: boolean;
+  speed_mbps: number;
+  duplex: string;
+  ipv4: string[];
+  ipv6: string[];
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_errors: number;
+  tx_errors: number;
+  rx_drops: number;
+  tx_drops: number;
+  driver?: string;
+}
+
+export interface WANHealth {
+  link_up: boolean;
+  interface_name: string;
+  stable_id: string;
+  gateway_ip: string;
+  gateway_reachable: boolean;
+  internet_reachable: boolean;
+  dns_servers: string[];
+  dns_reachable: boolean;
+  latency_ms: number;
+  packet_loss_pct: number;
+  rx_throughput_bps: number;
+  tx_throughput_bps: number;
+  status: string;
+}
+
+export interface ClientDevice {
+  id: string;
+  mac: string;
+  ipv4: string;
+  ipv6?: string;
+  hostname: string;
+  interface: string;
+  network_id: string;
+  logical_group: string;
+  online: boolean;
+  last_seen: string;
+  rx_bytes: number;
+  tx_bytes: number;
+  current_rx_bps: number;
+  current_tx_bps: number;
+  qos_policy?: string;
+  isolation_status: string;
+  blocked: boolean;
+  notes?: string;
+}
+
+export interface NetworkZone {
+  id: string;
+  name: string;
+  role: string;
+  vlan_id: number;
+  subnet: string;
+  gateway: string;
+  internet_access: boolean;
+  client_isolation: boolean;
+  inter_network_policy: string;
+  active_clients: number;
+}
+
+export interface DashboardEvent {
+  id: string;
+  timestamp: string;
+  severity: string;
+  category: string;
+  message: string;
+  source: string;
+  acknowledged: boolean;
+  ack_by?: string;
+  ack_at?: string;
+}
+
+export interface MonitoringResponse {
+  gateway: GatewayStatus;
+  system: SystemMetrics;
+  wan: WANHealth;
+}
+

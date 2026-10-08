@@ -393,6 +393,18 @@ func TestValidateRequiresPhysicalPresence(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsManagementWANAccess locks in the rule that WAN access
+// to the management API cannot be enabled.
+func TestValidateRejectsManagementWANAccess(t *testing.T) {
+	cfg := Defaults()
+	cfg.Management.WANAccess = true
+
+	v := cfg.Validate()
+	if !hasField(v, "management.wan_access", SeverityError) {
+		t.Error("enabling management.wan_access must fail validation with an error")
+	}
+}
+
 func TestValidateAcceptsFullySpecifiedGateway(t *testing.T) {
 	cfg := Defaults()
 	cfg.Network.WAN = "enp0s31f6"

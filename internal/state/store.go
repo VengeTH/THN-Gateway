@@ -166,6 +166,55 @@ var migrations = []Migration{
 			`CREATE INDEX IF NOT EXISTS idx_assign_sel ON interface_assignments (selector)`,
 		},
 	},
+
+	{
+		Version: 3,
+		Name:    "management and monitoring models",
+		Statements: []string{
+			// Client records and overrides (e.g. friendly name, logical group, blocked state)
+			`CREATE TABLE IF NOT EXISTS client_records (
+				id          TEXT PRIMARY KEY,
+				mac         TEXT NOT NULL DEFAULT '',
+				ip          TEXT NOT NULL DEFAULT '',
+				hostname    TEXT NOT NULL DEFAULT '',
+				network_id  TEXT NOT NULL DEFAULT 'lan',
+				qos_policy  TEXT NOT NULL DEFAULT '',
+				blocked     INTEGER NOT NULL DEFAULT 0,
+				notes       TEXT NOT NULL DEFAULT '',
+				updated_at  TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_clients_ip ON client_records (ip)`,
+			`CREATE INDEX IF NOT EXISTS idx_clients_mac ON client_records (mac)`,
+
+			// Dashboard and monitoring alert records
+			`CREATE TABLE IF NOT EXISTS alert_records (
+				id           TEXT PRIMARY KEY,
+				ts           TEXT NOT NULL,
+				severity     TEXT NOT NULL,
+				category     TEXT NOT NULL,
+				message      TEXT NOT NULL,
+				source       TEXT NOT NULL,
+				acknowledged INTEGER NOT NULL DEFAULT 0,
+				ack_by       TEXT NOT NULL DEFAULT '',
+				ack_at       TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alert_records (ts DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alert_records (acknowledged, ts DESC)`,
+
+			// Management audit trail for dashboard actions
+			`CREATE TABLE IF NOT EXISTS management_audit (
+				id         INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts         TEXT NOT NULL,
+				actor      TEXT NOT NULL,
+				role       TEXT NOT NULL,
+				action     TEXT NOT NULL,
+				target     TEXT NOT NULL,
+				detail     TEXT NOT NULL DEFAULT '',
+				success    INTEGER NOT NULL DEFAULT 1
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_audit_ts ON management_audit (ts DESC)`,
+		},
+	},
 }
 
 // SchemaVersion returns the highest version this build knows how to produce.
