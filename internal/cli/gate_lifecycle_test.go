@@ -48,12 +48,11 @@ func TestGateLifecycleCommandsArePure(t *testing.T) {
 	}
 }
 
-// The build still cannot apply. Signing, health and rollback must not have
-// quietly enabled the stage they sit either side of.
+// Signing, health and rollback sit either side of the apply stage. None of
+// them may turn into a way to change a host on their own.
 func TestGateLifecycleDidNotEnableApply(t *testing.T) {
-	if activation.CanApply() {
-		t.Fatal("activation.CanApply() became true")
-	}
+	assertActivationRemainsGated(t, "adding signing, health and rollback")
+
 	implemented := activation.ImplementedStages()
 	for _, s := range activation.UnsupportedStages() {
 		for _, got := range implemented {

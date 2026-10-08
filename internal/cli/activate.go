@@ -2,100 +2,196 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/venth/thn-gateway/internal/activation"
+	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/deployment"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/network"
+	"github.com/venth/thn-gateway/internal/execution"
 	"github.com/venth/thn-gateway/internal/planner"
 )
 
-// This file implements `thn activate`, which refuses.
+// `thn activate`, `thn activation status|inspect|verify`, and the gate report.
 //
-// # Why the refusal leads with deployment rather than with the build
-//
-// There are two situations an operator can be in when they type `thn activate`,
-// and they need different answers.
-//
-//   - The machine is not a gateway. A laptop, a CI runner, a development box.
-//     Nothing here was ever supposed to change, and the useful answer says so
-//     and says the network is untouched.
-//   - The machine is a gateway, running a build that cannot apply. Real
-//     hardware, software limitation. A different sentence, with a different
-//     remedy.
-//
-// Leading with "this build has no apply path" answers the second on a box where
-// the first is true, which is talking about the software when the operator asked
-// about their machine. Leading with deployment answers the first correctly and
-// the second accurately too, because on a deployed box the deployment check
-// passes and the message moves on to the real reason.
-//
-// # "Current network remains untouched" is a contract, not a reassurance
-//
-// It is the most important sentence in the output, because the person deciding
-// whether to be afraid needs it before they read anything else. There is no code
-// path through this command that changes anything, so there is no branch in
-// which the sentence would be false — and it is printed unconditionally rather
-// than only in the case that happens to apply today.
+// The activation command itself is the only one here that can change host
+// networking; the rest are read-only by construction. The wiring for the
+// mutation path lives in activate_production.go, and the refusal rendering
+// lives here.
 
 // runActivate implements `thn activate`.
+//
+// # What this command now does
+//
+// It runs the production transaction, subject to every gate in
+// activation.EvaluateProduction, explicit physical presence, and explicit
+// production authorization. When any of those is missing it refuses and
+// changes nothing.
+//
+// # What it prints when it refuses
+//
+// A refusal is the normal outcome for every command run without the right
+// flags on the right host, so it names the first unmet gate rather than a
+// general statement. An operator standing at the machine needs to know which
+// one, because they are different fixes: run `thn assign`, plug in the LAN
+// cable, or come back with --confirm-present.
+//
+// --confirm-present is a statement by a human that they are at the device.
+// Nothing else can supply it, and no flag other than this one can substitute
+// for it: --confirm says "I approve this change", not "I am standing next to
+// the cable".
 func runActivate(env *Env, args []string) ExitCode {
 	fs := newFlagSet()
 	fs.Bool("yes", false)
 	fs.Bool("confirm", false)
 	fs.Bool("confirm-present", false)
+	fs.Bool("dry-run", false)
+	fs.String("config", "")
+	fs.String("journal", "")
 
 	if _, err := fs.Parse(args); err != nil {
 		return env.fatalf("thn activate: %v\n", err)
 	}
 
 	// --yes is accepted and does nothing. It is accepted so a runbook written
-	// against a future build does not fail on a flag it does not understand; it
-	// is not honoured because there is nothing to confirm.
+	// against a build that honours it does not fail on a flag it does not
+	// understand; it is not honoured, because activation confirmation is not
+	// something a convenience alias should be able to supply.
 	if *fs.bools["yes"] {
-		env.errorf("thn activate: --yes is accepted for forward compatibility and " +
-			"changes nothing.\n")
-		env.errorf("There is no apply path for it to confirm.\n\n")
+		env.errorf("thn activate: --yes changes nothing.\n\n")
+		env.errorf("It cannot stand in for --confirm or --confirm-present: activation\n")
+		env.errorf("confirmation and physical presence are separate statements.\n\n")
 	}
 
 	confirmed := *fs.bools["confirm"]
-	deploy := detectDeployment(env)
-	path := env.resolveConfigPath("")
+	presence := *fs.bools["confirm-present"]
+	dryRun := *fs.bools["dry-run"]
+
+	path := env.resolveConfigPath(fsValue(fs, "config"))
 	cfg, cfgErr := loadConfig(env, path)
 
-	var in activation.GateInput
+	// An unreadable document is not a gate result; it is a reason the gates
+	// cannot be evaluated, and it is reported as such rather than as a
+	// configuration that validated badly.
 	if cfgErr != nil {
-		in.ConfigValid = false
-		in.ConfigProblem = cfgErr.Error()
-	} else {
-		in = readinessInput(cfg, path)
-	}
-	if *fs.bools["confirm-present"] {
-		in.PresenceConfirmed = true
+		return reportActivationRefusal(env, activation.GateResult{
+			AllSatisfied: false,
+			Blocking:     []string{"config-valid"},
+			Gates: []activation.Gate{{
+				Name:        "config-valid",
+				Description: "the configuration must validate without errors",
+				Reason:      cfgErr.Error(),
+			}},
+		}, confirmed, presence, dryRun, "", nil)
 	}
 
-	gates := activation.Evaluate(in)
+	ev := gatherActivationEvidence(cfg, path)
+	in := productionGateInput(ev, presence)
+	gates := activation.EvaluateProduction(in)
+
+	// Everything below this point may change the host. Every refusal above it
+	// returns before reaching a driver.
+	if !gates.AllSatisfied || !confirmed || dryRun {
+		return reportActivationRefusal(env, gates, confirmed, presence, dryRun, path, ev)
+	}
+
+	return performActivation(env, ev, gates)
+}
+
+// performActivation runs the authorized transaction and reports its outcome.
+//
+// It is separate from runActivate so that the refusal path and the mutation
+// path are visibly distinct: there is one call site that can reach a driver,
+// and it is below.
+func performActivation(env *Env, ev *activationEvidence, gates activation.GateResult) ExitCode {
+	if err := requireLinux(); err != nil {
+		env.errorf("thn activate: activation refused.\n\n")
+		env.errorf("Reason:\n  %v\n", err)
+		env.errorf("\nCurrent network remains untouched.\n")
+		return ExitProblems
+	}
+
+	journalPath := fsValueOrDefault("", defaultJournalPath(ev.Cfg))
+	journal := execution.NewFileJournalStore(journalPath)
+
+	// A transaction interrupted by a crash is reported, not resumed. Resuming
+	// would mean guessing how far the previous run got, and the host cannot
+	// be asked what state it is in by the same mechanism that failed.
+	if rec, interrupted := execution.DetectInterrupted(journal); interrupted {
+		return reportRecoveryRequired(env, rec, journalPath)
+	}
+
+	res, err := runProductionActivation(cmdContext(), ev, gates, true, journal, false)
 
 	if env.IsJSON {
-		reason := deploymentReason(deploy)
-		if !confirmed {
-			reason = "Activation requires explicit confirmation: run with --confirm to proceed."
-		} else if !gates.AllSatisfied {
-			reason = fmt.Sprintf("Activation safety gates unsatisfied (%d blocking gate(s)).", len(gates.Blocking))
+		out := map[string]any{
+			"activated":         res != nil && res.FinalState == execution.StateCommitted,
+			"plan_id":           ev.Plan.ID,
+			"gates":             gates,
+			"journal":           journalPath,
+			"management":        ev.Management,
+			"result":            res,
+			"network_untouched": res == nil || res.FinalState != execution.StateCommitted,
+		}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		if perr := env.printJSON(out); perr != nil {
+			env.errorf("thn activate: %v\n", perr)
+			return ExitProblems
+		}
+		if err != nil {
+			return ExitProblems
+		}
+		return ExitOK
+	}
+
+	printActivationOutcome(env, ev, res, err, journalPath)
+	if err != nil {
+		return ExitProblems
+	}
+	return ExitOK
+}
+
+// reportActivationRefusal explains why nothing was changed.
+//
+// presence and confirmed are passed separately from the gate result because
+// two of the reasons an activation does not proceed are not gates at all: an
+// operator who simply did not pass the flag deserves to be told that, not to
+// be told a gate is unmet.
+func reportActivationRefusal(env *Env, gates activation.GateResult, confirmed, presence, dryRun bool, path string, ev *activationEvidence) ExitCode {
+	if env.IsJSON {
+		reason := "activation refused"
+		switch {
+		case !gates.AllSatisfied:
+			reason = fmt.Sprintf("activation safety gates unsatisfied (%d blocking): %s",
+				len(gates.Blocking), strings.Join(gates.Blocking, ", "))
+		case !presence:
+			reason = "physical presence has not been confirmed; re-run with --confirm-present from the device itself"
+		case !confirmed:
+			reason = "production authorization is required; re-run with --confirm"
+		case dryRun:
+			reason = "dry run: authorization succeeded but nothing was applied"
 		}
 		out := map[string]any{
-			"activated":            false,
-			"deployment":           deploy,
-			"can_apply":            activation.CanApply(),
-			"network_untouched":    true,
-			"statement":            "Current network remains untouched.",
-			"reason":               reason,
-			"implemented_stages":   activation.ImplementedStages(),
-			"unimplemented_stages": activation.UnsupportedStages(),
-			"gates":                gates,
+			"activated":         false,
+			"network_untouched": true,
+			"statement":         "Current network remains untouched.",
+			"reason":            reason,
+			"can_apply":         activation.CanApply(),
+			"gates":             gates,
+			"dry_run":           dryRun,
+		}
+		if path != "" {
+			out["config"] = path
+		}
+		if ev != nil {
+			out["plan_id"] = ev.Plan.ID
+			out["management"] = ev.Management
 		}
 		if err := env.printJSON(out); err != nil {
 			env.errorf("thn activate: %v\n", err)
@@ -104,30 +200,197 @@ func runActivate(env *Env, args []string) ExitCode {
 		return ExitProblems
 	}
 
-	if confirmed && !gates.AllSatisfied {
-		env.errorf("thn activate: activation refused.\n\n")
-		env.errorf("Reason:\n")
-		env.errorf("Safety gates unsatisfied (%d blocking gate(s)):\n", len(gates.Blocking))
+	env.errorf("thn activate: activation refused.\n\n")
+	env.errorf("Nothing was changed.\n\n")
+
+	if !gates.AllSatisfied {
+		env.errorf("Blocking gates (%d):\n\n", len(gates.Blocking))
 		for _, b := range gates.Blocking {
 			for _, g := range gates.Gates {
 				if g.Name == b {
-					env.errorf("  [✗] %-22s %s\n", g.Name, g.Reason)
+					env.errorf("  [x] %-24s %s\n", g.Name, g.Reason)
 					break
 				}
 			}
 		}
 		env.errorf("\n")
-		env.errorf("Also, independently of the above:\n")
-		env.errorf("  no apply path: this build has no code path that can modify host networking.\n")
-		env.errorf("  It implements: %s\n", stageList(activation.ImplementedStages()))
-		env.errorf("  Not implemented: %s\n", stageList(activation.UnsupportedStages()))
-		env.errorf("\n")
-		env.errorf("Current network remains untouched.\n")
+	}
+
+	if ev != nil && !ev.Management.Safe {
+		env.errorf("Management path\n")
+		env.errorf("  %s\n\n", fallback(ev.Management.Reason, "management safety could not be established"))
+	}
+
+	env.errorf("To proceed\n")
+	env.errorf("  1. Inspect the exact mutations:   thn activation inspect\n")
+	env.errorf("  2. Confirm you are at the device: thn activate --confirm-present\n")
+	env.errorf("  3. Authorize the change:         thn activate --confirm --confirm-present\n")
+	env.errorf("\n")
+	env.errorf("A dry run of the authorized path:\n")
+	env.errorf("  thn activate --confirm --confirm-present --dry-run\n")
+	env.errorf("\n")
+	env.errorf("Current network remains untouched.\n")
+	return ExitProblems
+}
+
+// reportRecoveryRequired surfaces an interrupted transaction.
+//
+// It is the only path that reads a previous run's outcome, and it refuses
+// rather than continuing. The host state after a crash is unknown to THN by
+// definition — the process that would have known it is the one that died — so
+// any action taken from here would be a guess.
+func reportRecoveryRequired(env *Env, rec *execution.TransactionRecord, journalPath string) ExitCode {
+	if env.IsJSON {
+		out := map[string]any{
+			"activated":         false,
+			"network_untouched": true,
+			"state":             execution.StateRecoveryRequired,
+			"journal":           journalPath,
+			"interrupted":       rec,
+			"reason": "an earlier execution transaction was interrupted; " +
+				"THN cannot determine how far it progressed, so activation is blocked",
+		}
+		if err := env.printJSON(out); err != nil {
+			env.errorf("thn activate: %v\n", err)
+			return ExitProblems
+		}
 		return ExitProblems
 	}
 
-	printActivationRefusal(env, deploy)
+	env.errorf("thn activate: activation refused.\n\n")
+	env.errorf("Reason:\n")
+	env.errorf("  RECOVERY_REQUIRED — an earlier transaction was interrupted.\n\n")
+	env.errorf("  Plan        %s\n", rec.PlanID)
+	env.errorf("  Last state  %s\n", rec.State)
+	env.errorf("  Started     %s\n", rec.StartedAt.Format(time.RFC3339))
+	if rec.Error != "" {
+		env.errorf("  Recorded    %s\n", rec.Error)
+	}
+	env.errorf("\n")
+	env.errorf("THN cannot determine how far that transaction progressed. The process\n")
+	env.errorf("that knew is the one that stopped, so any conclusion about the host\n")
+	env.errorf("would be a guess. Inspect the host against your recorded baseline:\n\n")
+	env.errorf("  journal: %s\n\n", journalPath)
+	env.errorf("Once you have confirmed the host is in a known state, remove the journal\n")
+	env.errorf("and re-run `thn activation inspect` before activating again.\n")
 	return ExitProblems
+}
+
+// defaultJournalPath resolves where the transaction journal lives.
+//
+// It follows the same rule as the rest of the CLI: an explicit flag, then the
+// configuration's state directory, then nothing. It deliberately does not
+// invent a path, because a journal written somewhere the operator does not
+// know about is a journal that will not be found when it is needed.
+func defaultJournalPath(cfg config.Config) string {
+	if dir := strings.TrimSpace(cfg.Paths.StateDir); dir != "" {
+		return filepath.Join(dir, "activation-journal.json")
+	}
+	if dir := strings.TrimSpace(cfg.Paths.RunDir); dir != "" {
+		return filepath.Join(dir, "activation-journal.json")
+	}
+	return ""
+}
+
+// fsValueOrDefault returns value when non-empty, otherwise fallback.
+func fsValueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
+}
+
+// printActivationOutcome renders the transaction's result.
+//
+// Every terminal state is rendered, including the ones that are not success.
+// A rollback that verified is a success of the rollback, not of the gateway,
+// and saying so is the difference between an operator who knows the machine is
+// as it was and one who thinks it is now a gateway.
+func printActivationOutcome(env *Env, ev *activationEvidence, res *execution.ExecutionResult, actErr error, journalPath string) {
+	if res == nil {
+		env.errorf("thn activate: activation did not start: %v\n", actErr)
+		env.errorf("\nCurrent network remains untouched.\n")
+		return
+	}
+
+	env.printf("Production activation\n")
+	env.printf("─────────────────────\n")
+	env.printf("Plan:       %s\n", res.PlanID)
+	env.printf("Journal:    %s\n", journalPath)
+	env.printf("Phases:     %s\n", strings.Join(res.Phases, " -> "))
+	env.printf("\n")
+
+	if len(res.AppliedOps) > 0 {
+		env.printf("Applied (%d):\n", len(res.AppliedOps))
+		for _, op := range res.AppliedOps {
+			env.printf("  + %s\n", op)
+		}
+		env.printf("\n")
+	}
+
+	switch res.FinalState {
+	case execution.StateCommitted:
+		env.printf("Result: COMMITTED\n")
+		env.printf("\n")
+		for _, c := range res.Health.Checks {
+			mark := "ok"
+			if !c.Passed {
+				mark = "FAILED"
+			}
+			env.printf("  [%s] %-20s %s\n", mark, c.Check, c.Observed)
+		}
+		env.printf("\nThe gateway is serving as planned. Post-activation verification is\n")
+		env.printf("in docs/deployment-runbook.md; it does not depend on THN.\n")
+
+	case execution.StateRolledBack:
+		env.printf("Result: ROLLED BACK\n")
+		env.printf("\n")
+		env.printf("Trigger: %s\n", firstNonEmpty(res.Error, "a health check failed"))
+		env.printf("\nCompensating operations:\n")
+		for _, op := range res.RolledBackOps {
+			env.printf("  - %s\n", op)
+		}
+		env.printf("\nRollback verification compared the host against the baseline captured\n")
+		env.printf("before the first mutation, and they match. The host is as it was.\n")
+		env.printf("This was NOT a successful activation: the gateway is not serving.\n")
+
+	case execution.StateDegraded:
+		env.printf("Result: DEGRADED — manual recovery required\n")
+		env.printf("\n")
+		env.printf("%s\n", res.Error)
+		env.printf("\nRollback verification did not confirm the baseline was restored. THN is\n")
+		env.printf("reporting this rather than assuming a good outcome. Do not retry.\n")
+		env.printf("Recover from the console using docs/deployment-runbook.md.\n")
+
+	case execution.StateRecoveryRequired:
+		env.printf("Result: RECOVERY_REQUIRED\n")
+		env.printf("\n%s\n", res.Error)
+
+	default:
+		env.printf("Result: %s\n", res.FinalState)
+		if res.Error != "" {
+			env.printf("\n%s\n", res.Error)
+		}
+		env.printf("\nNothing after PREPARE was executed.\n")
+	}
+}
+
+// fallback returns val when non-empty, otherwise def.
+func fallback(val, def string) string {
+	if val != "" {
+		return val
+	}
+	return def
+}
+
+// firstNonEmpty returns the first non-empty value.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // deploymentReason picks the reason that applies to this host.
@@ -135,106 +398,7 @@ func deploymentReason(d deployment.Status) string {
 	if !d.Deployed {
 		return "No approved physical deployment detected. " + d.Reason
 	}
-	return "This build has no apply path; it contains no code that can modify host networking."
-}
-
-// detectDeployment asks whether this host is an approved deployment.
-//
-// A configuration that will not load, or a host that cannot be inspected, is
-// not a deployment. Both are reported as such rather than producing a confusing
-// failure somewhere later.
-func detectDeployment(env *Env) deployment.Status {
-	path := env.resolveConfigPath("")
-
-	cfg, err := loadConfig(env, path)
-	if err != nil {
-		// The configuration is unreadable, so nothing about this host is known.
-		return deployment.Detect(deployment.Observation{HostPlatform: hostPlatform()})
-	}
-
-	o := deployment.Observation{
-		HostPlatform:  hostPlatform(),
-		GatewayName:   cfg.Gateway.Name,
-		ConfiguredWAN: cfg.Network.WAN,
-		ConfiguredLAN: cfg.Network.LAN,
-	}
-
-	snap, err := network.NewInspector().Inspect(cmdContext())
-	if err != nil || snap == nil || !snap.Supported {
-		return deployment.Detect(o)
-	}
-
-	o.HostSupported = true
-	for _, i := range snap.Interfaces {
-		o.Interfaces = append(o.Interfaces, i.Name)
-	}
-	return deployment.Detect(o)
-}
-
-// printActivationRefusal writes the refusal.
-//
-// The two branches are deliberately different sentences. A box that is not a
-// gateway should not be told about apply paths; a gateway should not be told it
-// is not deployed.
-func printActivationRefusal(env *Env, deploy deployment.Status) {
-	env.errorf("thn activate: activation refused.\n\n")
-
-	if !deploy.Deployed {
-		env.errorf("THN Gateway is not physically deployed.\n")
-		env.errorf("\n")
-		env.errorf("Activation refused.\n")
-		env.errorf("\n")
-		env.errorf("Reason:\n")
-		env.errorf("No approved physical deployment detected.\n")
-		env.errorf("\n")
-		env.errorf("  %s\n", deploy.Reason)
-		env.errorf("\n")
-		env.errorf("Current network remains untouched.\n")
-		env.errorf("\n")
-
-		// Both facts are true here and both are worth stating.
-		//
-		// The box is not a gateway, and separately this build could not apply
-		// anything even on one that were. Leading with deployment says the
-		// useful thing; omitting the apply path would leave an operator who
-		// moves this build to real hardware without knowing that the refusal
-		// would simply change its wording rather than its outcome.
-		env.errorf("Also, independently of the above:\n")
-		env.errorf("  no apply path: this build has no code path that can modify host networking.\n")
-		env.errorf("  It implements: %s\n", stageList(activation.ImplementedStages()))
-		env.errorf("  Not implemented: %s\n", stageList(activation.UnsupportedStages()))
-		env.errorf("\n")
-		env.errorf("Evidence\n")
-		env.errorf("--------\n")
-		for _, s := range deploy.Signals {
-			mark := "no"
-			if s.Met {
-				mark = "yes"
-			}
-			env.errorf("  [%s] %-18s %s\n", mark, s.Name, s.Detail)
-		}
-		env.errorf("\n")
-		env.errorf("This build can, on any host:\n")
-		env.errorf("  thn status            what the configuration asks for\n")
-		env.errorf("  thn diagnostics       system and THN health\n")
-		env.errorf("  thn network inspect   the host's network, read-only\n")
-		env.errorf("  thn config validate   whether the configuration is coherent\n")
-		env.errorf("  thn plan              what a change would consist of, without making one\n")
-		return
-	}
-
-	// Real hardware, software limitation. Saying "not deployed" here would be
-	// the mirror-image mistake.
-	env.errorf("This host is an approved THN deployment.\n")
-	env.errorf("\n")
-	env.errorf("Activation refused.\n")
-	env.errorf("\n")
-	env.errorf("Reason:\n")
-	env.errorf("This build has no apply path: there is no code path that can modify host networking.\n")
-	env.errorf("  It implements: %s\n", stageList(activation.ImplementedStages()))
-	env.errorf("  Not implemented: %s\n", stageList(activation.UnsupportedStages()))
-	env.errorf("\n")
-	env.errorf("Current network remains untouched.\n")
+	return "This host is an approved THN deployment."
 }
 
 // stageList renders stage names for one line of prose.
@@ -370,36 +534,17 @@ func runActivationInspect(env *Env, args []string) ExitCode {
 
 	dnsDHCPResources := []string{}
 	if len(cfg.Network.DNS) > 0 {
-		dnsDHCPResources = append(dnsDHCPResources, fmt.Sprintf("DNS resolvers: %s", strings.Join(cfg.Network.DNS, ", ")))
-	}
-	if cfg.DHCP.Enabled {
-		dnsDHCPResources = append(dnsDHCPResources, fmt.Sprintf("DHCP server: domain %s", cfg.DHCP.Domain))
+		dnsDHCPResources = append(dnsDHCPResources, fmt.Sprintf("HOST resolvers: %s", strings.Join(cfg.Network.DNS, ", ")))
 	}
 
-	// Management safety
-	var touched []string
-	if cfg.Network.WAN != "" {
-		touched = append(touched, cfg.Network.WAN)
-	}
-	if cfg.Network.LAN != "" {
-		touched = append(touched, cfg.Network.LAN)
-	}
-	hasTS := false
-	if device != nil {
-		for _, iface := range device.Interfaces {
-			if iface.SystemName == "tailscale0" {
-				hasTS = true
-				break
-			}
-		}
-	}
-	mgrep := activation.EvaluateManagementSafety(activation.ManagementSafetyInput{
-		TailscalePresent:    hasTS,
-		TailscaleInterface:  "tailscale0",
-		HasDefaultRoute:     obs.HasDefaultRoute,
-		PlannedDefaultRoute: cfg.Network.WAN != "" || cfg.MultiWAN.Enabled,
-		TouchedInterfaces:   touched,
-	})
+	// Management safety.
+	//
+	// This is the same assessment `thn activate` runs, over the same plan, so
+	// an operator who reads "safe" here is reading the verdict that will
+	// actually gate the apply — not a separate, weaker summary of it.
+	mgrep := evaluatePlannedManagementSafety(obs, device, p)
+
+	dnsDHCPResources = append(dnsDHCPResources, subsystemHonesty(cfg)...)
 
 	rep := ActivationInspectReport{
 		WhatWillChange:      whatWillChange,
@@ -497,15 +642,22 @@ func runActivationVerify(env *Env, args []string) ExitCode {
 	path := env.resolveConfigPath("")
 	cfg, cfgErr := loadConfig(env, path)
 
-	var in activation.GateInput
 	if cfgErr != nil {
-		in.ConfigValid = false
-		in.ConfigProblem = cfgErr.Error()
-	} else {
-		in = readinessInput(cfg, path)
+		return reportActivationRefusal(env, activation.GateResult{
+			AllSatisfied: false,
+			Blocking:     []string{"config-valid"},
+			Gates: []activation.Gate{{
+				Name:        "config-valid",
+				Description: "the configuration must validate without errors",
+				Reason:      cfgErr.Error(),
+			}},
+		}, false, false, false, path, nil)
 	}
 
-	res := activation.Evaluate(in)
+	// The PRODUCTION gate set, evaluated with presence false. `thn activation
+	// verify` reports how far this host is from an activation; it is not the
+	// activation, and it cannot confirm presence on anyone's behalf.
+	res := activation.EvaluateProduction(productionGateInput(gatherActivationEvidence(cfg, path), false))
 
 	if env.IsJSON {
 		if err := env.printJSON(res); err != nil {
@@ -518,19 +670,23 @@ func runActivationVerify(env *Env, args []string) ExitCode {
 		return ExitOK
 	}
 
-	env.printf("Activation Gate Verification\n")
+	env.printf("Production Activation Gate Verification\n")
+	env.printf("═══════════════════════════════════════\n")
 	for _, g := range res.Gates {
 		mark := "✓"
 		if !g.Satisfied {
 			mark = "✗"
 		}
-		env.printf("  [%s] %-22s %s\n", mark, g.Name, g.Description)
+		env.printf("  [%s] %-24s %s\n", mark, g.Name, g.Description)
 		if !g.Satisfied && g.Reason != "" {
-			env.printf("      Reason: %s\n", g.Reason)
+			env.printf("      %s\n", g.Reason)
 		}
 	}
 	if !res.AllSatisfied {
-		env.printf("\nActivation is BLOCKED by %d unsatisfied gate(s).\n", len(res.Blocking))
+		env.printf("\nActivation is BLOCKED by %d unsatisfied gate(s).\n\n", len(res.Blocking))
+		env.printf("%s\n", blockingAdvice(res.Blocking))
+		env.printf("\nphysical-presence is always unsatisfied here and can only be satisfied\n")
+		env.printf("by running `thn activate --confirm-present` at the device.\n")
 		return ExitProblems
 	}
 	return ExitOK

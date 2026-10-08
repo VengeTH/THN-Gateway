@@ -65,13 +65,13 @@ var commands = map[string]Command{
 	"activate": {
 		Name:    "activate",
 		Tier:    TierDestructive,
-		Summary: "apply the configuration (not available in this build)",
+		Summary: "apply the configuration with --confirm --confirm-present",
 		Run:     runActivate,
 	},
 	"activation": {
 		Name:    "activation",
 		Tier:    TierPure,
-		Summary: "report activation status or verify safety gates (status, verify)",
+		Summary: "report activation status, inspect the plan, or verify gates",
 		Run:     runActivation,
 	},
 	"schema": {

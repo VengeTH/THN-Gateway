@@ -3,9 +3,10 @@ package cli
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/venth/thn-gateway/internal/activation"
+	"time"
+
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
 	"github.com/venth/thn-gateway/internal/planner"
@@ -483,10 +484,10 @@ func TestGateRollbackClassifiesIrreversibleSteps(t *testing.T) {
 // circumstances it protects against are exactly the ones where someone would
 // try: a gateway that is already broken, a configuration that says to.
 func TestGateActivationIsRefused(t *testing.T) {
-	if activation.CanApply() {
-		t.Fatal("CanApply() is true; this build has no apply path, and the gate's " +
-			"guarantees assume it has none")
-	}
+	// A gateway that has drifted must not repair itself. An apply path
+	// existing in the binary does not make that path reachable without
+	// presence and authorization.
+	assertActivationRemainsGated(t, "adding recovery modelling")
 
 	// The applier that ships must refuse, not no-op. A no-op reports success
 	// and the operator believes a change was made.
@@ -528,10 +529,13 @@ func TestGateActivationIsRefused(t *testing.T) {
 		}
 	}
 
-	// For the invocations that parse, the refusal must be explicit about why.
-	// A bare "unknown flag" is a valid rejection but a poor one: an operator
-	// who typed --config wants to know this build cannot activate, not that
-	// they mistyped a flag.
+	// For the invocations that parse, the refusal must be explicit about what
+	// is missing. A bare "unknown flag" is a valid rejection but a poor one:
+	// an operator who typed --config wants to know this build cannot activate,
+	// not that they mistyped a flag.
+	//
+	// The refusal must name the gates AND the confirmations, because those are
+	// different fixes: one is a missing cable, the other is a missing flag.
 	for _, args := range [][]string{
 		{"activate"},
 		{"activate", "--yes"},
@@ -543,12 +547,12 @@ func TestGateActivationIsRefused(t *testing.T) {
 			t.Errorf("thn %s exited 0; activation must be refused",
 				strings.Join(args, " "))
 		}
-		if !strings.Contains(stderr, "no apply path") {
-			t.Errorf("thn %s did not state that there is no apply path:\n%s",
+		if !strings.Contains(stderr, "Blocking gates") {
+			t.Errorf("thn %s did not name the blocking gates:\n%s",
 				strings.Join(args, " "), stderr)
 		}
-		if !strings.Contains(stderr, "no code path that can modify host networking") {
-			t.Errorf("thn %s did not state the safety property it upholds:\n%s",
+		if !strings.Contains(stderr, "--confirm-present") {
+			t.Errorf("thn %s did not say how physical presence is confirmed:\n%s",
 				strings.Join(args, " "), stderr)
 		}
 	}

@@ -1,12 +1,45 @@
-// Package guard is the single chokepoint through which THN may execute an
-// external process, and the enforcement point for THN's central safety
-// invariant: a THN build must never be capable of mutating host networking.
+// Package guard is the chokepoint through which THN may OBSERVE the host, and
+// the enforcement point for the invariant that observation can never change
+// anything.
 //
 // The invariant is deliberately enforced structurally rather than by policy
 // or configuration, because THN is developed remotely against a real gateway
 // that is unattended. A runtime toggle can be flipped by a bad config, a
 // stray environment variable, or a panic. None of those can defeat an
 // allowlist that rejects the invocation before the process is ever created.
+//
+// # Two tiers, one invariant
+//
+// This package governs reading. There is exactly one other path by which THN
+// may execute anything, and it is not a loophole — it is a second tier with
+// its own allowlist:
+//
+//	internal/guard          observation. No mutating verb is reachable at all.
+//	                        Used by every discovery, diff and planning path.
+//
+//	internal/execution     mutation. Owns a separate, explicit allowlist
+//	                        (safe_exec.go) covering ip, nft, sysctl and tc,
+//	                        reached only from ProductionDriver and LinuxDriver,
+//	                        both of which fail closed until authorized.
+//
+// The split exists because the two sets have different shapes. An observation
+// allowlist is small and total ("this verb cannot mutate"), which is the right
+// form for a command surface used from a dozen call sites. A mutation
+// allowlist has to express bounded, structured operations and per-argument
+// validation, and squeezing it into this package's shape would make either the
+// read path or the write path worse.
+//
+// What binds the two tiers together is not a shared allowlist but the
+// authorization in front of the mutation one: no driver can execute until
+// Authorize has accepted an explicit confirmation, a satisfied gate set,
+// proven management safety, and a plan identity with all three input digests.
+// A caller reaching internal/execution without that authorization gets
+// ErrProductionActivationDisabled before a process is created.
+//
+// TestRepoContainsNoUnguardedExec in this package's tests is what keeps the
+// tiers from drifting: any statically-resolvable process spawn outside this
+// file must name a binary on the allowlist below, and widening
+// execExemptions is guarded by a count assertion so it cannot happen quietly.
 //
 // # Model
 //

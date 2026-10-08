@@ -83,9 +83,12 @@ func (d *ProductionDriver) Authorize(auth ProductionAuth) error {
 		d.authorized = false
 		return fmt.Errorf("remote management safety cannot be verified: %s", auth.ManagementProblem)
 	}
-	if auth.PlanID == "" || auth.ObservedDigest == "" || auth.DesiredDigest == "" {
+	if auth.PlanID == "" || auth.ObservedDigest == "" ||
+		auth.DesiredDigest == "" || auth.AssignmentDigest == "" {
 		d.authorized = false
-		return errors.New("plan binding digests required for production authorization")
+		return errors.New("production authorization requires the plan ID and all three input " +
+			"digests (observed, desired, assignment); a driver that is not told what it is " +
+			"authorized to apply cannot refuse a plan it was not shown")
 	}
 
 	d.authorized = true
@@ -205,7 +208,21 @@ func (d *ProductionDriver) Execute(ctx context.Context, op Operation) error {
 		return err
 
 	case OpDNSApply:
-		return nil
+		// Refused rather than ignored.
+		//
+		// This used to return nil, which the transaction recorded as a
+		// successfully applied operation and then committed. A plan that
+		// asked for a resolver set would have produced an apply log full of
+		// successes and a host that resolved exactly as it did before.
+		//
+		// OpDNSApply now also requires a "dns" capability that no driver
+		// reports, so the executor blocks before BACKUP. Returning an error
+		// here as well means the refusal survives any future caller that
+		// reaches Execute without going through that check.
+		return fmt.Errorf("%w: applying resolvers %s requires a DNS service, which THN's "+
+			"production execution layer does not implement; this subsystem is left "+
+			"unapplied rather than falsely reported as applied",
+			ErrCapabilityMissing, strings.Join(o.Servers, ", "))
 
 	default:
 		return fmt.Errorf("unknown operation type: %T", op)

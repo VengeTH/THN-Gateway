@@ -213,9 +213,15 @@ func TestNoMutatingEntryInAllowlist(t *testing.T) {
 // exec.Cmd.Run. Any such call that passes a statically-known binary name must
 // reference a binary on the guard allowlist.
 //
-// The intent is that adding an apply path requires deliberately deleting or
-// rewriting this test, which is a visible, reviewable act rather than a
-// silent one. The threat model is an absent-minded engineer on a laptop
+// The allowlist below is the READ-ONLY one, so this test constrains which
+// BINARIES a file may spawn, not which verbs it may pass. internal/execution
+// legitimately spawns ip, nft, sysctl and tc with mutating verbs, under its
+// own allowlist in safe_exec.go and behind a production authorization that
+// must succeed before any process is created.
+//
+// The intent is that widening either tier requires deliberately editing this
+// test or adding an exemption, which is a visible, reviewable act rather than
+// a silent one. The threat model is an absent-minded engineer on a laptop
 // 100km from an unattended gateway, not a determined adversary: an adversary
 // who wants to mutate networking has root on the host and can skip THN.
 func TestRepoContainsNoUnguardedExec(t *testing.T) {

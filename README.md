@@ -13,25 +13,29 @@ therefore removed structurally rather than avoided by convention.
 
 | | Stages |
 |---|---|
-| **Implemented** | `observe` · `model` · `plan` · `validate` · `simulate` |
-| **Not implemented** | `apply` · `health-check` · `commit` · `rollback` |
+| **Implemented** | `observe` · `model` · `plan` · `validate` · `simulate` · `apply` · `health-check` · `commit` · `rollback` |
 
-`apply` is absent from this build's *shipped* path, not disabled. There is no
-flag, environment variable or configuration key that enables production
-activation, because there is no code that could.
+Activation is available, and it is gated rather than absent. There is no flag,
+environment variable or configuration key that bypasses the gates. The two flags
+that matter (`--confirm`, `--confirm-present`) supply the two statements THN
+cannot derive for itself — that a human approved the change, and that a human is
+at the machine — and everything else is checked against observation of the host.
 
-The one apply path that does exist is confined to a disposable Linux lab, and
-cannot be reached from `thn activate`:
+The risk that matters is not a bug — it is a well-meaning command run from a
+laptop 100 km away that reconfigures a machine nobody can reach. That risk is
+therefore removed by thirteen gates that must *all* hold, a scoped baseline
+captured before the first mutation, and a rollback verified against that
+baseline — not by the operator remembering to be careful.
 
 | Driver | `CanApply()` | Where it can run |
 |---|---|---|
-| `ProductionDriver` | `false`, permanently | nowhere — refuses every mutation |
+| `ProductionDriver` | only after `Authorize` | this host, once every safety gate holds and the transaction is confirmed |
 | `LinuxDriver` | only after `VerifyLabEnvironment` | a disposable lab that declares itself one, by marker file, hostname, MAC and interface checks |
 
-`internal/execution` is exercised against real packets inside network
+Both fail closed until authorized, and both refuse anything not on their
+allowlist. `internal/execution` is exercised against real packets inside network
 namespaces by `internal/lab`, and by hand in a lab VM — see
-[docs/disposable-lab.md](./docs/disposable-lab.md). Nothing in that path can
-reach a physical gateway.
+[docs/disposable-lab.md](./docs/disposable-lab.md).
 
 ## Commands
 
@@ -570,13 +574,11 @@ action:   enable IPv4 forwarding
 
 ### M7.2 does not activate anything
 
-This milestone makes the intent explicit and checkable. It changes no
-networking. `activation.CanApply()` is still `false`,
-`ProductionDriver.CanApply()` is still `false`, `apply` is still absent from
-`ImplementedStages()`, and `thn activate` still refuses. `internal/gateway`
-imports only the document model, the host model and the standard library — a
-test asserts that list, so a future change that widens it fails rather than
-deploys.
+This milestone made the intent explicit and checkable. On its own it changed no
+networking. `internal/gateway` imports only the document model, the host model
+and the standard library — a test asserts that list, so a future change that
+widens it fails rather than deploys. (Activation arrived later, in M7.6; the
+gate that guards this boundary now reads `assertActivationRemainsGated`.)
 
 ## DHCP and DNS intent (M7.3)
 
@@ -835,10 +837,8 @@ starts nothing.
 - No package is installed, and no backend is chosen.
 - `/etc/resolv.conf` and systemd-resolved are untouched.
 - No nftables rule, route, address or sysctl is changed.
-- `activation.CanApply()` is still `false`.
-- `ProductionDriver.CanApply()` is still `false`.
-- `apply` is still absent from `ImplementedStages()`, and `thn activate` still
-  refuses.
+- Activation stays gated: it is neither enabled nor reachable from validation
+  or planning (`assertActivationRemainsGated`).
 
 Validation is offline: it resolves no names and contacts no resolver, so a
 CI job with no network reaches the same verdict as one on the gateway. Tests
@@ -1001,9 +1001,8 @@ QoS intent is content-addressed in the desired digest:
 - No `tc` mutation.
 - No kernel module loading (`modprobe`).
 - No service installation or startup.
-- `activation.CanApply() == false`.
-- `ProductionDriver.CanApply() == false`.
-- `ImplementedStages()` excludes `StageApply`.
+- Activation stays gated by `assertActivationRemainsGated`: QoS intent did not
+  make it reachable without physical presence and explicit authorization.
 
 ## Multi-WAN intent, routing policy and load balancing (M7.5)
 
@@ -1119,9 +1118,8 @@ multi_wan:
 
 - No live route or rule manipulation.
 - No live nftables mutation.
-- `activation.CanApply() == false`.
-- `ProductionDriver.CanApply() == false`.
-- `ImplementedStages()` excludes `StageApply`.
+- Activation stays gated by `assertActivationRemainsGated`: multi-WAN intent did
+  not make it reachable without physical presence and explicit authorization.
 
 ## M7.6 — Safe Production Activation
 
@@ -1163,9 +1161,18 @@ thn activate --confirm     # fail-closed production activation requiring explici
 
 ### M7.6 Safety Invariants
 
-- `activation.CanApply() == false` (fail-closed static default).
-- `ProductionDriver.CanApply() == false` (disabled unless explicitly confirmed and all gates pass).
-- `ImplementedStages()` excludes `StageApply`.
+- `activation.CanApply()` reports the truth about the build, and
+  `Machine.Activate` separately refuses unless an applier is bound, every gate
+  holds, and that applier reports itself authorized.
+- `ProductionDriver.CanApply()` is false until `Authorize` accepts an explicit
+  confirmation, a satisfied gate set, proven management safety, and a plan ID
+  carrying all three input digests.
+- Every one of the production gates is individually load-bearing.
+- Capabilities must be **observed**, never inferred, to satisfy a gate.
+- Plan, observed-state, desired-state and assignment digests are all bound; a
+  mismatch refuses.
+- `OpDNSApply` refuses rather than reporting a successful no-op, and a
+  configuration requesting DHCP or DNS is blocked at activation.
 - No unguarded exec, shell execution, or shell interpolation.
 
 ## Diagnosing an unknown
@@ -1405,7 +1412,7 @@ forward:  ipv4=true ipv6=true (desired)
 NAT:      masquerade via wan (unresolved)
 
 plan 883ea8bf2b5a4dcd generation 1: 0 step(s), 5 pending, 0 blocked [NOT READY]
-Activation: BLOCKED (no apply path in this build)
+Activation: BLOCKED (plan is not ready)
 
   KIND      RISK      FIELD            REASON
   pending   none      wan.interface    host inspection is unavailable
@@ -1415,6 +1422,28 @@ Activation: BLOCKED (no apply path in this build)
 Everything is reported as *pending* rather than drift, because nothing has been
 observed. A tool that reports "nothing to do" when it simply could not look is
 worse than useless on a remote device.
+
+## Activating a real gateway
+
+`thn activate` is the only command that can change host networking. It requires
+explicit physical presence and explicit authorization, and it will refuse unless
+every safety gate holds:
+
+```bash
+thn readiness                      # how far this host is from activation
+thn activation inspect             # the exact mutations, and what is preserved
+thn activate --confirm --confirm-present --dry-run
+thn activate --confirm --confirm-present
+```
+
+It runs `PREPARE → BACKUP → VALIDATE → APPLY → HEALTH_CHECK → COMMIT`, and on a
+failed health check it compensates in reverse order and verifies the host matches
+the baseline captured before the first mutation.
+
+THN implements no DHCP server and no DNS server. A configuration that requests
+either (`dhcp.enabled`, `dns.enabled`) is **refused at activation** rather than
+silently reported as applied. See [docs/deployment-runbook.md](docs/deployment-runbook.md)
+for the full physical deployment procedure and the recovery path.
 
 ## Layout
 

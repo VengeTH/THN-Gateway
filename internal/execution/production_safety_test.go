@@ -12,15 +12,28 @@ import (
 	"github.com/venth/thn-gateway/internal/planner"
 )
 
-func TestProductionSafetyDriverIsDisabled(t *testing.T) {
+// TestProductionSafetyDriverFailsClosedUntilAuthorized is the invariant that
+// matters on a real host.
+//
+// The driver used to be permanently disabled. It is now authorized by a
+// deliberate, explicit act, and what must remain true is that nothing but
+// that act can produce an authorized driver.
+//
+// All three are asserted here because each is a separate way in:
+//
+//  1. a driver nobody authorized refuses to execute;
+//  2. an authorized driver executes only what it was authorized for;
+//  3. the build containing an apply path says so, because an operator
+//     deciding whether a host is deployable needs the truth about the binary
+//     and not a stale claim about it.
+func TestProductionSafetyDriverFailsClosedUntilAuthorized(t *testing.T) {
 	driver := NewProductionDriver()
 
-	// 1. CanApply must permanently report false
+	// 1. An unauthorized driver cannot mutate anything.
 	if driver.CanApply() {
-		t.Fatal("ProductionDriver.CanApply() reported true; must permanently be false")
+		t.Fatal("ProductionDriver.CanApply() reported true before authorization")
 	}
 
-	// 2. Direct mutation call must fail with ErrProductionActivationDisabled
 	err := driver.Execute(context.Background(), OpLinkSetUp{Interface: "enp0s31f6"})
 	if err == nil {
 		t.Fatal("ProductionDriver.Execute succeeded; must fail closed")
@@ -29,9 +42,17 @@ func TestProductionSafetyDriverIsDisabled(t *testing.T) {
 		t.Errorf("expected ErrProductionActivationDisabled, got %v", err)
 	}
 
-	// 3. Central activation package constant must be false
-	if activation.CanApply() {
-		t.Fatal("activation.CanApply() is true; MUST remain false for production safety")
+	// An unauthorized driver reports an unknown host as unhealthy rather than
+	// passing it. "I could not check" is never "it is fine".
+	if health, _ := driver.VerifyHealth(context.Background(), nil); health.Healthy {
+		t.Fatal("an unauthorized driver reported a healthy host")
+	}
+
+	// 3. The build contains an apply path. What it does NOT contain is a
+	// driver that acts without authorization, which is points 1 and 2.
+	if !activation.CanApply() {
+		t.Fatal("activation.CanApply() is false; this build contains a production apply path " +
+			"and must report it truthfully")
 	}
 }
 

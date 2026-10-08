@@ -7,14 +7,18 @@ package cli
 // and reading a refusal that never named the gates.
 //
 // These tests pin the three properties that make the report trustworthy: it
-// agrees with Evaluate, it says plainly that the build is the blocker, and it
+// names the blocking gates, it says what would unblock each of them, and it
 // cannot claim the network was touched.
+//
+// Note what it does NOT assert: that the build is the blocker. That was true
+// while this build had no apply path, and it stopped being true when the
+// production path landed. A readiness report that blamed the build would now
+// send an operator to rebuild software rather than to plug in a LAN cable.
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/config"
 )
 
@@ -88,20 +92,51 @@ func TestReadinessNamesTheBlockingGates(t *testing.T) {
 	}
 }
 
-// TestReadinessSaysTheBuildIsTheBlocker is the most useful sentence it prints.
-//
-// Without this an operator reads "BLOCKED: apply-path-available" and goes
-// looking for a setting that does not exist.
-func TestReadinessSaysTheBuildIsTheBlocker(t *testing.T) {
+// TestReadinessNeverClaimsItTouchedTheNetwork is the contract an operator
+// decides whether to be afraid by, so it is asserted first and separately.
+func TestReadinessNeverClaimsItTouchedTheNetwork(t *testing.T) {
 	_, path := loadTopology(t, completeGatewayConfig())
 
-	stdout, _, _ := runGateCLI(t, "readiness", path)
-
-	if !strings.Contains(stdout, "blocked by the BUILD") {
-		t.Errorf("output does not attribute the blocking to the build:\n%s", stdout)
+	stdout, _, code := runGateCLI(t, "readiness", path)
+	if code == ExitOK {
+		t.Fatalf("readiness reported success:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "No setting changes it") {
-		t.Errorf("output does not say the blocker is not configurable:\n%s", stdout)
+	if !strings.Contains(stdout, "Current network remains untouched") {
+		t.Errorf("output does not state that the network is untouched:\n%s", stdout)
+	}
+}
+
+// TestReadinessSaysWhatWouldUnblockEachGate is what makes a blocked report
+// usable rather than merely discouraging.
+//
+// Each blocking gate gets its own remedy, and the advice must not blame the
+// build for a condition the operator can fix by plugging in a cable.
+func TestReadinessSaysWhatWouldUnblockEachGate(t *testing.T) {
+	advice := blockingAdvice([]string{
+		"physical-presence", "lan-identified", "management-safety",
+		"subsystems-executable", "recoverable",
+	})
+
+	for _, want := range []string{
+		"physical-presence", "role assignment", "management-safety",
+		"subsystems", "recoverable",
+	} {
+		if !strings.Contains(advice, want) {
+			t.Errorf("advice does not cover %q:\n%s", want, advice)
+		}
+	}
+}
+
+// TestReadinessNamesAnApplyPathBuildProblemSeparately covers the one blocking
+// condition no configuration can fix. It must be distinguishable, because the
+// remedy for it is entirely different.
+func TestReadinessNamesAnApplyPathBuildProblemSeparately(t *testing.T) {
+	advice := blockingAdvice([]string{"apply-path-available"})
+	if !strings.Contains(advice, "build") {
+		t.Errorf("advice for a build block does not name the build: %q", advice)
+	}
+	if !strings.Contains(advice, "no configuration changes it") {
+		t.Errorf("advice for a build block does not say it is not configurable: %q", advice)
 	}
 }
 
@@ -152,21 +187,6 @@ func TestReadinessAgreesWithValidateOnConfigValidity(t *testing.T) {
 }
 
 // TestReadinessNeverClaimsItTouchedTheNetwork is the safety assertion.
-func TestReadinessNeverClaimsItTouchedTheNetwork(t *testing.T) {
-	_, path := loadTopology(t, completeGatewayConfig())
-
-	stdout, _, code := runGateCLI(t, "readiness", path)
-	if code == ExitOK {
-		t.Fatalf("readiness reported success:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "Current network remains untouched") {
-		t.Errorf("output does not state that the network is untouched:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "Can apply:      false") {
-		t.Errorf("output does not report CanApply false:\n%s", stdout)
-	}
-}
-
 // TestReadinessIsACommandThatExists registers it in the dispatch table and
 // gives it the tier the other read-only lifecycle commands have.
 func TestReadinessIsACommandThatExists(t *testing.T) {
@@ -197,8 +217,9 @@ func TestReadinessJSONCarriesTheGates(t *testing.T) {
 	if got := jsonString(t, doc, "readiness"); got != "BLOCKED" {
 		t.Errorf("readiness = %q, want BLOCKED", got)
 	}
-	if jsonBool(t, doc, "can_apply") {
-		t.Error("can_apply is true; this build must not be able to apply")
+	if !jsonBool(t, doc, "can_apply") {
+		t.Error("can_apply is false; this build contains a production apply path " +
+			"and must report it truthfully")
 	}
 	if !jsonBool(t, doc, "network_untouched") {
 		t.Error("network_untouched is false")
@@ -211,17 +232,18 @@ func TestReadinessJSONCarriesTheGates(t *testing.T) {
 	if len(blocking) == 0 {
 		t.Error("blocking is empty on a blocked gateway")
 	}
-	if !jsonBool(t, doc, "all_gates_satisfied") {
-		// Expected; asserted so the field is known to exist.
-		t.Log("all_gates_satisfied is false, as expected for this build")
+	if jsonBool(t, doc, "all_gates_satisfied") {
+		t.Error("all_gates_satisfied is true without physical presence")
 	}
 
+	// The full production gate set, not the shorter readiness subset. An
+	// operator reading this is reading what will gate the apply.
 	gates, ok := doc["gates"].([]any)
 	if !ok {
 		t.Fatalf("gates is %T, want an array", doc["gates"])
 	}
-	if len(gates) != 7 {
-		t.Errorf("gates has %d entries, want 7", len(gates))
+	if len(gates) != 13 {
+		t.Errorf("gates has %d entries, want the full production set of 13", len(gates))
 	}
 }
 
@@ -236,37 +258,36 @@ func TestReadinessVerdictWordsAreDistinct(t *testing.T) {
 	}
 }
 
-// TestBlockingAdviceDistinguishesBuildFromConfiguration checks the advice
-// tracks what actually blocked.
-func TestBlockingAdviceDistinguishesBuildFromConfiguration(t *testing.T) {
-	buildBlocked := blockingAdvice([]string{"apply-path-available", "physical-presence"})
-	if !strings.Contains(buildBlocked, "BUILD") {
-		t.Errorf("advice for a build block does not mention the build: %q", buildBlocked)
+// TestBlockingAdviceIsNeverEmpty covers the degenerate case where nothing
+// recognised is blocking. Silence would be worse than useless: an operator
+// would conclude there is nothing to do rather than that THN did not
+// recognise the condition.
+func TestBlockingAdviceIsNeverEmpty(t *testing.T) {
+	if got := blockingAdvice([]string{"something-unrecognised"}); strings.TrimSpace(got) == "" {
+		t.Error("blockingAdvice returned nothing for an unrecognised gate")
 	}
-
-	configBlocked := blockingAdvice([]string{"config-valid", "lan-identified"})
-	if strings.Contains(configBlocked, "BUILD") {
-		t.Errorf("advice for a configuration block blames the build: %q", configBlocked)
-	}
-	if !strings.Contains(configBlocked, "configuration") {
-		t.Errorf("advice for a configuration block does not mention the configuration: %q", configBlocked)
+	if got := blockingAdvice(nil); strings.TrimSpace(got) == "" {
+		t.Error("blockingAdvice returned nothing for an empty gate list")
 	}
 }
 
-// TestReadinessNeverReportsReadyInThisBuild is the milestone's invariant.
+// TestReadinessNeverReportsReadyWithoutPhysicalPresence is the invariant.
 //
-// A test that asserted READY would require a build with an apply path, which
-// is the next milestone. Until then this asserts the opposite, so that when
-// that milestone lands the test has to be changed deliberately.
-func TestReadinessNeverReportsReadyInThisBuild(t *testing.T) {
+// Readiness cannot confirm that a human is standing at the device, so it can
+// never reach READY. An operator who reads READY and walks away has been told
+// something the command has no way of knowing.
+func TestReadinessNeverReportsReadyWithoutPhysicalPresence(t *testing.T) {
 	_, path := loadTopology(t, completeGatewayConfig())
 
 	stdout, _, _ := runGateCLI(t, "readiness", path)
 
 	if strings.Contains(stdout, "Verdict:        READY") {
-		t.Fatalf("readiness reported READY; this build has no apply path\n%s", stdout)
+		t.Fatalf("readiness reported READY; presence cannot be confirmed remotely:\n%s", stdout)
 	}
-	if activation.CanApply() {
-		t.Error("CanApply() is true; the milestone requires it to remain false")
+	if !strings.Contains(stdout, "physical-presence") {
+		t.Errorf("readiness did not name the presence gate as blocking:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "confirm-present") {
+		t.Errorf("readiness did not say how presence is confirmed:\n%s", stdout)
 	}
 }

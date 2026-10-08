@@ -32,11 +32,9 @@ import (
 	"github.com/venth/thn-gateway/internal/deployment"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/planner"
 	"github.com/venth/thn-gateway/internal/state"
-	"github.com/venth/thn-gateway/internal/validation"
 )
 
 // runReadiness implements `thn readiness`.
@@ -63,7 +61,7 @@ func runReadiness(env *Env, args []string) ExitCode {
 	}
 
 	input := readinessInput(cfg, path)
-	gates := activation.Evaluate(input)
+	gates := activation.EvaluateProduction(input)
 	ready := gates.AllSatisfied
 
 	if env.IsJSON {
@@ -79,6 +77,9 @@ func runReadiness(env *Env, args []string) ExitCode {
 			"unimplemented_stages": activation.UnsupportedStages(),
 			"network_untouched":    true,
 			"statement":            "Current network remains untouched.",
+			"note": "presence is not assumed: only `thn activate --confirm-present` " +
+				"can satisfy the physical-presence gate, and it must be run by someone " +
+				"standing at the device",
 		}
 		if err := env.printJSON(out); err != nil {
 			env.errorf("thn readiness: %v\n", err)
@@ -113,164 +114,15 @@ func readinessVerdict(ready bool) string {
 //
 // Every field is derived from the configuration, the plan or a read-only host
 // observation. Nothing is assumed satisfied because nothing objected.
+//
+// It delegates to the same evidence gatherer the activation path uses, so
+// `thn readiness` and `thn activate` cannot disagree about this host. The
+// only difference between the two is that readiness evaluates the PRODUCTION
+// gate set with presence left false, because no CLI invocation can confirm
+// that a human is standing at the device on the operator's behalf.
 func readinessInput(cfg config.Config, path string) activation.GateInput {
-	in := activation.GateInput{}
-
-	// config-valid uses exactly the validation `thn validate` runs, so the
-	// two commands cannot disagree about whether a document is coherent.
-	// PresenceConfirmed is deliberately left false: it records an operator
-	// physically confirming something, and no CLI invocation can do that on
-	// the operator's behalf.
-	//
-	// ConfigValid starts TRUE and is narrowed. Starting from the zero value
-	// would make this expression `false && ...` for every subsystem, and the
-	// gate would report an invalid configuration that validates cleanly.
-	in.ConfigValid = true
-	//
-	// The gateway report is built here with no host observation, because
-	// readinessInput is a static evaluation. That is the correct report for
-	// a document check: it answers what the document says and reports which
-	// selectors have not been verified against anything, which is the honest
-	// answer on a machine that was not consulted.
-	gwReport := gateway.Validate(gateway.FromConfig(cfg, host.Resolution{}), gateway.Observed{})
-	for _, sub := range subsystemValidations(cfg, gwReport, false) {
-		if sub.Valid {
-			continue
-		}
-		in.ConfigValid = false
-		for _, f := range sub.Errors() {
-			if in.ConfigProblem == "" {
-				in.ConfigProblem = fmt.Sprintf("%s: %s", f.Field, f.Message)
-			}
-			break
-		}
-	}
-	if combined := validation.Combined(cfg, nil, diff.Result{}); !combined.Valid {
-		in.ConfigValid = false
-		if in.ConfigProblem == "" {
-			for _, f := range combined.Errors() {
-				in.ConfigProblem = fmt.Sprintf("%s: %s", f.Field, f.Message)
-				break
-			}
-		}
-	}
-	if in.ConfigProblem == "" && !in.ConfigValid {
-		in.ConfigProblem = "the configuration does not validate; run `thn validate`"
-	}
-
-	// wan-present, lan-identified and plan-validated all need a host
-	// observation. observeHost is read-only and goes through internal/guard.
-	obs, _, _, device := observeHost(cfg)
-
-	// # Which bindings apply
-	//
-	// Two statements can name a role's hardware: the configuration document
-	// (network.wan / network.lan) and the operator's assignment store. They
-	// are different statements, not two copies of one, and mergeBindings
-	// defines the precedence in a single place: the document wins where both
-	// speak, and a disagreement is reported rather than resolved.
-	//
-	// Before this milestone the store did not exist and only the document was
-	// consulted. That is not a behaviour anyone can observe on a machine with
-	// no assignments, which is why it is worth a comment.
-	_, stored := storedAssignments(cfg)
-	bindings, conflicts, _ := mergeBindings(cfg, stored)
-
-	res := host.Resolve(device, bindings)
-	in.WAN = roleGate(device, res, host.RoleWAN, bindingSelector(cfg, stored, host.RoleWAN))
-	in.LAN = roleGate(device, res, host.RoleLAN, bindingSelector(cfg, stored, host.RoleLAN))
-	in.Capabilities = capabilityGates(device)
-
-	in.PlanValidated = planIsRunnable(cfg, obs)
-
-	if len(conflicts) > 0 {
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = fmt.Sprintf("role %s is declared as %s but stored as %s", conflicts[0].Role, conflicts[0].Declared, conflicts[0].Stored)
-	} else if len(res.Problems) > 0 {
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = res.Problems[0].Message
-	} else if in.WAN.Satisfied && in.LAN.Satisfied && in.WAN.Interface != "" && in.WAN.Interface == in.LAN.Interface {
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = fmt.Sprintf("LAN and WAN roles are both assigned to %s", in.WAN.Interface)
-	} else {
-		in.NoRoleConflicts = true
-	}
-
-	ready := host.EvaluateReadiness(device, host.ReadinessRequest{RequiredInterfaces: 2})
-	if !ready.Blocked {
-		in.HostReadinessOK = true
-	} else {
-		in.HostReadinessOK = false
-		if len(ready.Findings) > 0 {
-			in.HostReadinessProblem = ready.Findings[0].Message
-		} else {
-			in.HostReadinessProblem = ready.Summary
-		}
-	}
-
-	in.CapabilitiesObserved = true
-	for _, req := range []string{"routing", "firewall"} {
-		found := false
-		for _, cg := range in.Capabilities {
-			if cg.Name == req {
-				found = true
-				if !cg.Satisfied() {
-					in.CapabilitiesObserved = false
-					in.CapabilitiesProblem = fmt.Sprintf("required capability %s is %s (must be observed)", req, cg.Confidence)
-				}
-				break
-			}
-		}
-		if !found {
-			in.CapabilitiesObserved = false
-			in.CapabilitiesProblem = fmt.Sprintf("required capability %s is unknown", req)
-		}
-	}
-
-	if in.PlanValidated {
-		in.DigestsFresh = true
-	} else {
-		in.DigestsFresh = false
-		in.DigestsProblem = "plan is not validated or digests do not match"
-	}
-
-	var touched []string
-	if in.WAN.Interface != "" {
-		touched = append(touched, in.WAN.Interface)
-	}
-	if in.LAN.Interface != "" {
-		touched = append(touched, in.LAN.Interface)
-	}
-	hasTS := false
-	if device != nil {
-		for _, iface := range device.Interfaces {
-			if iface.SystemName == "tailscale0" {
-				hasTS = true
-				break
-			}
-		}
-	}
-	mgrep := activation.EvaluateManagementSafety(activation.ManagementSafetyInput{
-		TailscalePresent:    hasTS,
-		TailscaleInterface:  "tailscale0",
-		HasDefaultRoute:     obs.HasDefaultRoute,
-		PlannedDefaultRoute: cfg.Network.WAN != "" || cfg.MultiWAN.Enabled,
-		TouchedInterfaces:   touched,
-	})
-	in.ManagementSafe = mgrep.Safe
-	in.ManagementProblem = mgrep.Reason
-
-	// recoverable is left unsatisfied with a reason, not silently true.
-	//
-	// A gateway with no recorded revision history has nothing to roll back
-	// to. Claiming the gate is satisfied because "rollback machinery exists"
-	// would be a statement about the build rather than about this gateway,
-	// and it is the kind of claim that is still true when an activation has
-	// already gone wrong.
-	in.RecoveryOK = false
-	in.RecoveryProblem = "no recorded configuration history; nothing has been rolled back from yet"
-
-	return in
+	ev := gatherActivationEvidence(cfg, path)
+	return productionGateInput(ev, false)
 }
 
 // storedAssignments returns the operator's bindings and the path they came
@@ -380,7 +232,15 @@ func unresolvedRoleReason(d *host.Device, res host.Resolution, r host.Role, aske
 // internal/activation deliberately does not import internal/host: the package
 // that owns the safety boundary should not inherit the bugs of the package that
 // reads the machine. This projection is the seam.
+//
+// A nil or unsupported device projects to an EMPTY list, not to a panic and
+// not to a permissive one. The gate that reads the result then reports the
+// capability as unknown, which blocks activation — the correct answer for a
+// host that could not be inspected.
 func capabilityGates(d *host.Device) []activation.CapabilityGate {
+	if d == nil || !d.Supported {
+		return nil
+	}
 	out := make([]activation.CapabilityGate, 0, len(host.AllCapabilities()))
 	for _, c := range host.AllCapabilities() {
 		s, ok := d.Capabilities[c]
@@ -481,20 +341,48 @@ func printReadiness(env *Env, path string, gates activation.GateResult, deploy d
 	env.printf("\nCurrent network remains untouched.\n")
 }
 
-// blockingAdvice says which of the blocking gates no amount of configuration
-// will fix.
-//
-// Without this an operator reads "BLOCKED: apply-path-available" and goes
-// looking for a setting. Naming the build as the reason is the difference
-// between a useful report and a frustrating one.
+// blockingAdvice says which of the blocking gates this host, this document or
+// this operator can fix, and which needs a person to walk to the machine.
 func blockingAdvice(blocking []string) string {
-	if !containsName(blocking, "apply-path-available") {
+	var advice []string
+
+	if containsName(blocking, "physical-presence") {
+		advice = append(advice,
+			"  physical-presence  needs you, not a setting. Run\n"+
+				"                    `thn activate --confirm-present` from the device itself.")
+	}
+	if containsName(blocking, "lan-identified") || containsName(blocking, "wan-present") {
+		advice = append(advice,
+			"  role assignment   needs a cable in the right port. Run `thn discover`,\n"+
+				"                    then `thn assign lan <interface>`.")
+	}
+	if containsName(blocking, "management-safety") {
+		advice = append(advice,
+			"  management-safety  the plan may sever SSH or the overlay tunnel. Read\n"+
+				"                    `thn activation inspect` before changing anything.")
+	}
+	if containsName(blocking, "subsystems-executable") {
+		advice = append(advice,
+			"  subsystems        THN implements no DHCP or DNS server. Set\n"+
+				"                    dhcp.enabled and dns.enabled to false and address\n"+
+				"                    LAN clients statically.")
+	}
+	if containsName(blocking, "recoverable") {
+		advice = append(advice,
+			"  recoverable       some operation in the plan cannot be undone. Re-run\n"+
+				"                    `thn plan` and read the reason for each gate.")
+	}
+	if containsName(blocking, "apply-path-available") {
+		advice = append(advice,
+			"  apply-path        this binary contains no apply path. That is a build\n"+
+				"                    problem, and no configuration changes it.")
+	}
+
+	if len(advice) == 0 {
 		return "Every gate that blocks can be satisfied by configuration or by this host.\n" +
 			"Nothing here needs a different build."
 	}
-	return "apply-path-available is blocked by the BUILD, not by this configuration.\n" +
-		"No setting changes it. Readiness cannot reach READY on this build even with a\n" +
-		"perfect configuration."
+	return "What would unblock this\n" + strings.Join(advice, "\n")
 }
 
 // containsName reports whether a slice holds a value.

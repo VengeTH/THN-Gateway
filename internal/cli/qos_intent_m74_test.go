@@ -5,11 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
-	"github.com/venth/thn-gateway/internal/execution"
 	"github.com/venth/thn-gateway/internal/host"
 	"github.com/venth/thn-gateway/internal/network"
 	"github.com/venth/thn-gateway/internal/planner"
@@ -428,21 +426,10 @@ func TestQoSUnmanagedQdiscPreservedInStep(t *testing.T) {
 	}
 }
 
-// TestM74SafetyInvariants asserts that activation and applier remain disabled.
+// TestM74SafetyInvariants asserts that shaping intent did not become a way to
+// change a host.
 func TestM74SafetyInvariants(t *testing.T) {
-	if activation.CanApply() {
-		t.Error("activation.CanApply() == true; M7.4 must not enable activation")
-	}
-
-	for _, s := range activation.ImplementedStages() {
-		if s == activation.StageApply {
-			t.Error("ImplementedStages() includes apply; M7.4 must not enable apply")
-		}
-	}
-
-	if execution.NewProductionDriver().CanApply() {
-		t.Error("ProductionDriver.CanApply() == true; M7.4 must not enable apply")
-	}
+	assertActivationRemainsGated(t, "adding QoS intent")
 }
 
 // TestM74ValidationAndPlanningDoNotMutate asserts that neither validate nor plan

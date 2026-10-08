@@ -55,7 +55,12 @@ func TestPureCommandsNeverReachTheDaemon(t *testing.T) {
 }
 
 // TestDestructiveCommandsAreRefused asserts that anything capable of changing
-// the host is refused in this build.
+// the host is refused without presence AND authorization.
+//
+// Both flags are deliberately absent. A destructive command run with only one
+// of them must refuse, because an operator who has confirmed they are at the
+// machine has still not approved this particular change, and one who has
+// approved it has still not said they are there.
 func TestDestructiveCommandsAreRefused(t *testing.T) {
 	for name, cmd := range commands {
 		if cmd.Tier != TierDestructive {
@@ -67,8 +72,8 @@ func TestDestructiveCommandsAreRefused(t *testing.T) {
 		if got == ExitOK {
 			t.Errorf("destructive command %q returned success", name)
 		}
-		if !strings.Contains(errOut.String(), "no apply path") {
-			t.Errorf("command %q must explain that there is no apply path, got: %s",
+		if !strings.Contains(errOut.String(), "Current network remains untouched") {
+			t.Errorf("command %q must say the network is untouched, got: %s",
 				name, errOut.String())
 		}
 	}
@@ -87,11 +92,14 @@ func TestActivateCannotBeUnlockedByFlags(t *testing.T) {
 		{nil, ExitProblems},
 		{[]string{"--yes"}, ExitProblems},
 		{[]string{"--yes", "--confirm-present"}, ExitProblems},
+		// --confirm on its own is not enough. Authorization without presence
+		// is precisely the combination that must refuse.
+		{[]string{"--confirm"}, ExitProblems},
 		// Unknown flags are rejected as usage errors before activation is
 		// even considered. That ordering matters: it means no unrecognised
 		// input can reach the activation path at all.
 		{[]string{"--force"}, ExitUsage},
-		{[]string{"--config", "/etc/thn/config.yaml", "--yes"}, ExitUsage},
+		{[]string{"--config", "/etc/thn/config.yaml", "--yes"}, ExitProblems},
 	}
 
 	for _, a := range attempts {
@@ -121,24 +129,28 @@ func TestActivateWithRecognisedFlagsStillRefuses(t *testing.T) {
 		if got := Run(env); got == ExitOK {
 			t.Errorf("activate %v succeeded; it must always refuse", args)
 		}
-		if !strings.Contains(errOut.String(), "no apply path") {
-			t.Errorf("activate %v did not explain the refusal: %s", args, errOut.String())
+		out := errOut.String()
+		if !strings.Contains(out, "activation refused") {
+			t.Errorf("activate %v did not explain the refusal: %s", args, out)
+		}
+		if !strings.Contains(out, "Current network remains untouched") {
+			t.Errorf("activate %v did not state the network is untouched: %s", args, out)
 		}
 	}
 }
 
-// TestActivateAlwaysRefusesEvenWithEveryGateSatisfied confirms that gate
-// evaluation cannot become a back door: even a fully satisfied gate set does
-// not produce an apply path.
-func TestActivateAlwaysRefusesEvenWithEveryGateSatisfied(t *testing.T) {
-	env, _, errOut := newTestEnv("activate")
+// TestActivationWithoutAConfigIsRefused covers the case where the document
+// cannot be read at all. The refusal must still say the network is untouched,
+// because an unreadable document is not an applied change.
+func TestActivationWithoutAConfigIsRefused(t *testing.T) {
+	env, _, errOut := newTestEnv("activate", "--confirm", "--confirm-present")
 
 	if got := Run(env); got == ExitOK {
-		t.Error("activate succeeded")
+		t.Error("activate succeeded with no readable configuration")
 	}
-	if !strings.Contains(errOut.String(), "not implemented") &&
-		!strings.Contains(errOut.String(), "Not implemented") {
-		t.Errorf("activate must list the unimplemented stages, got: %s", errOut.String())
+	out := errOut.String()
+	if !strings.Contains(out, "Current network remains untouched") {
+		t.Errorf("activate did not state the network is untouched: %s", out)
 	}
 }
 

@@ -105,19 +105,38 @@ func TestCLIActivationVerifyJSON(t *testing.T) {
 	}
 
 	if data.AllSatisfied {
-		t.Error("all_satisfied must be false because apply-path is unavailable")
+		t.Error("all_satisfied must be false because physical presence cannot be " +
+			"confirmed by a command that is not run at the device")
 	}
+
+	// Every gate the report carries must have a reason when it blocks, and the
+	// apply-path gate must report the truth about the binary rather than a
+	// stale claim about it.
 	foundApplyPathGate := false
 	for _, g := range data.Gates {
 		if g.Name == "apply-path-available" {
 			foundApplyPathGate = true
-			if g.Satisfied {
-				t.Error("apply-path-available must not be satisfied")
+			if !g.Satisfied {
+				t.Error("apply-path-available is unsatisfied; this build has an apply path " +
+					"and the gate must report it truthfully")
 			}
 		}
 	}
 	if !foundApplyPathGate {
 		t.Error("apply-path-available gate not found in verify output")
+	}
+
+	foundPresence := false
+	for _, g := range data.Gates {
+		if g.Name == "physical-presence" {
+			foundPresence = true
+			if g.Satisfied {
+				t.Error("physical-presence reports satisfied without --confirm-present")
+			}
+		}
+	}
+	if !foundPresence {
+		t.Error("physical-presence gate not found in verify output")
 	}
 }
 
@@ -196,13 +215,16 @@ func TestCLIActivateConfirmRefusesSafely(t *testing.T) {
 	env, _, errOut := newTestEnv("activate", "--confirm")
 	code := Run(env)
 	if code != ExitProblems {
-		t.Fatalf("expected ExitProblems on unapproved host, got %d", code)
+		t.Fatalf("expected ExitProblems on an unapproved host, got %d", code)
 	}
 	errStr := errOut.String()
 	if !strings.Contains(errStr, "Current network remains untouched") {
 		t.Errorf("expected 'Current network remains untouched' in error output:\n%s", errStr)
 	}
-	if !strings.Contains(errStr, "no apply path") {
-		t.Errorf("expected 'no apply path' in error output:\n%s", errStr)
+
+	// --confirm authorizes a change. It is not a statement that anyone is at
+	// the device, and the refusal must say which of the two is missing.
+	if !strings.Contains(errStr, "--confirm-present") {
+		t.Errorf("expected the refusal to name the missing confirmation:\n%s", errStr)
 	}
 }

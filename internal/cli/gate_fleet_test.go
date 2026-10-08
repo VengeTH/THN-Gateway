@@ -97,8 +97,10 @@ func TestGateFleetAddsNoDestructiveCommand(t *testing.T) {
 	}
 }
 
-// The binary still cannot apply. Adding a control plane must not have quietly
-// enabled the stage it was supposed to leave unimplemented.
+// A control plane may say when to change a host; it may not be able to.
+//
+// Two halves: the stage list stays self-consistent, and adding the control
+// plane did not make activation reachable without presence and authorization.
 func TestGateFleetDidNotEnableApply(t *testing.T) {
 	implemented := activation.ImplementedStages()
 	for _, s := range activation.UnsupportedStages() {
@@ -109,9 +111,8 @@ func TestGateFleetDidNotEnableApply(t *testing.T) {
 		}
 	}
 
-	if activation.CanApply() {
-		t.Error("activation.CanApply() became true; this build must not be able to apply")
-	}
+	// A control plane may say when to change a host; it may not be able to.
+	assertActivationRemainsGated(t, "adding a control plane")
 }
 
 // The gateway's own refusal must not be bypassable by making the policy

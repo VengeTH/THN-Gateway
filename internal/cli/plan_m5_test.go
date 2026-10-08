@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/venth/thn-gateway/internal/activation"
 )
 
 func TestCLIPlanDeterministicOutput(t *testing.T) {
@@ -136,7 +134,6 @@ func TestCLIPlanConfigPlanAgreement(t *testing.T) {
 }
 
 func TestCLIPlanPreservesSafetyGuarantees(t *testing.T) {
-	if activation.CanApply() {
-		t.Fatal("CanApply() must remain false in M5")
-	}
+	// Planning describes. It must never become a route to acting.
+	assertActivationRemainsGated(t, "adding `thn plan`")
 }

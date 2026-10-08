@@ -3,6 +3,7 @@ package activation
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,23 +19,21 @@ const (
 	// be observed, nothing may be applied.
 	StateDevelopment State = "DEVELOPMENT"
 
-	// StatePrepared means a plan has been generated and validated but has
-	// deliberately not been applied. It is the terminal state of this build.
+	// StatePrepared means a plan has been generated and validated but has not
+	// been applied. It is the resting state before an authorised activation.
 	StatePrepared State = "PREPARED"
 
-	// StateActivating means an apply is in progress. Unreachable in this build.
+	// StateActivating means an apply is in progress.
 	StateActivating State = "ACTIVATING"
 
 	// StateActive means the gateway is serving traffic as planned.
-	// Unreachable in this build.
 	StateActive State = "ACTIVE"
 
-	// StateDegraded means the gateway is active but unhealthy.
-	// Unreachable in this build.
+	// StateDegraded means activation failed and the host could not be returned
+	// to its baseline. It is a terminal state requiring operator action.
 	StateDegraded State = "DEGRADED"
 
-	// StateFailed means activation failed and recovery is required.
-	// Unreachable in this build.
+	// StateFailed means activation was rolled back and verified.
 	StateFailed State = "FAILED"
 )
 
@@ -45,9 +44,10 @@ func (s State) String() string { return string(s) }
 // can report precisely why an activation was refused rather than a generic
 // failure.
 var (
-	// ErrNoApplyPath is returned because this build has no apply path. It is
-	// the expected outcome, not a malfunction.
-	ErrNoApplyPath = errors.New("activation: this build has no apply path; host networking cannot be changed")
+	// ErrNoApplyPath is returned when no applier is bound to the machine.
+	// The build contains an apply path; a machine reached without one has
+	// been wired incorrectly.
+	ErrNoApplyPath = errors.New("activation: no apply path is bound to this machine")
 
 	// ErrInvalidTransition is returned when a state change is not permitted.
 	ErrInvalidTransition = errors.New("activation: invalid state transition")
@@ -58,6 +58,9 @@ var (
 	// ErrPresenceNotConfirmed is returned when physical presence has not been
 	// confirmed and the configuration requires it.
 	ErrPresenceNotConfirmed = errors.New("activation: physical presence has not been confirmed")
+
+	// ErrNotAuthorized is returned when the bound applier is not authorized.
+	ErrNotAuthorized = errors.New("activation: applier is not authorized to act")
 )
 
 // Stage names the capabilities the current build implements.
@@ -74,41 +77,65 @@ const (
 	StageValidate Stage = "validate"
 	// StageSimulate is implemented: a plan's effect can be described.
 	StageSimulate Stage = "simulate"
-	// StageApply is NOT implemented in this build.
+	// StageApply is implemented behind the production authorization path.
 	StageApply Stage = "apply"
-	// StageHealthCheck is NOT implemented in this build.
+	// StageHealthCheck is implemented: post-apply verification runs.
 	StageHealthCheck Stage = "health-check"
-	// StageCommit is NOT implemented in this build.
+	// StageCommit is implemented: a verified apply is committed.
 	StageCommit Stage = "commit"
-	// StageRollback is NOT implemented in this build.
+	// StageRollback is implemented: a failed apply is compensated and verified.
 	StageRollback Stage = "rollback"
 )
 
 // ImplementedStages returns the stages this build can perform.
 func ImplementedStages() []Stage {
-	return []Stage{StageObserve, StageModel, StagePlan, StageValidate, StageSimulate}
+	return []Stage{
+		StageObserve, StageModel, StagePlan, StageValidate,
+		StageSimulate, StageApply, StageHealthCheck, StageCommit, StageRollback,
+	}
 }
 
 // UnsupportedStages returns the stages this build cannot perform.
-func UnsupportedStages() []Stage {
-	return []Stage{StageApply, StageHealthCheck, StageCommit, StageRollback}
-}
+//
+// It is empty. It is retained because callers render it, and a caller that
+// silently stopped rendering the list would hide a regression rather than
+// report one.
+func UnsupportedStages() []Stage { return []Stage{} }
 
-// CanApply reports whether this build can change host networking. It is a
-// constant false in this build, and exists so that callers can express the
-// question instead of hard-coding an assumption.
-func CanApply() bool { return false }
+// CanApply reports whether this build contains an apply path.
+//
+// # What this does and does not mean
+//
+// This is a statement about the BUILD, not about any one activation request.
+// It is true because internal/execution contains a complete, scoped
+// production transaction: baseline capture, structured operations, post-apply
+// health verification, compensating rollback and rollback verification.
+//
+// It is deliberately not, and must never be read as, a statement that an
+// activation will be permitted. That question is answered by the gates in
+// EvaluateProduction, by the Applier bound to a Machine reporting
+// Available(), and again independently by Executor.ExecutePlan re-deriving
+// every digest at the moment of execution. Three separate checks, because a
+// single check is one mistake away from being the only thing standing between
+// a plan and a host.
+//
+// Flipping this constant to true without the machinery behind it would make
+// the apply-path gate decorative. The machinery is what makes it honest.
+func CanApply() bool { return true }
 
 // Applier performs activation.
 //
-// The interface exists so the state machine can be written against the real
-// thing, and so that a future implementation slots in without reshaping the
-// machine. There is exactly one implementation in this repository: Disabled.
+// The interface exists so the state machine is written against the real thing
+// rather than against a hard-coded refusal. There is exactly one production
+// implementation — execution's production transaction — and Disabled, which
+// refuses.
 type Applier interface {
-	// Apply would activate the gateway. It is never called in this build.
+	// Apply activates the gateway.
 	Apply(ctx Context) error
 
-	// Available reports whether this applier can act. Disabled returns false.
+	// Available reports whether this applier is currently authorized to act.
+	// Disabled returns false; the production applier returns false until
+	// Authorize has succeeded.
 	Available() bool
 
 	// Describe explains what this applier would do, for `thn diagnostics`.
@@ -178,7 +205,7 @@ func Evaluate(in GateInput) GateResult {
 		Name:        "apply-path-available",
 		Description: "the running build must contain an apply path",
 		Satisfied:   CanApply(),
-		Reason:      "this build implements observe, model, plan, validate and simulate only",
+		Reason:      "this build contains no apply path; it can observe, model, plan, validate and simulate only",
 	})
 
 	gates = append(gates, Gate{
@@ -243,7 +270,7 @@ func EvaluateProduction(in GateInput) GateResult {
 		Name:        "apply-path-available",
 		Description: "the running build must contain an apply path",
 		Satisfied:   CanApply(),
-		Reason:      "this build implements observe, model, plan, validate and simulate only",
+		Reason:      "this build contains no apply path; it can observe, model, plan, validate and simulate only",
 	})
 
 	gates = append(gates, Gate{
@@ -314,6 +341,15 @@ func EvaluateProduction(in GateInput) GateResult {
 		Description: "a recovery plan must exist and must not be blocked",
 		Satisfied:   in.RecoveryOK,
 		Reason:      reasonUnless(in.RecoveryOK, in.RecoveryProblem),
+	})
+
+	gates = append(gates, Gate{
+		Name: "subsystems-executable",
+		Description: "every subsystem the configuration requires must be one THN can " +
+			"actually apply at runtime, not merely represent in desired state",
+		Satisfied: in.SubsystemsExecutable,
+		Reason: reasonUnless(in.SubsystemsExecutable, fallback(in.SubsystemsProblem,
+			"a required subsystem has no runtime implementation")),
 	})
 
 	gates = append(gates, Gate{
@@ -432,6 +468,19 @@ type GateInput struct {
 	RecoveryOK bool
 	// RecoveryProblem explains an unrecoverable situation.
 	RecoveryProblem string
+
+	// SubsystemsExecutable reports whether every subsystem the configuration
+	// asks for is one the execution layer can actually bring up.
+	//
+	// This is separate from ConfigValid. A configuration asking for a DHCP
+	// server is perfectly coherent — it is what a home gateway normally wants
+	// — and it validates cleanly. It is also, in this build, not something
+	// that can be applied. Collapsing the two would produce a gateway that
+	// reports a committed activation while handing out no addresses.
+	SubsystemsExecutable bool
+	// SubsystemsProblem names the required-but-unimplementable subsystems.
+	SubsystemsProblem string
+
 	// PresenceConfirmed reports whether an operator confirmed being present.
 	PresenceConfirmed bool
 }
@@ -505,9 +554,10 @@ type Transition struct {
 
 // NewMachine returns a machine in the given initial state.
 //
-// The applier defaults to Disabled. There is no constructor that accepts a
-// working applier, which is what makes "this build cannot activate" a
-// property of the package rather than a runtime configuration.
+// The applier defaults to Disabled, which refuses everything. Callers that
+// intend to act must bind the production applier with NewMachineWithApplier;
+// there is no path by which a machine acquires one implicitly, so "this machine
+// cannot act" is always a deliberate construction rather than an accident.
 func NewMachine(initial State) *Machine {
 	if initial == "" {
 		initial = StateUninitialised
@@ -519,6 +569,21 @@ func NewMachine(initial State) *Machine {
 		gates:      GateResult{AllSatisfied: false},
 		maxHistory: 64,
 	}
+}
+
+// NewMachineWithApplier returns a machine bound to app.
+//
+// It exists so that a machine which can act is constructed by naming the thing
+// that will act, in one place, on purpose. The alternative — a default applier
+// parameter that silently means Disabled in one caller and the production
+// applier in another — is how a machine ends up live that nobody meant to
+// enable.
+func NewMachineWithApplier(initial State, app Applier) *Machine {
+	m := NewMachine(initial)
+	if app != nil {
+		m.applier = app
+	}
+	return m
 }
 
 // State returns the current state.
@@ -585,20 +650,19 @@ func (m *Machine) Applier() Applier {
 // allowedTransitions defines the state graph.
 //
 // The graph is written out in full rather than computed, because the whole
-// point is that a reader can verify at a glance that no edge leaves Prepared
-// toward Activating in this build. A generated or default-allow graph would
-// hide exactly the property this package exists to guarantee.
+// point is that a reader can verify at a glance that no edge bypasses the
+// ACTIVATING state. A gateway goes PREPARED -> ACTIVATING -> {ACTIVE,
+// DEGRADED, FAILED} and reaches ACTIVE only through ACTIVATING, so there is no
+// edge anywhere that reaches a serving state without having applied something
+// first.
 var allowedTransitions = map[State][]State{
 	StateUninitialised: {StateDevelopment},
 	StateDevelopment:   {StatePrepared, StateDevelopment},
-	StatePrepared:      {StatePrepared, StateDevelopment},
-	// The remaining states are unreachable in this build: there is no
-	// Applier that can reach them. They are declared so that a future
-	// implementation has an obvious place to extend the graph.
-	StateActivating: {StateActive, StateDegraded, StateFailed},
-	StateActive:     {StateDegraded, StateActivating},
-	StateDegraded:   {StateActive, StateFailed},
-	StateFailed:     {StateDevelopment, StatePrepared},
+	StatePrepared:      {StatePrepared, StateActivating, StateDevelopment},
+	StateActivating:    {StateActive, StateDegraded, StateFailed},
+	StateActive:        {StateDegraded, StateActivating},
+	StateDegraded:      {StateActive, StateFailed},
+	StateFailed:        {StateDevelopment, StatePrepared},
 }
 
 // CanTransition reports whether from -> to is a legal transition.
@@ -642,29 +706,64 @@ func (m *Machine) Prepare(why string) error {
 
 // Activate attempts activation.
 //
-// It always fails in this build, and it fails in the most informative way
-// possible: the reason names the unmet gates and the missing apply path, so an
-// operator running `thn activate` out of curiosity learns exactly what state
-// the gateway is in instead of getting a bare "not implemented".
+// # What it refuses, and why the refusals are in this order
+//
+// Four things must hold before the bound applier is called, and they are
+// checked in a fixed order so the message an operator sees names the first
+// thing that is actually wrong rather than whichever check happened to run
+// first in the source:
+//
+//  1. an applier is bound at all (Disabled, or a miswired caller);
+//  2. every safety gate in the latest evaluation holds;
+//  3. the applier reports itself authorized;
+//  4. the transition into ACTIVATING is legal from the current state.
+//
+// Gates are checked before authorization on purpose. An authorized driver is
+// evidence that someone passed --confirm, not evidence that the host was
+// surveyed. A caller who satisfies authorization while a gate is unmet —
+// because they constructed ProductionAuth from a stale or partial
+// GateInput — must still be refused here, or the ordering would let
+// confirmation stand in for evidence.
 func (m *Machine) Activate(ctx Context) error {
 	app := m.Applier()
 
-	if !app.Available() {
+	if _, ok := app.(Disabled); ok {
 		var missing []string
-		for _, name := range m.Gates().Blocking {
-			missing = append(missing, name)
-		}
-		detail := "no apply path is compiled into this build"
+		missing = append(missing, m.Gates().Blocking...)
+		detail := "no apply path is bound to this machine"
 		if len(missing) > 0 {
 			detail += fmt.Sprintf("; additionally unmet: %v", missing)
 		}
 		return fmt.Errorf("%w (%s)", ErrNoApplyPath, detail)
 	}
 
-	// Unreachable in this build: Disabled is the only Applier and it reports
-	// Available() == false. The call exists so that adding a real applier does
-	// not require restructuring the machine.
+	if g := m.Gates(); !g.AllSatisfied {
+		return fmt.Errorf("%w: %s", ErrGateNotSatisfied,
+			strings.Join(nonEmpty(g.Blocking), ", "))
+	}
+
+	if !app.Available() {
+		return fmt.Errorf("%w: %s reports it is not authorized; "+
+			"explicit production confirmation is required", ErrNotAuthorized, app.Describe())
+	}
+
+	if !CanTransition(m.State(), StateActivating) {
+		return fmt.Errorf("%w: %s -> %s is not permitted", ErrInvalidTransition, m.State(), StateActivating)
+	}
+
 	return app.Apply(ctx)
+}
+
+// nonEmpty filters an empty slice down, so a refusal message never renders a
+// stray comma for a gate that contributed no name.
+func nonEmpty(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Report renders the machine's current position for `thn status`.

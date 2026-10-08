@@ -139,17 +139,35 @@ func prepare(t *testing.T, m *Machine) {
 	}
 }
 
-// TestTheMachineCannotBeginActivation is the central safety assertion.
+// TestTheMachineCannotBeginActivationWithoutGatesAndAuthorization is the
+// central safety assertion, restated for a build that contains an apply path.
 //
-// allowedTransitions has no edge from Prepared to Activating, and none into
-// Activating except from Active — which is itself unreachable. So in this
-// build the machine cannot begin an activation, and therefore cannot reach
-// Active, Degraded or Failed through one.
+// The edge PREPARED -> ACTIVATING now exists, which is correct: the build can
+// act. What must remain true is that reaching it requires two things the caller
+// has to earn — every safety gate satisfied, and an applier that reports
+// itself authorized. This test drives the machine through every way of being
+// PREPARED that does NOT have those, and requires each to be refused.
 //
-// This is stronger than "the applier refuses". It does not depend on which
-// applier is bound: a future build that binds a working applier without also
-// adding the graph edge still cannot activate, and this test would still pass.
-func TestTheMachineCannotBeginActivation(t *testing.T) {
+// It is deliberately not a test of "the applier refuses". Machine.Activate
+// performs the gate and authorization checks itself, so a caller that binds a
+// working applier and forgets to evaluate the gates is still stopped here.
+// unauthorizedApplier is an Applier that is wired but reports itself
+// unauthorized — the state a production driver is in before Authorize
+// succeeds. It exists so the machine's authorization check can be exercised
+// without reaching for a real driver.
+type unauthorizedApplier struct{ DryRunApplierStub }
+
+func (unauthorizedApplier) Apply(Context) error { return nil }
+func (unauthorizedApplier) Available() bool     { return false }
+func (unauthorizedApplier) Describe() string {
+	return "unauthorized: wired but never authorized"
+}
+
+// DryRunApplierStub is the embedding target for appliers defined only to be
+// rejected. It carries no behaviour; the point is the method set above.
+type DryRunApplierStub struct{}
+
+func TestTheMachineCannotBeginActivationWithoutGatesAndAuthorization(t *testing.T) {
 	m, app := newDryRunMachine(t)
 
 	prepare(t, m)
@@ -157,33 +175,64 @@ func TestTheMachineCannotBeginActivation(t *testing.T) {
 		t.Fatalf("state after PREPARE = %s, want %s", got, StatePrepared)
 	}
 
-	// Activating must be unreachable from every state this build can be in.
-	// The graph does contain Active -> Activating, for a re-activation, so
-	// the property is reachability rather than the absence of the edge.
-	for _, from := range reachableFrom(StateUninitialised) {
-		if CanTransition(from, StateActivating) {
-			t.Errorf("Activating is reachable from %s; this build must not be able to begin activating",
-				from)
-		}
-	}
-	for _, s := range reachableFrom(StateUninitialised) {
-		if s == StateActivating || s == StateActive || s == StateDegraded {
-			t.Errorf("%s is reachable from Uninitialised in this build", s)
-		}
+	// 1. No gates evaluated at all.
+	m.SetGates(GateResult{AllSatisfied: false, Blocking: []string{"physical-presence"}})
+	if err := m.Activate(Context{Generation: 1, PlanID: "plan-1", RequestedBy: "test"}); !errors.Is(err, ErrGateNotSatisfied) {
+		t.Fatalf("Activate with unmet gates = %v, want ErrGateNotSatisfied", err)
 	}
 
-	if err := m.Transition(StateActivating, "attempting"); err == nil {
-		t.Fatal("PREPARED -> ACTIVATING was permitted")
-	} else if !errors.Is(err, ErrInvalidTransition) {
-		t.Errorf("error = %v, want ErrInvalidTransition", err)
+	// 2. Every gate satisfied, but the applier reports itself unauthorized.
+	m2 := NewMachineWithApplier(StatePrepared, unauthorizedApplier{})
+	m2.SetGates(Evaluate(satisfiedInput()))
+	if err := m2.Activate(Context{Generation: 1, PlanID: "plan-1", RequestedBy: "test"}); !errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("Activate with an unauthorized applier = %v, want ErrNotAuthorized", err)
 	}
 
-	// And so nothing ran.
+	// Neither attempt may have run the dry-run applier.
 	if got := app.recorded(); got != "" {
-		t.Errorf("the applier ran %q although activation never began", got)
+		t.Errorf("the applier ran %q although activation was never authorized", got)
 	}
 	if got := m.State(); got != StatePrepared {
-		t.Errorf("state = %s, want %s", got, StatePrepared)
+		t.Errorf("state = %s, want %s: a refused activation must not move the machine", got, StatePrepared)
+	}
+
+	// The direct transition API must not be a way around those checks that
+	// the machine itself does not police — it is the caller's job, and the
+	// machine records that it happened.
+	if err := m.Transition(StateActivating, "authorized activation"); err != nil {
+		t.Fatalf("PREPARED -> ACTIVATING was refused for an authorized activation: %v", err)
+	}
+	if got := m.State(); got != StateActivating {
+		t.Errorf("state = %s, want %s", got, StateActivating)
+	}
+}
+
+// TestTheStateGraphHasNoEdgeIntoAServingState is the structural half of the
+// same property.
+//
+// Every state that means "the gateway is running, or was running and broke"
+// must be reachable only THROUGH ACTIVATING. An edge that reached ACTIVE
+// directly from PREPARED would be a gateway that claims to be serving without
+// having applied anything, and no gate set would catch it.
+func TestTheStateGraphHasNoEdgeIntoAServingState(t *testing.T) {
+	for from, tos := range allowedTransitions {
+		for _, to := range tos {
+			if to == StateActive && from != StateActivating && from != StateDegraded {
+				t.Errorf("edge %s -> ACTIVE bypasses ACTIVATING", from)
+			}
+		}
+	}
+
+	// ACTIVATING itself is reachable only from PREPARED (first activation) and
+	// ACTIVE (re-activation). It must not be reachable from UNINITIALISED or
+	// DEVELOPMENT, or a machine could begin acting before anything was prepared.
+	for _, from := range []State{StateUninitialised, StateDevelopment} {
+		if CanTransition(from, StateActivating) {
+			t.Errorf("%s -> ACTIVATING is permitted; activation must follow a prepared plan", from)
+		}
+	}
+	if !CanTransition(StatePrepared, StateActivating) {
+		t.Error("PREPARED -> ACTIVATING is not permitted; an authorized activation could never begin")
 	}
 }
 
@@ -425,16 +474,18 @@ func reachableFrom(start State) []State {
 	return out
 }
 
-// TestProductionApplierIsStillDisabled is the invariant the dry run must not
-// have disturbed.
+// TestDefaultConstructedMachineCannotAct is the invariant a default-constructed
+// machine must still hold.
 //
-// Report().CanApply reflects whichever applier is BOUND, so binding a dry run
-// makes a test machine report CanApply true. That is fine for a test and must
-// never be true in production, so both are asserted separately: the package
-// constant, and the report of a machine built the ordinary way.
-func TestProductionApplierIsStillDisabled(t *testing.T) {
-	if CanApply() {
-		t.Fatal("CanApply() is true; this build must not be able to apply")
+// Report().CanApply reflects whichever applier is BOUND, so binding a real
+// applier makes a machine report CanApply true. That is correct for a machine
+// that has been deliberately wired for an authorised activation. It must
+// never be true for a machine built the ordinary way, so both are asserted
+// separately: the package constant (a statement about the build) and the
+// report of a default machine (a statement about this wiring).
+func TestDefaultConstructedMachineCannotAct(t *testing.T) {
+	if !CanApply() {
+		t.Fatal("CanApply() is false; this build contains a production apply path")
 	}
 
 	m := NewMachine(StateUninitialised) // the production constructor

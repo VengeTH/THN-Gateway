@@ -28,9 +28,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/config"
-	"github.com/venth/thn-gateway/internal/execution"
 	"github.com/venth/thn-gateway/internal/gateway"
 	"github.com/venth/thn-gateway/internal/host"
 )
@@ -442,34 +440,43 @@ func TestPlanAndValidateAgreeOnTheGateway(t *testing.T) {
 // from the CLI package so it is checked wherever a caller might reach for an
 // applier.
 func TestActivationRemainsDisabled(t *testing.T) {
-	if activation.CanApply() {
-		t.Error("activation.CanApply() must remain false; this milestone does not enable production activation")
-	}
-	for _, s := range activation.ImplementedStages() {
-		if s == activation.StageApply {
-			t.Error("ImplementedStages() must not include apply")
-		}
-	}
-	if execution.NewProductionDriver().CanApply() {
-		t.Error("ProductionDriver.CanApply() must remain false")
-	}
+	assertActivationRemainsGated(t, "adding gateway intent")
 }
 
 // TestActivateIsStillRefused proves it end to end.
 //
-// The gate above checks the constants; this checks that no code path added in
-// this milestone made `thn activate` reachable.
+// `thn activate` with nothing confirmed must refuse and name what is missing.
+// The gates below are the ones an operator meets first, so they are the ones
+// worth asserting on: an operator who is told only "refused" has to guess.
 func TestActivateIsStillRefused(t *testing.T) {
 	stdout, stderr, code := runGateCLI(t, "activate")
 	_ = stdout
 
 	if code == ExitOK {
-		t.Errorf("`thn activate` returned success; activation must be unavailable:\n%s", stderr)
+		t.Errorf("`thn activate` returned success without confirmation:\n%s", stderr)
 	}
-	if !strings.Contains(strings.ToLower(stderr), "not available") &&
-		!strings.Contains(strings.ToLower(stderr), "disabled") &&
-		!strings.Contains(strings.ToLower(stderr), "no apply") {
-		t.Errorf("`thn activate` did not explain that activation is unavailable:\n%s", stderr)
+	if !strings.Contains(stderr, "Current network remains untouched") {
+		t.Errorf("`thn activate` did not say the network is untouched:\n%s", stderr)
+	}
+	for _, want := range []string{"activation refused", "Nothing was changed"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("`thn activate` is missing %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestActivateNamesWhatIsMissingWithoutFlags is the operator-facing half.
+//
+// The refusal must be actionable: with no flags, the two things standing in
+// the way are unmet gates and absent confirmation, and both are named.
+func TestActivateNamesWhatIsMissingWithoutFlags(t *testing.T) {
+	_, stderr, _ := runGateCLI(t, "activate")
+
+	if !strings.Contains(stderr, "--confirm-present") {
+		t.Errorf("the refusal does not say how to confirm physical presence:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "--confirm") {
+		t.Errorf("the refusal does not say how to authorize the change:\n%s", stderr)
 	}
 }
 

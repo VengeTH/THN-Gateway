@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/appliance"
 	"github.com/venth/thn-gateway/internal/authority"
 )
@@ -74,9 +73,8 @@ func TestGateApplianceCommandIsPure(t *testing.T) {
 		t.Errorf("destructive commands are %v, want exactly [activate]", destructive)
 	}
 
-	if activation.CanApply() {
-		t.Error("activation.CanApply() became true")
-	}
+	// Adding a device manifest must not create a route to changing a host.
+	assertActivationRemainsGated(t, "adding an appliance manifest")
 }
 
 // There must be no way to rewrite the manifest from the command line. A device

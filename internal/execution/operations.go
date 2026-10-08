@@ -433,10 +433,29 @@ type OpDNSApply struct {
 	PreviousServers []string `json:"previous_servers,omitempty"`
 }
 
-func (o OpDNSApply) Kind() OpKind                   { return OpKindDNSApply }
-func (o OpDNSApply) Target() string                 { return strings.Join(o.Servers, ",") }
-func (o OpDNSApply) Subsystem() string              { return "dns" }
-func (o OpDNSApply) RequiredCapabilities() []string { return nil }
+func (o OpDNSApply) Kind() OpKind      { return OpKindDNSApply }
+func (o OpDNSApply) Target() string    { return strings.Join(o.Servers, ",") }
+func (o OpDNSApply) Subsystem() string { return "dns" }
+
+// RequiredCapabilities declares that applying resolvers needs a DNS service.
+//
+// # Why this operation claims a capability it cannot itself provide
+//
+// A resolver set is only in force if something is listening and answering
+// queries with it. Renaming the host's resolver file, or asserting a set in a
+// plan, changes nothing on its own.
+//
+// THN's production execution layer implements no DNS service: it neither
+// generates a resolver configuration nor starts one. This operation therefore
+// carries a capability requirement that no current driver can satisfy, and the
+// executor refuses the plan before the backup phase rather than reporting a
+// successful apply for a subsystem that was never brought up.
+//
+// The alternative — executing it as a no-op and reporting success — is the one
+// thing this must never do. A gateway whose apply log says "committed" while
+// its DNS does not resolve is worse than one that refused.
+func (o OpDNSApply) RequiredCapabilities() []string { return []string{"dns"} }
+
 func (o OpDNSApply) RollbackOp() Operation {
 	if len(o.PreviousServers) > 0 {
 		return OpDNSApply{Servers: o.PreviousServers}

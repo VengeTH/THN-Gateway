@@ -123,13 +123,20 @@ func TestGateActivateRefusesWithTheExpectedSentences(t *testing.T) {
 	out := errOut.String()
 	for _, want := range []string{
 		"activation refused",
-		"not physically deployed",
-		"No approved physical deployment detected",
+		"Nothing was changed",
+		"Blocking gates",
+		"--confirm-present",
 		"Current network remains untouched",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the refusal is missing %q:\n%s", want, out)
 		}
+	}
+
+	// A blocked readiness report must say what would unblock it. An operator
+	// told only "BLOCKED" has to work that out unaided.
+	if !strings.Contains(out, "To proceed") {
+		t.Errorf("the refusal gives no next step:\n%s", out)
 	}
 }
 
@@ -145,10 +152,9 @@ func TestGateActivateAlwaysSaysTheNetworkIsUntouched(t *testing.T) {
 	}
 
 	// The two branches are genuinely different sentences. A box that is not
-	// a gateway must not be told about apply paths, and a gateway must not
-	// be told it is not deployed.
-	if r := deploymentReason(deployment.Status{Deployed: true}); !strings.Contains(r, "no apply path") {
-		t.Errorf("a deployed host is not told the limitation is the software: %q", r)
+	// a gateway must not be told it is a gateway.
+	if r := deploymentReason(deployment.Status{Deployed: true}); strings.Contains(r, "No approved physical deployment") {
+		t.Errorf("a deployed host is told it is not deployed: %q", r)
 	}
 	notDeployed := deployment.Status{Reason: "the uplink is not attached"}
 	if r := deploymentReason(notDeployed); !strings.Contains(r, "No approved physical deployment") {
@@ -157,9 +163,10 @@ func TestGateActivateAlwaysSaysTheNetworkIsUntouched(t *testing.T) {
 }
 
 func TestGateActivateDidNotBecomeApplyable(t *testing.T) {
-	if activation.CanApply() {
-		t.Fatal("activation.CanApply() became true; phases 1-3 do not apply anything")
-	}
+	// Phases 1-3 observe, plan and validate. None of them may make this host
+	// changeable, and the build containing an apply path must not make it
+	// changeable either without presence and authorization.
+	assertActivationRemainsGated(t, "adding phases 1-3")
 
 	implemented := activation.ImplementedStages()
 	for _, s := range activation.UnsupportedStages() {

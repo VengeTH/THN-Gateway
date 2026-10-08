@@ -17,13 +17,20 @@ type ManagementSafetyReport struct {
 	DefaultRoutePreserved bool     `json:"default_route_preserved"`
 	Findings              []string `json:"findings,omitempty"`
 	Reason                string   `json:"reason,omitempty"`
+
+	// Steps are the operations the assessment was made over.
+	//
+	// They are carried so the verdict is auditable: an operator who is told
+	// "safe" can see exactly which operations were considered, rather than
+	// having to trust that the assessor looked at the right plan.
+	Steps []string `json:"steps,omitempty"`
 }
 
 // ManagementSafetyInput carries observed facts about remote management paths.
 type ManagementSafetyInput struct {
-	// TailscalePresent indicates tailscale0 exists on the host.
+	// TailscalePresent indicates an overlay tunnel exists on the host.
 	TailscalePresent bool
-	// TailscaleInterface is the name of the Tailscale interface (typically "tailscale0").
+	// TailscaleInterface is the name of that tunnel interface.
 	TailscaleInterface string
 	// ActiveSSHIP is the local address carrying an active SSH session.
 	ActiveSSHIP string
@@ -107,22 +114,31 @@ func EvaluateManagementSafety(in ManagementSafetyInput) ManagementSafetyReport {
 				}
 			}
 		}
+	}
 
-		if in.ActiveSSHIP != "" {
-			if removed, ok := in.RemovedAddresses[in.ActiveSSHInterface]; ok {
-				targetAddr, err := netip.ParseAddr(in.ActiveSSHIP)
-				if err == nil {
-					for _, rem := range removed {
-						prefix, err := netip.ParsePrefix(rem)
-						if err == nil && prefix.Addr() == targetAddr {
-							rep.SSHPathPreserved = false
-							rep.Safe = false
-							msg := fmt.Sprintf("plan removes the active SSH management IP %s on interface %s", in.ActiveSSHIP, in.ActiveSSHInterface)
-							rep.Findings = append(rep.Findings, msg)
-							if rep.Reason == "" {
-								rep.Reason = msg
-							}
-						}
+	// The address the session arrives on is checked across every interface
+	// the plan removes addresses from, not only the one named as the SSH
+	// interface. A plan can delete an address from a link the caller did not
+	// think carried the session, and matching by interface alone would miss
+	// exactly the case where the two disagree.
+	if in.ActiveSSHIP != "" {
+		targetAddr, err := netip.ParseAddr(in.ActiveSSHIP)
+		if err == nil {
+			for iface, removed := range in.RemovedAddresses {
+				for _, rem := range removed {
+					prefix, perr := netip.ParsePrefix(rem)
+					if perr != nil {
+						continue
+					}
+					if prefix.Addr() != targetAddr {
+						continue
+					}
+					rep.SSHPathPreserved = false
+					rep.Safe = false
+					msg := fmt.Sprintf("plan removes the active SSH management IP %s from interface %s", in.ActiveSSHIP, iface)
+					rep.Findings = append(rep.Findings, msg)
+					if rep.Reason == "" {
+						rep.Reason = msg
 					}
 				}
 			}

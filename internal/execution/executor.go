@@ -209,7 +209,7 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 
 	// 2. BACKUP PHASE
 	res.Phases = append(res.Phases, string(StateBackup))
-	scope := deriveBackupScope(ops, opts.Observed)
+	scope := BackupScopeFor(ops, opts.Observed)
 	baselineSnapshot, err := driver.CaptureState(ctx, scope)
 	if err != nil {
 		res.FinalState = StateBlocked
@@ -473,7 +473,17 @@ func (e *Executor) rollback(
 	return res, cause
 }
 
-func deriveBackupScope(ops []Operation, obs diff.Observed) BackupScope {
+// BackupScopeFor derives the set of state that must be captured before ops are
+// applied.
+//
+// # Why it is exported
+//
+// The activation gate that asks "is this transaction recoverable?" has to ask
+// it about the SAME scope the executor will use. Deriving the scope twice —
+// once here for the gate and once in the executor for the backup — would
+// produce two answers, and a gate that certified a narrower scope than the
+// executor captures would certify a rollback that restores nothing.
+func BackupScopeFor(ops []Operation, obs diff.Observed) BackupScope {
 	scope := BackupScope{
 		Sysctls: []string{"net.ipv4.ip_forward"},
 		Routes:  true,

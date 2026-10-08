@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/venth/thn-gateway/internal/activation"
 	"github.com/venth/thn-gateway/internal/config"
 	"github.com/venth/thn-gateway/internal/desired"
 	"github.com/venth/thn-gateway/internal/diff"
@@ -421,22 +420,16 @@ func TestPlanIsDeterministicAcrossRepeatedCLI(t *testing.T) {
 // TestM73ActivationRemainsDisabled is the safety gate for this milestone.
 //
 // M7.3 describes DHCP and DNS behaviour. It must not, by any route, become a
-// path that starts a service, binds a port or changes host networking. This
-// asserts the three invariants that make that impossible.
+// path that starts a service, binds a port or changes host networking.
 func TestM73ActivationRemainsDisabled(t *testing.T) {
-	if activation.CanApply() {
-		t.Error("activation.CanApply() == true; M7.3 must not enable activation")
-	}
+	assertActivationRemainsGated(t, "adding DHCP and DNS intent")
 
-	for _, s := range activation.ImplementedStages() {
-		if s == activation.StageApply {
-			t.Error("ImplementedStages() includes apply; M7.3 must not enable apply")
-		}
-	}
-
-	// The production driver must also refuse, independently of the gate above.
-	if execution.NewProductionDriver().CanApply() {
-		t.Error("ProductionDriver.CanApply() == true; M7.3 must not enable apply")
+	// Describing a service and starting one are different things. A plan may
+	// carry DHCP and DNS intent steps; the execution layer must refuse to apply
+	// them rather than record an apply that did not happen.
+	if len(execution.OpDNSApply{Servers: []string{"1.1.1.1"}}.RequiredCapabilities()) == 0 {
+		t.Error("OpDNSApply requires no capability, so the executor cannot refuse it " +
+			"before taking a baseline")
 	}
 }
 

@@ -184,8 +184,14 @@ func (d *LinuxDriver) Execute(ctx context.Context, op Operation) error {
 		return err
 
 	case OpDNSApply:
-		// DNS changes in lab environment
-		return nil
+		// Refused, not ignored. See the identical case in driver_production.go.
+		//
+		// The lab has the same limitation as production — no DNS service is
+		// implemented — and a lab that silently accepted this would let a
+		// "commit" in CI stand in for a behaviour the real host would not have.
+		return fmt.Errorf("%w: applying resolvers %s requires a DNS service, "+
+			"which THN does not implement in any environment",
+			ErrCapabilityMissing, strings.Join(o.Servers, ", "))
 
 	default:
 		return fmt.Errorf("unknown operation type: %T", op)

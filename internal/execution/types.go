@@ -41,8 +41,14 @@ var (
 type ExecutionState string
 
 const (
-	StateUninitialised        ExecutionState = "UNINITIALISED"
-	StatePrepare              ExecutionState = "PREPARE"
+	StateUninitialised ExecutionState = "UNINITIALISED"
+	StatePrepare       ExecutionState = "PREPARE"
+
+	// StatePrepared means the transaction was authorized and prepared but
+	// nothing was applied. It is the terminal state of a dry run, and is
+	// distinct from StateCommitted: nothing about the host changed.
+	StatePrepared ExecutionState = "PREPARED"
+
 	StateBackup               ExecutionState = "BACKUP"
 	StateValidate             ExecutionState = "VALIDATE"
 	StateApply                ExecutionState = "APPLY"

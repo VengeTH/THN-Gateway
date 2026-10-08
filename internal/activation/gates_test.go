@@ -22,6 +22,7 @@ package activation
 // ignore it.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,7 @@ func satisfiedInput() GateInput {
 		DigestsFresh:         true,
 		ManagementSafe:       true,
 		RecoveryOK:           true,
+		SubsystemsExecutable: true,
 
 		PresenceConfirmed: true,
 	}
@@ -86,6 +88,7 @@ var allProductionGates = []gateCase{
 	{"digests-fresh", "DigestsFresh"},
 	{"management-safety", "ManagementSafe"},
 	{"recoverable", "RecoveryOK"},
+	{"subsystems-executable", "SubsystemsExecutable"},
 	{"physical-presence", "PresenceConfirmed"},
 }
 
@@ -117,6 +120,9 @@ func unsatisfiable(in GateInput, field string) GateInput {
 		in.ManagementProblem = "management path not proven safe"
 	case "RecoveryOK":
 		in.RecoveryOK = false
+	case "SubsystemsExecutable":
+		in.SubsystemsExecutable = false
+		in.SubsystemsProblem = "a required subsystem has no runtime implementation"
 	case "PresenceConfirmed":
 		in.PresenceConfirmed = false
 	}
@@ -220,40 +226,47 @@ func TestEveryGateCanBlock(t *testing.T) {
 	}
 }
 
-// TestApplyPathGateAlwaysBlocks pins the gate that cannot be satisfied here.
-func TestApplyPathGateAlwaysBlocks(t *testing.T) {
-	if CanApply() {
-		t.Fatal("CanApply() is true; the apply-path gate is expected to block unconditionally")
+// TestApplyPathGateReflectsTheBuild pins the apply-path gate to a statement
+// about the build and nothing else.
+//
+// It is driven by CanApply() rather than by a GateInput field, so it is the one
+// gate a test cannot vary per input. That makes it the gate most worth pinning
+// precisely: it must report the truth about the binary, and it must never be a
+// place where an operator's input could make activation look possible.
+func TestApplyPathGateReflectsTheBuild(t *testing.T) {
+	if !CanApply() {
+		t.Fatal("CanApply() is false; this build contains a production apply path " +
+			"and the gate must say so, or `thn readiness` reports a build problem " +
+			"that does not exist")
 	}
 
 	got := Evaluate(satisfiedInput())
 
-	if got.AllSatisfied {
-		t.Fatal("Evaluate reported every gate satisfied with no apply path compiled in")
+	// The gate reads CanApply() and nothing in GateInput, so it must be
+	// satisfied here and must be absent from Blocking.
+	if containsString(got.Blocking, "apply-path-available") {
+		t.Errorf("Blocking = %v; apply-path-available must not block in a build that has one",
+			got.Blocking)
 	}
-	if !containsString(got.Blocking, "apply-path-available") {
-		t.Errorf("Blocking = %v, want it to name apply-path-available", got.Blocking)
+	if !got.AllSatisfied {
+		t.Errorf("with every gate satisfied, %v still blocks; EvaluateProduction is the "+
+			"production contract and every remaining gate must be able to hold",
+			got.Blocking)
 	}
 
-	// With every other gate met, the apply path alone must be what blocks.
-	// That is the single most important property of this build, and if the
-	// table above stopped describing Evaluate this is where it would show.
-	var others []string
-	for _, b := range got.Blocking {
-		if b != "apply-path-available" {
-			others = append(others, b)
-		}
-	}
-	if len(others) != 0 {
-		t.Errorf("with every other gate satisfied, %v still blocked", others)
-	}
+	// A satisfied gate set is evidence, not permission. GateResult carries no
+	// method that authorizes anything, and Machine.Activate separately requires
+	// a bound applier that reports itself authorized — asserted in
+	// dryrun_test.go. This comment marks the boundary so a future reader does
+	// not mistake AllSatisfied for a green light.
 }
 
 // TestPhysicalPresenceIsSeparateFromApplyPath documents a deliberate decision.
 //
 // Confirming presence records a flag and surfaces it, but it cannot make
-// activation possible. An operator standing in the room is still refused,
-// because the apply path does not exist.
+// activation possible on its own. An operator standing in the room has
+// satisfied one gate of twelve, and a machine is still refused unless the rest
+// hold and an applier is bound.
 func TestPhysicalPresenceIsSeparateFromApplyPath(t *testing.T) {
 	m := NewMachine(StateDevelopment)
 	if m.PresenceConfirmed() {
@@ -268,16 +281,15 @@ func TestPhysicalPresenceIsSeparateFromApplyPath(t *testing.T) {
 		t.Error("the report does not carry the confirmation")
 	}
 
-	// Presence alone leaves the apply-path gate blocking.
-	in := satisfiedInput()
-	in.PresenceConfirmed = true
-	got := Evaluate(in)
-
-	if got.AllSatisfied {
-		t.Error("every gate reports satisfied; the apply path is still missing")
+	// Presence on a satisfied gate set still does not authorize: the machine
+	// has no applier bound, so Activate refuses before it reaches a driver.
+	m.SetGates(Evaluate(satisfiedInput()))
+	err := m.Activate(Context{Generation: 1, PlanID: "plan-1", RequestedBy: "test"})
+	if err == nil {
+		t.Fatal("Activate succeeded on a machine with no applier bound")
 	}
-	if len(got.Blocking) != 1 || got.Blocking[0] != "apply-path-available" {
-		t.Errorf("Blocking = %v, want only apply-path-available", got.Blocking)
+	if !errors.Is(err, ErrNoApplyPath) {
+		t.Errorf("error = %v, want ErrNoApplyPath", err)
 	}
 }
 
@@ -288,9 +300,15 @@ func TestPhysicalPresenceIsSeparateFromApplyPath(t *testing.T) {
 // reason would mean one gate is reporting another's problem.
 func TestGateReasonsAreDistinct(t *testing.T) {
 	got := Evaluate(GateInput{
-		// PlanValidated is left false so every gate blocks. It carries no
-		// Problem field of its own, so its reason is the fixed explanatory
-		// string rather than caller text.
+		// PlanValidated is left false so every host- and document-dependent
+		// gate blocks. It carries no Problem field of its own, so its reason
+		// is the fixed explanatory string rather than caller text.
+		//
+		// apply-path-available is the one gate a GateInput cannot block: it
+		// reads CanApply(), which this build answers honestly. It is excluded
+		// from the "every gate blocks" assertion below rather than forced
+		// false, because forcing it would be asserting something untrue about
+		// the binary in order to make a test tidy.
 		ConfigProblem: "dhcp.ranges[0].end is outside the LAN prefix",
 		WAN: RoleGate{
 			Role:     "wan",
@@ -303,11 +321,18 @@ func TestGateReasonsAreDistinct(t *testing.T) {
 			Reason:   "role lan is not assigned; observed: eno1, eno2",
 		},
 		RecoveryProblem:   "the prior configuration cannot be reconstructed",
+		SubsystemsProblem: "dhcp is requested but THN implements no DHCP server",
 		PresenceConfirmed: false,
 	})
 
 	seen := map[string]string{}
 	for _, g := range got.Gates {
+		if g.Name == "apply-path-available" {
+			if !g.Satisfied {
+				t.Error("apply-path-available reports unsatisfied in a build that has an apply path")
+			}
+			continue
+		}
 		if g.Satisfied {
 			t.Errorf("gate %q reports satisfied but should not", g.Name)
 		}
@@ -321,8 +346,9 @@ func TestGateReasonsAreDistinct(t *testing.T) {
 		seen[g.Reason] = g.Name
 	}
 
-	if len(got.Blocking) != len(allGates) {
-		t.Errorf("Blocking = %v, want all %d gates named", got.Blocking, len(allGates))
+	if len(got.Blocking) != len(allGates)-1 {
+		t.Errorf("Blocking = %v, want all %d gate-dependent gates named",
+			got.Blocking, len(allGates)-1)
 	}
 }
 
