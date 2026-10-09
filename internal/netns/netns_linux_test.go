@@ -433,19 +433,14 @@ func renderedCommand(t *testing.T, script string) (string, []string) {
 			continue
 		}
 
-		fields := strings.Fields(trimmed)
-		// tc qdisc replace dev <iface> root <kind> [args...]
-		kindIdx := 5
-		if len(fields) > 5 && fields[5] == "root" {
-			kindIdx = 6
-		}
-		if len(fields) <= kindIdx {
+		kind, args, ok := renderedArgs(trimmed)
+		if !ok {
 			t.Fatalf("rendered command is too short to be valid: %q", trimmed)
 		}
-		if fields[kindIdx] != "cake" && fields[kindIdx] != "fq_codel" {
+		if kind != "cake" && kind != "fq_codel" {
 			t.Fatalf("unexpected algorithm in %q", trimmed)
 		}
-		return trimmed, fields[kindIdx+1:]
+		return trimmed, args
 	}
 
 	t.Fatal("the rendered script contains no tc command")
@@ -456,6 +451,11 @@ func renderedCommand(t *testing.T, script string) (string, []string) {
 //
 // The namespace has one dummy interface, so an interface-targeted lookup is
 // how a caller picks which direction it is about to exercise.
+//
+// The split is delegated to renderedArgs rather than reimplemented. It used to
+// index the fields itself and got the offset wrong, passing the algorithm
+// through as an argument; ApplyCake then added its own, and the kernel rejected
+// the doubled token. See TestRenderedArgsDoNotRepeatTheAlgorithm.
 func renderedCommandFor(t *testing.T, script, iface string) (string, []string) {
 	t.Helper()
 
@@ -465,8 +465,15 @@ func renderedCommandFor(t *testing.T, script, iface string) (string, []string) {
 		if !strings.HasPrefix(trimmed, prefix) {
 			continue
 		}
-		fields := strings.Fields(trimmed)
-		return trimmed, fields[6:]
+
+		kind, args, ok := renderedArgs(trimmed)
+		if !ok {
+			t.Fatalf("rendered command for %s is too short to be valid: %q", iface, trimmed)
+		}
+		if kind != "cake" && kind != "fq_codel" {
+			t.Fatalf("unexpected algorithm in %q", trimmed)
+		}
+		return trimmed, args
 	}
 
 	t.Fatalf("the rendered script contains no command for %s:\n%s", iface, script)

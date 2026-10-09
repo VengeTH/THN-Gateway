@@ -3,10 +3,12 @@ package netns_test
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/VengeTH/THN-Gateway/internal/netns"
 	"github.com/VengeTH/THN-Gateway/internal/qos"
+	qostc "github.com/VengeTH/THN-Gateway/internal/qos/tc"
 )
 
 // TestAvailableIsHonestOnEveryPlatform runs everywhere, including on the
@@ -130,5 +132,93 @@ func TestAvailabilityIsUsableWithoutAProbe(t *testing.T) {
 	}
 	if sel.Algorithm == qos.AlgorithmFqCodel {
 		t.Error("nothing is available, so a fallback cannot be selected")
+	}
+}
+
+// renderedArgs splits a rendered `tc qdisc replace` line into the algorithm and
+// the arguments that follow it.
+//
+// It lives here rather than in netns_linux_test.go so it can be tested on every
+// platform. It is pure string handling with no dependency on a namespace, a
+// kernel, or root, so gating it behind //go:build linux meant the one piece of
+// logic that can silently corrupt every kernel-facing test below was untested
+// everywhere it is actually developed.
+//
+// The helpers that call it must not recompute this offset themselves. There
+// were two copies, and the per-interface copy drifted by one field: it returned
+// fields[6:], which is the algorithm itself. The namespace helpers prepend the
+// kind when they build the command, so the kernel was handed
+//
+//	tc qdisc replace dev thn0 root cake cake bandwidth 22Mbit ...
+//
+// and refused it with `What is "cake"?`. The renderer was correct and had been
+// all along; the harness corrupted the command on its way to the kernel. That
+// failure surfaced only on a privileged Linux runner, on one test, and named a
+// component that had nothing wrong with it.
+func renderedArgs(line string) (kind string, args []string, ok bool) {
+	fields := strings.Fields(line)
+	// tc qdisc replace dev <iface> root <kind> [args...]
+	kindIdx := 5
+	if len(fields) > 5 && fields[5] == "root" {
+		kindIdx = 6
+	}
+	if len(fields) <= kindIdx {
+		return "", nil, false
+	}
+	return fields[kindIdx], fields[kindIdx+1:], true
+}
+
+// TestRenderedArgsDoNotRepeatTheAlgorithm is the guard on that drift, and it
+// runs on every platform rather than only where a namespace can be created.
+//
+// The check is stated as the command the kernel would receive, because that is
+// the fact that matters: tc parses one algorithm token after `root` and treats
+// a second one as an unknown option.
+func TestRenderedArgsDoNotRepeatTheAlgorithm(t *testing.T) {
+	p := qos.Default()
+	p.Enabled = true
+	p.Interface = "wan0"
+	p.Algorithm = qos.AlgorithmCake
+	p.MTU = 1500
+	p.Limits = qos.DefaultLimits()
+	p = p.WithBandwidth(100_000, 20_000)
+
+	script := qostc.Render(p, qos.Selection{
+		Algorithm: qos.AlgorithmCake, Requested: qos.AlgorithmCake, Available: true,
+	}, "wan0", "lan0")
+
+	var checked int
+	for _, line := range strings.Split(script, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "tc qdisc replace dev ") {
+			continue
+		}
+		checked++
+
+		kind, args, ok := renderedArgs(trimmed)
+		if !ok {
+			t.Fatalf("rendered command is too short to be valid: %q", trimmed)
+		}
+		if kind != "cake" && kind != "fq_codel" {
+			t.Fatalf("unexpected algorithm in %q", trimmed)
+		}
+
+		// What ApplyCake would actually execute.
+		full := append([]string{"qdisc", "replace", "dev", "thn0", "root", kind}, args...)
+		occurrences := 0
+		for _, field := range full {
+			if field == kind {
+				occurrences++
+			}
+		}
+		if occurrences != 1 {
+			t.Errorf("tc would be given the algorithm %d times in %q; "+
+				"it reads one token after root and calls a second one an unknown option",
+				occurrences, strings.Join(full, " "))
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("the rendered script contains no tc command, so nothing was checked")
 	}
 }
