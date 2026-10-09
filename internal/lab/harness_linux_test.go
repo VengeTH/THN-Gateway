@@ -437,6 +437,9 @@ func (h *harness) buildTopology() {
 		relaxPathFiltering(h.ns[name])
 	}
 
+	// Ensure gateway interfaces start with default qdiscs and no residual foreign state
+	h.resetGatewayQDiscs()
+
 	h.assertTopologyMatches()
 }
 
@@ -525,6 +528,8 @@ func (h *harness) teardown() {
 		s.shutdown()
 	}
 
+	h.resetGatewayQDiscs()
+
 	for _, name := range h.top.Namespaces() {
 		if ns, ok := h.ns[name]; ok {
 			if err := ns.Close(); err != nil {
@@ -543,6 +548,15 @@ func (h *harness) teardown() {
 				h.t.Errorf("lab namespace %s survived teardown; clear it with: ip netns delete %s", name, name)
 			}
 		}
+	}
+}
+
+// resetGatewayQDiscs deletes any custom root qdiscs on the gateway WAN and LAN interfaces,
+// resetting them to the kernel default (noqueue on veth).
+func (h *harness) resetGatewayQDiscs() {
+	if gw, ok := h.ns[GatewayNamespace]; ok {
+		_, _ = gw.RunTC("qdisc", "del", "dev", GatewayWANInterface, "root")
+		_, _ = gw.RunTC("qdisc", "del", "dev", GatewayLANInterface, "root")
 	}
 }
 

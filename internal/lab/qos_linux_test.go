@@ -193,8 +193,17 @@ func TestQoSScenarioBDownloadCap(t *testing.T) {
 
 	applyQoSPlan(t, h, qosCfg)
 
+	// Allow WAN to reach the download test sink on Client A through the gateway
+	_, _, _ = h.runners[GatewayNamespace].Run(context.Background(),
+		"nft", "add", "rule", "inet", "thn", "forward",
+		"iifname", GatewayWANInterface, "oifname", GatewayLANInterface,
+		"ip", "daddr", ClientIP, "tcp", "dport", "18091", "accept")
+
 	sink, reportChan := h.startTrafficSink(ClientNamespace, clientEndpoint, 3000)
 	defer sink.shutdown()
+
+	// Readiness sync: ensure the client listener on port 18091 is active and accepting connections from WAN
+	h.waitForListener(h.ns[TargetNamespace], clientEndpoint)
 
 	// Stream sustained traffic from Target to Client A
 	report, err := h.streamTraffic(TargetNamespace, clientEndpoint, 1000)
@@ -551,6 +560,9 @@ func TestQoSRollbackRestoresBaseline(t *testing.T) {
 		t.Fatalf("connectivity broken after QoS apply: %s", probe.Error)
 	}
 
+	// Reset custom qdiscs to default on gateway interfaces so rollback fixture starts from clean baseline
+	h.resetGatewayQDiscs()
+
 	// Now run a sabotaged transaction to trigger compensating rollback
 	sabotaged := h.sabotagedQoS()
 	obs, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)
@@ -748,6 +760,9 @@ func TestQoSFailureInjectionAndRollback(t *testing.T) {
 	}
 
 	applyQoSPlan(t, h, qosCfg)
+
+	// Reset custom qdiscs to default on gateway interfaces so rollback fixture starts from clean baseline
+	h.resetGatewayQDiscs()
 
 	sabotaged := h.sabotagedQoS()
 	obs, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)

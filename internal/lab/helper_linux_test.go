@@ -287,8 +287,19 @@ func runTrafficStreamHelper(t *testing.T, args []string) {
 	}
 
 	var rep StreamReport
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", endpoint, helperDialTimeout)
+	var conn net.Conn
+	dialDeadline := time.Now().Add(5 * time.Second)
+	backoff := 50 * time.Millisecond
+	for time.Now().Before(dialDeadline) {
+		conn, err = net.DialTimeout("tcp", endpoint, 500*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(backoff)
+		if backoff < 200*time.Millisecond {
+			backoff += 50 * time.Millisecond
+		}
+	}
 	if err != nil {
 		rep.Error = err.Error()
 		emitHelperReport(rep)
@@ -301,6 +312,7 @@ func runTrafficStreamHelper(t *testing.T, args []string) {
 		chunk[i] = byte(i % 256)
 	}
 
+	start := time.Now()
 	deadline := start.Add(time.Duration(durationMS) * time.Millisecond)
 	_ = conn.SetDeadline(deadline.Add(helperDialTimeout))
 
