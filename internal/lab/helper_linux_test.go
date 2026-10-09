@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -309,6 +311,9 @@ func runTrafficStreamHelper(t *testing.T, args []string) {
 			total += uint64(n)
 		}
 		if err != nil {
+			if total == 0 {
+				rep.Error = err.Error()
+			}
 			break
 		}
 	}
@@ -326,12 +331,16 @@ func runTrafficStreamHelper(t *testing.T, args []string) {
 // runTrafficSinkHelper listens on an address, accepts connections, and sinks data for duration_ms.
 func runTrafficSinkHelper(t *testing.T, args []string) {
 	if len(args) < 3 {
-		t.Fatalf("traffic-sink takes <listen_addr:port> <duration_ms>, got %v", args)
+		t.Fatalf("traffic-sink takes <listen_addr:port> <duration_ms> [stop_file], got %v", args)
 	}
 	endpoint := args[1]
 	durationMS, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil || durationMS <= 0 {
 		durationMS = 2000
+	}
+	stopPath := ""
+	if len(args) >= 4 {
+		stopPath = args[3]
 	}
 
 	var rep StreamReport
@@ -343,36 +352,92 @@ func runTrafficSinkHelper(t *testing.T, args []string) {
 	}
 	defer ln.Close()
 
+	tcpLn := ln.(*net.TCPListener)
 	deadline := time.Now().Add(time.Duration(durationMS) * time.Millisecond)
-	_ = ln.(*net.TCPListener).SetDeadline(deadline)
 
-	conn, err := ln.Accept()
-	if err != nil {
-		rep.Error = err.Error()
-		emitHelperReport(rep)
-		return
-	}
-	defer conn.Close()
-
-	if tcp, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
-		rep.RemoteAddress = tcp.IP.String()
-	}
-
-	start := time.Now()
-	buf := make([]byte, 32768)
+	var mu sync.Mutex
 	var total uint64
+	var remoteAddr string
+	var dataStart time.Time
+	var wg sync.WaitGroup
+
 	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, err := conn.Read(buf)
-		if n > 0 {
-			total += uint64(n)
-		}
-		if err != nil {
+		if stopPath != "" && fileExists(stopPath) {
 			break
 		}
+		_ = tcpLn.SetDeadline(time.Now().Add(100 * time.Millisecond))
+		conn, err := tcpLn.Accept()
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			break
+		}
+
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			defer c.Close()
+
+			remote := ""
+			if tcp, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+				remote = tcp.IP.String()
+			}
+
+			buf := make([]byte, 32768)
+			_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, err := c.Read(buf)
+			if n > 0 {
+				// Handle readiness probe without consuming the data stream
+				if strings.Contains(string(buf[:n]), "thn-m62-ready") {
+					_ = c.SetWriteDeadline(time.Now().Add(helperDialTimeout))
+					_, _ = fmt.Fprintln(c, remote)
+					return
+				}
+				mu.Lock()
+				if dataStart.IsZero() {
+					dataStart = time.Now()
+				}
+				total += uint64(n)
+				if remoteAddr == "" {
+					remoteAddr = remote
+				}
+				mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+
+			for time.Now().Before(deadline) {
+				if stopPath != "" && fileExists(stopPath) {
+					break
+				}
+				_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+				n, err := c.Read(buf)
+				if n > 0 {
+					mu.Lock()
+					total += uint64(n)
+					mu.Unlock()
+				}
+				if err != nil {
+					break
+				}
+			}
+		}(conn)
 	}
 
-	elapsed := time.Since(start)
+	_ = tcpLn.Close()
+	wg.Wait()
+
+	var elapsed time.Duration
+	if !dataStart.IsZero() {
+		elapsed = time.Since(dataStart)
+	} else {
+		elapsed = time.Duration(durationMS) * time.Millisecond
+	}
+
+	rep.RemoteAddress = remoteAddr
 	rep.BytesTransferred = total
 	rep.DurationMS = elapsed.Milliseconds()
 	if elapsed.Seconds() > 0 {

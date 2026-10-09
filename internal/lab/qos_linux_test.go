@@ -124,8 +124,6 @@ func applyQoSPlan(t *testing.T, h *harness, qosCfg config.QoSConfig) *execution.
 func TestQoSScenarioAUploadCap(t *testing.T) {
 	h := newHarness(t)
 	targetEndpoint := fmt.Sprintf("%s:18090", TargetIP)
-	sink, reportChan := h.startTrafficSink(TargetNamespace, targetEndpoint, 1500)
-	defer sink.shutdown()
 
 	qosCfg := config.QoSConfig{
 		Enabled:         true,
@@ -145,6 +143,9 @@ func TestQoSScenarioAUploadCap(t *testing.T) {
 	}
 
 	applyQoSPlan(t, h, qosCfg)
+
+	sink, reportChan := h.startTrafficSink(TargetNamespace, targetEndpoint, 3000)
+	defer sink.shutdown()
 
 	// Stream sustained traffic from Client A to the Target
 	report, err := h.streamTraffic(ClientNamespace, targetEndpoint, 1000)
@@ -162,6 +163,7 @@ func TestQoSScenarioAUploadCap(t *testing.T) {
 		t.Errorf("Client A upload throughput %.2f Mbps was too low", report.ThroughputMbps)
 	}
 
+	sink.shutdown()
 	sinkReport := <-reportChan
 	t.Logf("Target sink observed: %.2f Mbps from %s", sinkReport.ThroughputMbps, sinkReport.RemoteAddress)
 }
@@ -171,8 +173,6 @@ func TestQoSScenarioAUploadCap(t *testing.T) {
 func TestQoSScenarioBDownloadCap(t *testing.T) {
 	h := newHarness(t)
 	clientEndpoint := fmt.Sprintf("%s:18091", ClientIP)
-	sink, reportChan := h.startTrafficSink(ClientNamespace, clientEndpoint, 1500)
-	defer sink.shutdown()
 
 	qosCfg := config.QoSConfig{
 		Enabled:         true,
@@ -193,6 +193,9 @@ func TestQoSScenarioBDownloadCap(t *testing.T) {
 
 	applyQoSPlan(t, h, qosCfg)
 
+	sink, reportChan := h.startTrafficSink(ClientNamespace, clientEndpoint, 3000)
+	defer sink.shutdown()
+
 	// Stream sustained traffic from Target to Client A
 	report, err := h.streamTraffic(TargetNamespace, clientEndpoint, 1000)
 	if err != nil {
@@ -205,6 +208,7 @@ func TestQoSScenarioBDownloadCap(t *testing.T) {
 		t.Errorf("Client A download throughput %.2f Mbps exceeded the 20 Mbps cap (+ tolerance)", report.ThroughputMbps)
 	}
 
+	sink.shutdown()
 	sinkReport := <-reportChan
 	t.Logf("Client A sink observed: %.2f Mbps", sinkReport.ThroughputMbps)
 }
@@ -319,11 +323,11 @@ func TestQoSScenarioDPriorityContention(t *testing.T) {
 	applyQoSPlan(t, h, qosCfg)
 
 	targetEndpointA := fmt.Sprintf("%s:18094", TargetIP)
-	sinkA, _ := h.startTrafficSink(TargetNamespace, targetEndpointA, 2000)
+	sinkA, _ := h.startTrafficSink(TargetNamespace, targetEndpointA, 3000)
 	defer sinkA.shutdown()
 
 	targetEndpointB := fmt.Sprintf("%s:18095", TargetIP)
-	sinkB, _ := h.startTrafficSink(TargetNamespace, targetEndpointB, 2000)
+	sinkB, _ := h.startTrafficSink(TargetNamespace, targetEndpointB, 3000)
 	defer sinkB.shutdown()
 
 	var repA, repB StreamReport
@@ -548,11 +552,11 @@ func TestQoSRollbackRestoresBaseline(t *testing.T) {
 	}
 
 	// Now run a sabotaged transaction to trigger compensating rollback
-	sabotaged := h.sabotaged()
-	_, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)
+	sabotaged := h.sabotagedQoS()
+	obs, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)
 
 	res, err := h.executor().ExecutePlan(context.Background(), plan, sabotaged, execution.ExecutionOptions{
-		Observed:    diff.Observed{WANName: GatewayWANInterface, LANName: GatewayLANInterface, Supported: true},
+		Observed:    obs,
 		Desired:     des,
 		Assignments: assignments,
 		Journal:     execution.NewMemoryJournalStore(),
@@ -603,11 +607,11 @@ func TestQoSScenarioEBetweenClientFairness(t *testing.T) {
 	applyQoSPlan(t, h, qosCfg)
 
 	targetEndpointA := fmt.Sprintf("%s:18100", TargetIP)
-	sinkA, _ := h.startTrafficSink(TargetNamespace, targetEndpointA, 2000)
+	sinkA, _ := h.startTrafficSink(TargetNamespace, targetEndpointA, 3000)
 	defer sinkA.shutdown()
 
 	targetEndpointB := fmt.Sprintf("%s:18101", TargetIP)
-	sinkB, _ := h.startTrafficSink(TargetNamespace, targetEndpointB, 2000)
+	sinkB, _ := h.startTrafficSink(TargetNamespace, targetEndpointB, 3000)
 	defer sinkB.shutdown()
 
 	// Client A opens multiple concurrent streams while Client B opens 1 single stream
@@ -743,11 +747,13 @@ func TestQoSFailureInjectionAndRollback(t *testing.T) {
 		},
 	}
 
-	sabotaged := h.sabotaged()
-	_, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)
+	applyQoSPlan(t, h, qosCfg)
+
+	sabotaged := h.sabotagedQoS()
+	obs, des, assignments, plan := h.buildQoSTopologyPlan(t, qosCfg)
 
 	res, err := h.executor().ExecutePlan(context.Background(), plan, sabotaged, execution.ExecutionOptions{
-		Observed:    diff.Observed{WANName: GatewayWANInterface, LANName: GatewayLANInterface, Supported: true},
+		Observed:    obs,
 		Desired:     des,
 		Assignments: assignments,
 		Journal:     execution.NewMemoryJournalStore(),

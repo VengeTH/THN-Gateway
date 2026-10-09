@@ -567,6 +567,19 @@ func (h *harness) sabotaged() execution.ExecutorDriver {
 	}
 }
 
+// sabotagedQoS returns a driver that fails a QoS operation during apply.
+//
+// In a QoS transaction on an already-functioning gateway, the QoS steps
+// (qdiscs, classes, filters) follow the firewall. Failing on a QoS filter
+// exercises compensating rollback of QoS without destroying baseline gateway
+// forwarding, proving that rollback cleans up QoS state cleanly.
+func (h *harness) sabotagedQoS() execution.ExecutorDriver {
+	return &sabotagingDriver{
+		ExecutorDriver: h.driver(),
+		failOn:         execution.OpKindTCFilterApply,
+	}
+}
+
 // sabotagingDriver fails one operation after it has observed the gateway.
 //
 // # Why the driver rather than a broken plan

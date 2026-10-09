@@ -275,16 +275,19 @@ func newHarnessWithTopology(t *testing.T, top Topology) *harness {
 func (h *harness) buildNamespaces() {
 	h.t.Helper()
 
-	for _, name := range h.top.Namespaces() {
-		// A namespace left behind by an interrupted run would otherwise make
-		// this one fail with an error that names neither the cause nor the fix.
+	// A namespace left behind by an interrupted run would otherwise make
+	// this one fail with an error that names neither the cause nor the fix.
+	// Clean up any known lab namespaces across both 1-client and 2-client topologies.
+	for _, name := range []string{GatewayNamespace, ClientNamespace, ClientBNamespace, TargetNamespace} {
 		if netns.Exists(name) {
 			h.t.Logf("removing leftover lab namespace %s from a previous run", name)
 			if err := netns.Remove(name); err != nil {
 				h.t.Logf("could not remove leftover namespace %s: %v", name, err)
 			}
 		}
+	}
 
+	for _, name := range h.top.Namespaces() {
 		ns, err := netns.Create(name)
 		if err != nil {
 			h.t.Fatalf("creating lab namespace %s: %v", name, err)
@@ -324,6 +327,11 @@ func relaxPathFiltering(ns *netns.Namespace) {
 	} {
 		if _, err := ns.Run("sysctl", "-w", key+"=0"); err != nil {
 			return
+		}
+	}
+	if links, err := ns.LinkNames(); err == nil {
+		for _, dev := range links {
+			_, _ = ns.Run("sysctl", "-w", "net.ipv4.conf."+dev+".rp_filter=0")
 		}
 	}
 }
@@ -424,6 +432,11 @@ func (h *harness) buildTopology() {
 		h.must(h.ns[r.Namespace].RouteAdd(r.Destination, r.Via, r.Device))
 	}
 
+	// Re-apply rp_filter disabling across all newly wired interfaces
+	for _, name := range h.top.Namespaces() {
+		relaxPathFiltering(h.ns[name])
+	}
+
 	h.assertTopologyMatches()
 }
 
@@ -522,10 +535,13 @@ func (h *harness) teardown() {
 
 	// netns.Remove as a second attempt, because Close only deletes a namespace
 	// it believes it created. A half-built lab has namespaces on disk that no
-	// Namespace value owns.
-	for _, name := range h.top.Namespaces() {
+	// Namespace value owns. Clean up all known lab namespaces to ensure no leftovers survive.
+	for _, name := range []string{GatewayNamespace, ClientNamespace, ClientBNamespace, TargetNamespace} {
 		if netns.Exists(name) {
-			h.t.Errorf("lab namespace %s survived teardown; clear it with: ip netns delete %s", name, name)
+			_ = netns.Remove(name)
+			if netns.Exists(name) {
+				h.t.Errorf("lab namespace %s survived teardown; clear it with: ip netns delete %s", name, name)
+			}
 		}
 	}
 }
@@ -1024,7 +1040,7 @@ func (h *harness) startTrafficSink(namespaceName, endpoint string, durationMS in
 	go func() {
 		defer close(srv.done)
 		out, err := ns.Run(testBinary, "-test.run=^"+helperTestName+"$",
-			"--", "traffic-sink", endpoint, fmt.Sprintf("%d", durationMS))
+			"--", "traffic-sink", endpoint, fmt.Sprintf("%d", durationMS), srv.stop)
 		if err != nil && !strings.Contains(out, helperMarker) {
 			h.t.Logf("traffic sink in %s exited: %v (out: %s)", namespaceName, err, out)
 		}
@@ -1065,6 +1081,9 @@ func (h *harness) streamTraffic(namespaceName, endpoint string, durationMS int) 
 	var rep StreamReport
 	if err := json.Unmarshal([]byte(line), &rep); err != nil {
 		return StreamReport{}, fmt.Errorf("unmarshaling stream report: %w (line: %s)", err, line)
+	}
+	if rep.Error != "" {
+		return rep, fmt.Errorf("stream traffic in %s failed: %s", namespaceName, rep.Error)
 	}
 	return rep, nil
 }
