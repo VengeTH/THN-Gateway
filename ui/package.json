@@ -2,6 +2,7 @@
   "name": "thn-ui",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "description": "Read-only management console for the THN gateway. The Go binary remains the only thing that knows anything; this renders what it says.",
   "scripts": {

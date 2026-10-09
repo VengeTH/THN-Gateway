@@ -1699,3 +1699,7 @@ M8 introduces the data model for multi-zone networking:
 - **M8 does NOT expose management to WAN.**
 - **M8 does NOT replace or weaken the existing activation safety system.**
 
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+
