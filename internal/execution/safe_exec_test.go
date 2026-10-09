@@ -149,3 +149,50 @@ func TestSafeExecAcceptsInspectionFlagsBeforeTheSubsystem(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeExecAcceptsReadOnlyTCQueries covers `tc qdisc show`, which is the
+// probe DetectCapabilities uses to decide whether tc exists at all.
+//
+// A listing names no root and no parent, so it states no discipline kind. The
+// validator nevertheless demanded one of every qdisc verb except delete, and
+// refused the probe. The refusal is invisible at the point it happens — the
+// probe simply records "tc unavailable" — and it reached an operator as
+// "iproute2 traffic control (tc) utility is unavailable", which names a
+// missing package rather than a command THN refused to let itself run. Every
+// QoS plan then blocked with that message on a host with a perfectly good tc,
+// which is how a validator bug came to be diagnosed as an absent dependency.
+func TestSafeExecAcceptsReadOnlyTCQueries(t *testing.T) {
+	permitted := [][]string{
+		{"qdisc", "show"},
+		{"qdisc", "show", "dev", "eth0"},
+		{"qdisc", "list"},
+		{"-j", "-s", "qdisc", "show", "dev", "eth0"},
+		{"class", "show", "dev", "eth0"},
+		{"filter", "show", "dev", "eth0"},
+	}
+	for _, args := range permitted {
+		if err := ValidateCommand("tc", args...); err != nil {
+			t.Errorf("ValidateCommand(tc, %v) failed: %v", args, err)
+		}
+	}
+}
+
+// TestSafeExecStillRequiresAKindWhenInstalling is the other half of that fix,
+// and the reason the fix is a narrowing rather than a removal.
+//
+// The kind requirement exists so `tc qdisc replace dev eth0 root` cannot reach
+// the kernel and leave the interface unshaped while reporting success. Exempting
+// the read-only verbs must not have relaxed the verbs that actually attach a
+// discipline.
+func TestSafeExecStillRequiresAKindWhenInstalling(t *testing.T) {
+	for _, args := range [][]string{
+		{"qdisc", "add", "dev", "eth0", "root"},
+		{"qdisc", "replace", "dev", "eth0", "root"},
+		{"qdisc", "change", "dev", "eth0", "root"},
+		{"qdisc", "add", "dev", "eth0", "parent", "1:"},
+	} {
+		if err := ValidateCommand("tc", args...); err == nil {
+			t.Errorf("ValidateCommand(tc, %v) = nil, want denial for an install naming no kind", args)
+		}
+	}
+}

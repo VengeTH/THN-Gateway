@@ -228,6 +228,17 @@ func validateSysctlArgs(args []string) error {
 // build their own arguments; this function is the backstop for the case where
 // one of those is wrong.
 func validateTCArgs(args []string) error {
+	// A leading run of flags precedes the object, exactly as with `ip`. tc
+	// takes its inspection flags the same way (`tc -j -s qdisc show dev eth0`
+	// is what the statistics path issues), so reading args[0] as the object
+	// turned `-j` into an "unsupported tc object" refusal for a read-only
+	// query the guard allowlist permits.
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		i++
+	}
+	args = args[i:]
+
 	if len(args) < 2 {
 		return fmt.Errorf("tc requires at least an object and a verb")
 	}
@@ -266,11 +277,19 @@ func validateTCArgs(args []string) error {
 		}
 	}
 
-	// A qdisc replace/add must state which kind it is installing. Without a
-	// kind, tc rejects it — and the rejection is the only thing standing
-	// between this and an unshaped discipline, so it is checked here where the
-	// error can name the cause.
-	if obj == "qdisc" && verb != "del" && verb != "delete" {
+	// A qdisc that attaches a discipline must state which kind it is
+	// installing. Without a kind, tc rejects it — and the rejection is the
+	// only thing standing between this and an unshaped discipline, so it is
+	// checked here where the error can name the cause.
+	//
+	// Only the verbs that install are subject to this. del and delete remove a
+	// discipline and show and list only read, so none of them can leave an
+	// interface unshaped, and all of them legitimately name no root or parent.
+	// Demanding a kind of those verbs refused `tc qdisc show`, which is the
+	// probe DetectCapabilities issues to decide whether tc exists; the driver
+	// then reported every host as lacking tc and blocked every QoS plan with a
+	// message naming a missing package instead of the command THN had refused.
+	if obj == "qdisc" && tcInstallsDiscipline(verb) {
 		kind := ""
 		for i := 0; i < len(args); i++ {
 			if args[i] == "root" {
@@ -316,3 +335,19 @@ func validateTCArgs(args []string) error {
 // rather than reaching the kernel, and refusing is the correct outcome for a
 // name this build has no reason to believe in.
 var tcQdiscKind = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// tcInstallsDiscipline reports whether a tc verb attaches a qdisc to a device.
+//
+// add, replace and change install one, so each must name the kind it installs;
+// that is the only way `tc qdisc replace dev eth0 root` can be caught before
+// the kernel reports success on an interface it left unshaped. del and delete
+// remove, and show and list read. Those verbs name no kind, and requiring one
+// of them is what made the read-only capability probe unusable.
+func tcInstallsDiscipline(verb string) bool {
+	switch verb {
+	case "add", "replace", "change":
+		return true
+	default:
+		return false
+	}
+}
