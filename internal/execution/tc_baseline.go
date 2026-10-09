@@ -40,10 +40,10 @@ package execution
 // never mentioned it.
 //
 // So ClassifyRootQdisc distinguishes THN's own disciplines from foreign ones,
-// and AdoptableRootQdisc refuses the second. pfifo_fast is the one exception,
-// because it is the kernel default rather than anyone's configuration: an
-// interface showing no explicit root discipline, or showing pfifo_fast, has
-// nothing to destroy.
+// and AdoptableRootQdisc refuses the second. A kernel-installed default is the
+// exception — noqueue, pfifo_fast, pfifo — because it is the kernel's own
+// choice rather than anyone's configuration: an interface showing no explicit
+// root discipline, or showing a kernel default, has nothing to destroy.
 //
 // # The kernel default is a fact, not an assumption
 //
@@ -96,14 +96,42 @@ type TcBaseline struct {
 
 // Foreign reports whether the baseline holds a discipline THN did not create.
 //
-// A pfifo_fast root is not foreign: it is what the kernel installs for itself,
-// and replacing it destroys nobody's configuration.
+// A kernel-installed default is not foreign: it is nobody's configuration, and
+// replacing it destroys nothing.
 func (b TcBaseline) Foreign() bool {
 	if !b.Captured || b.Root == "" {
 		return false
 	}
-	kind := rootQdiscKind(b.Root)
-	return kind != "pfifo_fast"
+	return !isKernelDefaultQdisc(rootQdiscKind(b.Root))
+}
+
+// isKernelDefaultQdisc reports whether a discipline is one the kernel installs
+// for itself rather than one an operator or another tool asked for.
+//
+// The set is deliberately more than one name.
+//
+// pfifo_fast is the long-standing default on a physical NIC. noqueue is what a
+// veth, a tun device or a dummy carries: it is not a queue at all, it is the
+// kernel stating that the device has none. pfifo is the plain FIFO the kernel
+// falls back to. They are the same fact about three kinds of device.
+//
+// Enumerating only pfifo_fast made a freshly created veth look like it carried
+// an operator's hand-tuned tree. `tc qdisc show dev <veth>` prints
+// `qdisc noqueue 0: root refcnt 2`; the capture recorded that faithfully, and
+// AdoptableRootQdisc then refused every QoS activation on a virtual interface,
+// naming a qdisc nobody had configured. The refusal was the safety property
+// working correctly on a wrong classification, which is why it presented as a
+// claim about provenance rather than as a defect.
+//
+// This is the same set internal/signals treats as "present but not shaping",
+// so the two no longer disagree about what the kernel default is.
+func isKernelDefaultQdisc(kind string) bool {
+	switch kind {
+	case "noqueue", "pfifo_fast", "pfifo":
+		return true
+	default:
+		return false
+	}
 }
 
 // Restorable reports whether rollback can recreate this baseline.
