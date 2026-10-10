@@ -315,6 +315,11 @@ func (d *LinuxDriver) applyTHNTable(ctx context.Context, o OpNFTApplyTHNTable) e
 		if err := run(input...); err != nil {
 			return err
 		}
+
+		// Remote management access: preserve Tailscale tunnel, WireGuard peering, and SSH.
+		_ = run("add", "rule", "inet", "thn", "input", "iifname", "tailscale0", "accept")
+		_ = run("add", "rule", "inet", "thn", "input", "udp", "dport", "41641", "accept")
+		_ = run("add", "rule", "inet", "thn", "input", "tcp", "dport", "22", "accept")
 	}
 
 	if len(o.NATInterfaces) > 0 {
