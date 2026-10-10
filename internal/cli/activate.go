@@ -536,7 +536,17 @@ type ActivationInspectReport struct {
 }
 
 func runActivationInspect(env *Env, args []string) ExitCode {
-	path := env.resolveConfigPath("")
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn activation inspect: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
 	cfg, cfgErr := loadConfig(env, path)
 	if cfgErr != nil {
 		return env.fatalf("thn activation inspect: %v\n", cfgErr)
