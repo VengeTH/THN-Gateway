@@ -41,6 +41,7 @@ import (
 	"testing"
 
 	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/netns"
 	"github.com/VengeTH/THN-Gateway/internal/network"
 	"github.com/VengeTH/THN-Gateway/internal/planner"
 )
