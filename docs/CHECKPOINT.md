@@ -11,12 +11,105 @@ As of **October 10, 2026**:
 - **Forwarding & NAT**: Active (`net.ipv4.ip_forward = 1`, `table inet thn` masquerade NAT via `enp0s31f6`).
 - **Firewall Ruleset Verified**: `table inet thn` contains stateful input/forward filtering, LAN forwarding (`enx00e099001812` -> `enp0s31f6`), and persistent remote management rules (`tailscale0`, UDP 41641, TCP 22).
 - **Remote Administration**: Fully operational and verified over Tailscale (`100.65.7.40`) and Wi-Fi.
+- **Web Console**: Rewritten in Phase 10 — responsive, WCAG AA conformant, no fabricated telemetry.
 - **LAN Hardware**: 100 Mbps USB Ethernet adapter (`enx00e099001812`, `hw:2c886f45ad0cb12f`).
 - **Policy Classification**: **Approved for this hardware deployment** with an operational caution regarding the 100 Mbps Fast Ethernet line rate (~94 Mbps payload limit).
 - **Embedded vs External Services**:
   - DHCP and DNS remain managed by the host `dnsmasq` service (`10.77.0.1`).
   - Traffic shaping remains managed by the host CAKE service (`thn-gateway-restore.service`).
   - THN manages `table inet thn` exclusively, preserving all foreign tables (`ip thn_gateway`, `ufw`, `tailscale`, Docker).
+
+### 1.1 Known Outstanding Blocker — Downstream Devices Cannot Reach the Internet
+
+**This is the current open issue. The uplink is healthy; the downstream segment is not.**
+
+Measured state on `heedful-dev` at 2026-10-10:
+
+| Probe | Result |
+|---|---|
+| `ping 8.8.8.8` from `enp0s31f6` | **0% loss, 5.8 ms** |
+| `https://www.google.com` from box | **HTTP 200** |
+| Default route | `via 192.168.1.1 dev enp0s31f6` |
+| `192.168.1.1` identity | `ac:51:ab:cc:9f:45`, ports 53+443 open (TP-Link serving DNS) |
+| `ip neigh show dev enx00e099001812` | only `192.168.1.1 lladdr 54:df:24:30:1f:7b` — **no `10.77.0.x` clients** |
+| DHCP leases issued | one historical lease, `10.77.0.143`, now stale |
+| `ip_forward` | `1` on all interfaces |
+
+Two independent faults, **both required** before downstream clients work:
+
+**Fault A — the TP-Link is still routing, not bridging.**
+The LAN interface has an ARP entry for `192.168.1.1` learned on the `10.77.0.0/24` segment, with a different MAC than the one answering on the WAN segment. The TP-Link is operating in router mode with a static LAN address inside `192.168.1.x` — the same range the PLDT ONT uses. Its WAN port (which previously carried PLDT) is now disconnected, so it issues working local addresses and routes nothing. This is the direct cause of the reported symptom: neighbours obtain an address, obtain local reachability, and have no internet.
+Required TP-Link state: **AP/Bridge mode**, uplink into a **LAN** port (not WAN), **DHCP server OFF**, and a LAN address that is **not** in `192.168.1.0/24` (e.g. `10.77.0.2`).
+
+**Fault B — no masquerade is loaded for the LAN subnet.**
+`nft list ruleset` cannot be read without root on this host, so the live table is unverified from an unprivileged session. However `activation_state` is `GATED` and THN is render-not-apply by design, so a re-apply after the rewire has not occurred. Treat the masquerade as **unconfirmed** rather than absent.
+
+**Ordering matters.** Fixing A alone changes which segment devices sit on but does not by itself grant internet if B is live-unloaded. Fixing B alone leaves devices stranded on the TP-Link's dead router path. Verify both, in that order, one at a time.
+
+### 1.2 Correction to an Earlier Misdiagnosis (recorded deliberately)
+
+An interim diagnosis during this session claimed the neighbours' outage was caused by `dhcp.enabled: false` and `dns.enabled: false` in `/etc/thn/config.yaml`.
+
+**That diagnosis was wrong, and is retracted here so it is not repeated.** Those keys are `false` *by design* — see [TROUBLESHOOTING.md §1.3](TROUBLESHOOTING.md) and `docs/CHECKPOINT.md` §4. Enabling them in this build trips the `subsystems-executable` readiness gate and **blocks activation**, because DHCP/DNS are deliberately delegated to host `dnsmasq`. Verified live: `dnsmasq` is listening on `0.0.0.0%enx00e099001812:67` and `10.77.0.1:53`, and it has issued leases on `10.77.0.0/24`. DHCP and DNS are working. Leave those keys alone.
+
+The real cause is Fault A. The lesson worth keeping: `thn validate` reports **intent versus what THN itself owns**, not the health of externally-managed services, and an `info` line about a disabled subsystem is not a fault report.
+
+### 1.3 Physical Topology as Built vs. Intended
+
+**As wired today** (verified by ARP and routing tables):
+
+```
+  PLDT ONT ──► enp0s31f6 (WAN) ──► heedful-dev ──► enx00e099001812 (10.77.0.1/24)
+                      │                                          │
+                      └── default route via 192.168.1.1          └── switch ──► TP-Link
+                          (TP-Link still routing)                          (still router mode)
+```
+
+**As intended** (the target this project is built for):
+
+```
+  PLDT ONT
+      │  (bridge mode — ONT becomes a dumb modem)
+      ▼
+  enp0s31f6  WAN NIC   hw:7c6170fd7f34317a  (Intel I219-LM)
+      │
+  ┌───┴────────────────────────────────────────────┐
+  │  heedful-dev                                   │
+  │  NAT · firewall · DHCP · DNS  ← THN renders    │
+  │  LAN NIC   hw:2c886f45ad0cb12f  (USB FE 100M)   │
+  └───┬────────────────────────────────────────────┘
+      │  10.77.0.0/24
+      ▼
+    SWITCH ──┬── home router (AP mode, no DHCP, no routing)
+              ├── neighbour devices
+              └── guest devices
+```
+
+**Open architectural decision — ONT mode.** The ONT currently operates in **router mode**: the server holds `192.168.1.104/24` behind it and never received a public address. This forces a choice.
+
+| | ONT in router mode (current) | ONT in bridge mode (target) |
+|---|---|---|
+| NAT layers | **double** (server, then ONT) | single (server only) |
+| Server's public IP | none; `192.168.1.x` | obtained via DHCP/PPPoE |
+| Latency / traceroute | degraded, double hop | clean |
+| Inbound traffic | limited by ONT | fully controlled by THN |
+| Risk of lockout | none | **PLDT binds ONT by MAC + serial; unprovisioned bridge mode loses service and may require a technician** |
+| "THN controls the whole internet" | **not true** — the ONT still routes | true |
+
+Bridge mode is the correct target and is what "THN is the actual router" requires. It is only safely attemptable with the TP-Link's WAN cable **kept connected and within reach**, so PLDT → TP-Link WAN restores service in about two minutes if the bridge change fails.
+
+**Unresolved prerequisite:** whether the PLDT line authenticates by **PPPoE** or plain **DHCP**. PPPoE changes the WAN setup substantially (`pppd` plus credentials) and is not yet established. Check the ONT status page or PLDT before attempting bridge mode.
+
+### 1.4 Link-Speed Ceiling (unresolved, physical)
+
+Both NICs negotiate at **100 Mbps**:
+
+```
+enp0s31f6        Speed: 100 Mbps   (WAN)
+enx00e099001812  Speed: 100 Mbps   (LAN)
+```
+
+A NIC feeding a switch that serves a household plus neighbours at 100 Mbps indicates a cable fault — most often a Cat5 run with a failed pair, or a switch port pinned to 100/Full. **No configuration compensates for this.** Diagnose and replace cabling before investing further in the NAT path, or the result will be a correctly configured 100 Mbps bottleneck. The WAN side may legitimately be capped by the ISP plan; the LAN side has no such justification.
 
 ---
 
@@ -97,6 +190,73 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
   - Updated `ui/app/devices/page.tsx` so operators can set bandwidth limits and block devices directly from the web browser.
   - Updated [internal/management/gather.go](internal/management/gather.go) to dynamically reflect active client limits and blocks in both CLI (`thn clients`) and the Web UI.
 
+### Phase 10: Console Defect Remediation, Responsive Rewrite & Telemetry Honesty
+
+Commit `0f2ac3c` — 19 files, +1910/−737. This phase was driven by a review of the console as a reader sees it, not as the code intends it.
+
+**Defects found and fixed.**
+
+| Defect | Cause | Fix |
+|---|---|---|
+| Rules table columns overlapped; "RULE" header unreadable | `table-fixed` with `w-8` on severity, forcing pills wider than the column into the header | replaced with a responsive `<DataTable>` (§2.1) |
+| Bandwidth "active" preset indistinguishable from inactive | `bg-accent` used but **never defined** in the Tailwind theme — silently emitted no CSS | defined `accent` (TH yellow `#ffc107`), reserved for interactive state only |
+| Block/unblock button border absent | `border-critical-border` used but undefined | added `edge` shade to every severity family |
+| **All status labels effectively invisible** | `text-ok`/`text-critical`/`text-warning` resolve to *dark* shades intended to sit on light `muted` fills; on the dark page they land near **1.9:1** | added an `fg` shade per family for text on dark; rewrote all 20 usages |
+| Explanatory body text below AA | `ink-400`/`ink-500` were `#8189a0`/`#5f6780` = **3.4:1** | lightened to `#9aa3b8`/`#8791a8` |
+| `<main>` collapsed to 0px at ~874px | both nav halves rendered, one hidden by CSS — the hidden one still occupied flex space | split into `variant="mobile" \| "desktop"` |
+| Mobile: horizontal scroll on every page | fixed-width columns, `min-w-[24rem]` inputs, `w-56` flex rows | responsive primitives; verified 0 overflow at 390/768/1440 |
+
+**Fabricated telemetry removed.** The dashboard hardcoded values that did not come from the binary: `↓ 100 Mbps` / `↑ 20 Mbps`, `Hardware cool`, `No errors`, and `ACTIVE` / `PROTECTED` / `ENFORCED` / `LAN ONLY` badges asserting a security posture that was never read from anywhere. Monitoring printed `Low jitter`, `0.0% loss`, `Resolved` and `Reachable` as fixed strings regardless of the reading beside them — a page stating "low jitter" next to a 900 ms latency. All now derive from `thn --json` fields or render `—`/`idle` when unknown.
+
+This continues the Phase 8 intent (real telemetry in the CLI) into the console. The rule generalised: **a status label that is not derived from a measurement is a claim, and a false claim is worse than an absent one.**
+
+**Accessibility and comprehension.**
+
+- 16-term plain-language glossary on `/about`; every page leads with a plain sentence before the mechanism.
+- Gateway status in the chrome on every page, read from the gateway's own `health_state` (`healthy`/`ok`, `degraded`, `critical`); an unrecognised value reports *unknown* rather than guessing.
+- Navigation items carry descriptions — "Networks" alone does not say what a zone is.
+- **Verification: 1430 text nodes across 10 routes × 2 widths audited against WCAG AA. 78 failures before, 0 after.**
+- Focus-visible ring, `prefers-reduced-motion` honoured, ARIA labels, 44px touch targets on phones only.
+
+**New files.**
+- [ui/components/data-table.tsx](ui/components/data-table.tsx) — responsive table (server component; must stay one, see §5).
+- [ui/components/nav.tsx](ui/components/nav.tsx) — mobile drawer, desktop rail.
+- [ui/components/primitives.tsx](ui/components/primitives.tsx) — added `PageHeader`, `Stat`, `Callout`; `Field` made responsive via `.kv`.
+
+#### 2.1 Responsive table contract
+
+`<DataTable>` renders a real `<table>` at `sm` and up, and a card list below it. Columns are declared **once** as data and both renderings read that one declaration, so a column cannot drift between views. Only one form is ever in the accessibility tree — CSS `hidden` removes the other.
+
+#### 2.2 Severity colour contract (three roles per family)
+
+| shade | correct use |
+|---|---|
+| `DEFAULT` | fill only, with light text on top |
+| `muted` | fill, with `text` shade on top |
+| `text` | **text on a `muted` fill only** |
+| `edge` | borders on the dark page |
+| `fg` | **text on the dark page** |
+
+Writing a bare `text-ok` on the page background is the specific error that made the console unreadable. `edge` and `fg` hold identical values but are named separately because `text-critical-edge` misleads a reader and `border-critical-fg` does not.
+
+### Phase 11: Repository Hygiene
+
+Commits `3b2a00f`, `250fc5f` — surfaced while syncing `heedful-dev`.
+
+- **`.gitignore` gap**: `go build ./cmd/thn` drops a bare 20 MB `thn` at the repo root; only named artefacts (`thn.exe`, `thn-linux-amd64`) were ignored. Covered by name and by output path, with the npm lockfile caveat documented in-file.
+- **`tools/thn-client-control.sh` tracked as `100644`**: the script has a `#!/usr/bin/env bash` shebang, so `./tools/thn-client-control.sh` failed with permission denied. Recorded as `100755`.
+
+#### 11.1 npm version skew — recurring pull breakage
+
+`ui/package-lock.json` is rewritten by `npm install`, and the two machines disagree:
+
+| machine | npm | node |
+|---|---|---|
+| `heedful-dev` | 10.8.2 | v20.20.2 |
+| dev workstation | 10.9.2 | v22.17.0 |
+
+npm 10.9 writes `libc` fields for Linux-only optional dependencies; 10.8 does not. Each side strips the other's fields, leaving a dirty lockfile that makes `git pull` refuse with *"local changes would be overwritten by merge"*. Recovery: `git checkout -- ui/package-lock.json && git pull`. **Use `npm ci` on the gateway box** — it installs what the lockfile pins and never rewrites it.
+
 ---
 
 ## 3. Git Commit History Reference
@@ -113,6 +273,9 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
 | `523bc9c` | `fix(management): remove hardcoded mock clients and telemetry, read live dnsmasq leases and system stats` |
 | `03ad8c9` | `chore(config): empty placeholder clients list in physical lab configuration` |
 | `848f4c5` | `feat(ui): add interactive bandwidth limit and client controls to Web UI` |
+| `0f2ac3c` | `feat(ui): standardize page headers with PageHeader component` — console defect remediation, responsive rewrite, telemetry honesty (§2 Phase 10) |
+| `3b2a00f` | `chore: ignore gateway build output at repo root and document lockfile churn` |
+| `250fc5f` | `chore(tools): mark thn-client-control.sh executable` |
 
 ---
 
@@ -158,28 +321,72 @@ dns:
 
 ## 5. Future Actions & Roadmap Checkpoints
 
-### Immediate Next Steps (Current Sprint - Completed & Verified)
+### 5.0 Blocking — Downstream Internet (do these before anything else)
+
+1. **Resolve the 100 Mbps LAN link.** `ethtool enx00e099001812` and confirm `Supported link` advertises 1000baseT. Swap Cat5 cabling / check the switch port is not pinned to 100/Full. Until this is fixed, everything below runs over a 100 Mbps ceiling regardless of correctness.
+2. **Establish the ONT auth type** — PPPoE or DHCP. Check the ONT status page or PLDT. This determines the WAN setup and cannot be guessed.
+3. **Fix the TP-Link** (Fault A): AP/Bridge mode, uplink into a LAN port, DHCP server off, LAN address outside `192.168.1.0/24`.
+4. **Re-apply the rendered ruleset** after the rewire (Fault B) — see §5.1.
+5. **Verify hop by hop, one step at a time**, so a break identifies itself:
+   ```bash
+   ip -4 -br addr show enp0s31f6     # does the WAN hold a lease?
+   ip route | grep default          # is there a default route?
+   ping -c 3 1.1.1.1                # raw IP, no DNS
+   dig +short @1.1.1.1 google.com    # DNS upstream
+   ping -c 3 10.77.0.2              # a downstream device
+   ```
+   Then, from a neighbour's device: can it reach `1.1.1.1`? If the server can and they cannot, the fault is the firewall or masquerade — not the uplink.
+
+**Do not** set `dhcp.enabled` or `dns.enabled` to `true` in this build. See §1.2.
+
+### 5.1 Decide: operator-applied rules, or build activation
+
+The Phase-4 rules in §4 were loaded in-memory and do not survive reboot. Two paths:
+
+- **Interim** — load exactly what THN renders, so the applied state is already what THN wants and a later activation replaces an identical state rather than changing behaviour:
+  ```bash
+  thn firewall render > /tmp/thn-nft.rules
+  thn net render     >> /tmp/thn-nft.rules
+  sudo nft -f /tmp/thn-nft.rules
+  ```
+  **Read the rendered file before loading it.** Confirm the masquerade is scoped to the LAN subnet and egresses via WAN — an unscoped masquerade rewrites source addresses leaving *every* interface, which presents as intermittent hardware failure rather than as the misconfiguration it is. A systemd unit makes it survive reboot, but it drifts from what THN renders and needs manual reconciliation.
+
+- **Proper** — build activation. `thn activate` already exists as the deliberately-blocked destructive verb; wiring it to the render is the real milestone and is what makes "THN controls the internet" literally true rather than "THN describes what an operator applied". This is a change to a safety-critical path and should be done as its own reviewed change, not as a side effect of a network rewire.
+
+### 5.2 Immediate Next Steps (Completed & Verified)
 1. **Re-activation on `heedful-dev`**: **COMPLETED & VERIFIED**.
    - Activation committed with result `COMMITTED`.
    - `table inet thn` verified on live host via `nft list table inet thn`.
    - Input chain includes persistent `tailscale0`, UDP 41641, and TCP 22 acceptance.
    - Tailscale connectivity (`100.65.7.40`) and remote SSH confirmed functional.
-2. **Post-Activation Verification**:
-   - Connect downstream devices (in Router Mode) and verify DHCP lease allocation (`10.77.0.100+`) from `dnsmasq`.
+2. **Post-Activation Verification**: *(pending the rewire — see §5.0)*
+   - Connect downstream devices and verify DHCP lease allocation (`10.77.0.100+`) from `dnsmasq`.
    - Verify DNS resolution via `10.77.0.1` (`dig @10.77.0.1 google.com`).
    - Confirm internet browsing and bandwidth throughput reaching the ~90–94 Mbps line rate.
 
-### Medium-Term Actions (Hardware & Production Hardening)
+### 5.3 Medium-Term Actions (Hardware & Production Hardening)
 1. **Gigabit USB 3.0 Adapter Replacement**:
-   When upgrading hardware to Gigabit:
    - Attach new adapter and discover stable ID with `thn discover`.
    - Update `network.lan` in `/etc/thn/config.yaml`.
    - Remove `approved_fast_ethernet_lan` to restore default strict Gigabit enforcement.
 2. **Administration Source CIDR Hardening**:
-   Currently, administration is permitted from any source. Restrict `firewall.admin.source` in `config.yaml` to Tailscale (`100.64.0.0/10`) and local Wi-Fi subnets once external access is tested.
+   Currently, administration is permitted from any source. Restrict `firewall.admin.source` in `config.yaml` to Tailscale (`100.64.0.0/10`) and local Wi-Fi subnets once external access is tested. **If you administer over Tailscale, list it — an over-restrictive rule locks you out and needs physical access to recover.**
+3. **Clean up the duplicate WAN address**: `enp0s31f6` currently carries both `192.168.1.104/24` (static) and `192.168.1.27/24` (DHCP). One or the other, not both.
 
-### Long-Term Subsystem Milestones
+### 5.4 Long-Term Subsystem Milestones
 1. **QoS Subsystem Activation**:
-   Complete real-hardware traffic verification to satisfy the 12 physical-enforcement gates and transition CAKE queue discipline management from the external shell script into THN's internal executor (`qos.enabled: true`).
+   Complete real-hardware traffic verification to satisfy the physical-enforcement gates and transition CAKE queue discipline management from the external shell script into THN's internal executor (`qos.enabled: true`).
 2. **Embedded DHCP & DNS Engines**:
-   Implement embedded DHCP and DNS daemon execution if desired to phase out standalone `dnsmasq`.
+   Implement embedded DHCP and DNS daemon execution to phase out standalone `dnsmasq`. Note this requires a separate subsystem-executable milestone; enabling those keys in the current build only trips the readiness gate.
+3. **Write path decision** *(pre-existing inconsistency, flagged not fixed)*:
+   [tools/thn-client-control.sh](tools/thn-client-control.sh) plus `ui/app/api/clients/control/route.ts` apply live bandwidth and block rules — a real write path — while `ui/app/about/page.tsx` states the console applies nothing. Both cannot be true. The render-not-apply property is load-bearing; the write path either needs its own safety argument or the About copy needs to be scoped precisely to what *THN* applies versus what the *host scripts* do.
+
+### 5.5 Engineering Notes (carry forward)
+
+- **`ui/components/data-table.tsx` must stay a server component.** It takes `render` callbacks; `"use client"` breaks the RSC boundary, because functions cannot cross it.
+- **Do not render both nav halves into one flex container.** The hidden half still occupies space and collapses `<main>` to 0px.
+- **Never** write a bare `text-ok`/`text-critical`/`text-warning` on the dark page — use `-fg`. See §2.2.
+- **`npm run build` while the dev server runs corrupts `.next`**, producing `Cannot find module './331.js'` and a 500. Stop the server first.
+- **Verification that caught real defects, worth repeating on any future UI change:**
+  - horizontal-overflow sweep: all routes × 390/768/1440;
+  - contrast sweep: every text node vs WCAG AA.

@@ -59,9 +59,31 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 - **Remediation**:
   Set those subsystems to `false` in `/etc/thn/config.yaml`. These roles are handled externally on this host (CAKE via `thn-gateway-restore.service`, and DHCP/DNS via `dnsmasq`).
 
+- **Do not "fix" this by enabling them, even when they appear to be the problem.** See §1.4.
+
 ---
 
-### 1.4 Refusal: `RECOVERY_REQUIRED` (Transaction Interrupted)
+### 1.4 Misdiagnosis to Not Repeat: "DHCP/DNS Are Disabled, So Clients Have No Internet"
+
+An interim diagnosis during the October 2026 rewire attributed a downstream internet outage to the `info` lines `dhcp.enabled  DHCP is disabled` and `dns.enabled  DNS is disabled` emitted by `thn validate`. **That was wrong. Do not act on it.**
+
+Those keys are `false` **by design** in this build. DHCP and DNS are deliberately delegated to host `dnsmasq`; setting them `true` trips the `subsystems-executable` gate and **blocks activation** (§1.3). Confirm the external services are actually healthy before suspecting them:
+
+```bash
+ss -lunp | grep ':67'                         # DHCP bound to the LAN port
+ss -lnup | grep '10.77.0.1:53'               # DNS bound to the LAN address
+cat /var/lib/misc/dnsmasq.leases | tail       # leases actually issued
+```
+
+All three should be populated. On `heedful-dev` they were — DHCP and DNS were working correctly the whole time.
+
+**The general lesson:** `thn validate` reports **intent versus what THN itself owns**. It has no knowledge of services THN delegates to the host, so its `info` lines are statements about THN's configuration, not fault reports about the network. An `info` is never evidence of a fault. Diagnose from measurements — `ip neigh`, `ip route`, lease files, and packet-level probes — not from configuration warnings.
+
+For the actual cause of the October 2026 outage (a TP-Link left in router mode answering ARP as `192.168.1.1` on the `10.77.0.0/24` segment), see §2.1.
+
+---
+
+### 1.5 Refusal: `RECOVERY_REQUIRED` (Transaction Interrupted)
 
 - **Symptom**: `thn activate` refuses with:
   ```
@@ -85,9 +107,35 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 
 ---
 
-## 2. Client Connectivity & Forwarding Issues
+## 2. Connectivity Issues
 
-### 2.1 Downstream Client Does Not Receive a DHCP Lease
+### 2.1 Downstream Devices Obtain an Address but Have No Internet
+
+- **Symptom**: Clients on the LAN get a `10.77.0.x` address, can reach local peers, but cannot reach the internet. Uplink probes from the gateway box itself succeed.
+- **Diagnostic Commands**:
+  ```bash
+  # Is the uplink actually fine?
+  ping -c 3 8.8.8.8
+  curl -s -o /dev/null -w '%{http_code}\n' https://www.google.com
+  ip route get 8.8.8.8
+
+  # Is anything downstream at all?
+  ip neigh show dev enx00e099001812
+
+  # Is a foreign router answering inside the LAN subnet?
+  ip neigh show dev enx00e099001812 | grep -v '^10\.77\.'
+  ```
+- **Likely Cause**: A downstream switch/AP is still operating in **router mode**, holding a static address that collides with the upstream router's subnet. It hands out working local addresses and routes nothing, because its own WAN port is now disconnected.
+- **Diagnostic Evidence**: an ARP entry for the *upstream* gateway address appearing on the *LAN* interface, with a **different MAC** than the one answering on the WAN interface. Two devices claiming one address on either side of the switch is the signature.
+- **Remediation**: On the downstream device — set **AP/Bridge mode**, uplink into a **LAN** port (not WAN), **disable its DHCP server**, and move its own LAN address **out** of the upstream subnet (e.g. `10.77.0.2`).
+- **Second cause to rule out**: no masquerade loaded for the LAN subnet. Fixing the AP does not grant internet on its own if NAT is absent, and loading NAT does not help while clients sit on a dead router path. Verify both, one at a time.
+- **Recorded instance**: `docs/CHECKPOINT.md` §1.1 (October 2026).
+
+---
+
+## 3. Client Connectivity & Forwarding Issues
+
+### 3.1 Downstream Client Does Not Receive a DHCP Lease
 
 - **Symptom**: Downstream laptop or router WAN port shows `Link up`, but receives no IP address (or self-assigns `169.254.x.x`).
 - **Diagnostic Commands**:
@@ -116,7 +164,7 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 
 ---
 
-### 2.2 Client Cannot Resolve DNS Names (Websites Fail by Name, Work by IP)
+### 3.2 Client Cannot Resolve DNS Names (Websites Fail by Name, Work by IP)
 
 - **Symptom**: Client can `ping 1.1.1.1` successfully, but `ping google.com` fails with `Name resolution failure`.
 - **Diagnostic Commands**:
@@ -134,7 +182,7 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 
 ---
 
-### 2.3 Client Can Ping Gateway (`10.77.0.1`), but Cannot Access the Internet
+### 3.3 Client Can Ping Gateway (`10.77.0.1`), but Cannot Access the Internet
 
 - **Symptom**: Client pings `10.77.0.1` with 0% packet loss. Client cannot ping `1.1.1.1` or reach web pages.
 - **Diagnostic Commands**:
@@ -170,9 +218,9 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 
 ---
 
-## 3. Remote Access & Firewall Lockout Issues
+## 4. Remote Access & Firewall Lockout Issues
 
-### 3.1 Tailscale or Remote SSH Drops During Activation
+### 4.1 Tailscale or Remote SSH Drops During Activation
 
 - **Symptom**: You trigger an operation and the remote SSH session freezes or terminates.
 - **Likely Cause**: The firewall policy dropped the incoming management connection or modified the routing table on `wlp2s0` / `tailscale0`.
@@ -195,7 +243,7 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
 
 ---
 
-### 3.2 UFW vs nftables Conflicts
+### 4.2 UFW vs nftables Conflicts
 
 - **Symptom**: `table inet thn` is installed, but packets are rejected by UFW.
 - **Diagnostic Commands**:
