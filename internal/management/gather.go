@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -446,10 +447,39 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 		}
 	}
 
+	// 5. Apply live controls from client_controls.json
+	controls := parseClientControls()
+	for i := range clients {
+		if ctrl, ok := controls[clients[i].IPv4]; ok {
+			if ctrl.DownloadMbps > 0 {
+				clients[i].QoSPolicy = fmt.Sprintf("%d Mbps (Limited)", ctrl.DownloadMbps)
+			}
+			if ctrl.Blocked {
+				clients[i].Blocked = true
+			}
+		}
+	}
+
 	if clients == nil {
 		return []ClientDevice{}
 	}
 	return clients
+}
+
+type clientControlEntry struct {
+	DownloadMbps int    `json:"download_mbps"`
+	Policy       string `json:"policy"`
+	Blocked      bool   `json:"blocked"`
+}
+
+func parseClientControls() map[string]clientControlEntry {
+	data, err := os.ReadFile("/var/lib/thn/client_controls.json")
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var out map[string]clientControlEntry
+	_ = json.Unmarshal(data, &out)
+	return out
 }
 
 // GatherQoS builds the QoS operational status summary.
