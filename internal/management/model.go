@@ -77,22 +77,22 @@ type WANHealth struct {
 
 // ClientDevice represents a network client with policy and status.
 type ClientDevice struct {
-	ID              string    `json:"id"`
-	MAC             string    `json:"mac"`
-	IPv4            string    `json:"ipv4"`
-	IPv6            string    `json:"ipv6,omitempty"`
-	Hostname        string    `json:"hostname"`
-	Interface       string    `json:"interface"`
-	NetworkID       string    `json:"network_id"`
-	LogicalGroup    string    `json:"logical_group"` // family, neighbor, guest, management, unknown
-	Online          bool      `json:"online"`
-	LastSeen        time.Time `json:"last_seen"`
-	LeaseExpires    time.Time `json:"lease_expires,omitempty"`
-	RxBytes         uint64    `json:"rx_bytes"`
-	TxBytes         uint64    `json:"tx_bytes"`
-	CurrentRxBps    uint64    `json:"current_rx_bps"`
-	CurrentTxBps    uint64    `json:"current_tx_bps"`
-	QoSPolicy       string    `json:"qos_policy,omitempty"`
+	ID           string    `json:"id"`
+	MAC          string    `json:"mac"`
+	IPv4         string    `json:"ipv4"`
+	IPv6         string    `json:"ipv6,omitempty"`
+	Hostname     string    `json:"hostname"`
+	Interface    string    `json:"interface"`
+	NetworkID    string    `json:"network_id"`
+	LogicalGroup string    `json:"logical_group"` // family, neighbor, guest, management, unknown
+	Online       bool      `json:"online"`
+	LastSeen     time.Time `json:"last_seen"`
+	LeaseExpires time.Time `json:"lease_expires,omitempty"`
+	RxBytes      uint64    `json:"rx_bytes"`
+	TxBytes      uint64    `json:"tx_bytes"`
+	CurrentRxBps uint64    `json:"current_rx_bps"`
+	CurrentTxBps uint64    `json:"current_tx_bps"`
+	QoSPolicy    string    `json:"qos_policy,omitempty"`
 
 	// QoSDirection names which direction the recorded limit constrains:
 	// "both", "download" or "upload". Download and upload are shaped by two
@@ -107,9 +107,9 @@ type ClientDevice struct {
 	QoSDownloadMbps int `json:"qos_download_mbps,omitempty"`
 	QoSUploadMbps   int `json:"qos_upload_mbps,omitempty"`
 
-	IsolationStatus string    `json:"isolation_status"` // isolated, standard
-	Blocked         bool      `json:"blocked"`
-	Notes           string    `json:"notes,omitempty"`
+	IsolationStatus string `json:"isolation_status"` // isolated, standard
+	Blocked         bool   `json:"blocked"`
+	Notes           string `json:"notes,omitempty"`
 }
 
 // QoSStatusSummary models the operational state of QoS and client tiers.

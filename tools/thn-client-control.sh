@@ -183,6 +183,24 @@ wire_mbit() {
     printf '%s' $(( ($1 * (100 + OVERHEAD_PERCENT) + 99) / 100 ))
 }
 
+# burst_bytes <mbit>
+#
+# HTB paces with a token bucket, and a bucket smaller than a few packets cannot
+# deliver the configured rate: the class sends one packet, drains, and waits for
+# the refill instead of keeping the link busy. The kernel's computed default is
+# roughly 1600 bytes, which is barely one MTU, so a class configured at 33 Mbit
+# delivers noticeably less than 33 and the shortfall reads as "the shaper
+# ignores the rate I set".
+#
+# One millisecond of the shaped rate, floored at ten MTUs, is a bucket that
+# always holds enough tokens to send a full-sized packet. cburst is set to the
+# same figure so the class can also reach its ceiling in one round.
+burst_bytes() {
+    local b=$(( $1 * 125 ))
+    (( b < 15000 )) && b=15000
+    printf '%s' "${b}"
+}
+
 # class_minor_for_ip: a stable HTB class minor for a client.
 class_minor_for_ip() {
     local last="${1##*.}"
@@ -319,23 +337,34 @@ PY
 # uncapped path; setting either to the 94%-of-line payload figure would hold an
 # unshaped client below what the cable can carry. Only a per-client request is
 # clamped to the payload ceiling.
+#
+# This REPAIRS as well as installs, and every parameter is re-asserted on every
+# call. An earlier build left roots behind whose default class pointed at `99`
+# and whose parent was pinned at 95 Mbit; a guard that skipped the whole
+# function when a root was already present left those in place permanently, and
+# the operator had no way to see that the running shape was not the configured
+# one. `tc qdisc replace` with an existing handle changes the qdisc in place and
+# leaves its class tree alone, which is what makes repeating it safe.
+#
+# Note on the handle notation: tc parses both `default N` and `classid 1:N` as
+# HEXADECIMAL. The two therefore agree, which is what matters, but `default 999`
+# means class minor 0x999 -- not 999 decimal.
 ensure_htb_root() {
-    local iface="$1" ceiling="$2"
+    local iface="$1" line="$2" burst
 
-    if tc qdisc show dev "${iface}" 2>/dev/null | grep -q 'qdisc htb 1:'; then
-        dbg "${iface}: HTB root already installed"
-    else
+    if ! tc qdisc show dev "${iface}" 2>/dev/null | grep -q 'qdisc htb 1:'; then
         backup_root_qdisc "${iface}"
-        info "Installing HTB root on ${iface} (line ceiling ${ceiling} Mbps)"
-        run_tc qdisc replace dev "${iface}" root handle 1: htb default "${HTB_DEFAULT_MINOR}" || return 1
-        run_tc class replace dev "${iface}" parent 1: classid 1:1 \
-            htb rate "${ceiling}mbit" ceil "${ceiling}mbit" prio 0 || return 1
     fi
 
-    # The default class is re-asserted on every call so its ceiling tracks the
-    # link as it is now: an uncapped client must be able to use the whole line.
+    burst="$(burst_bytes "${line}")"
+
+    run_tc qdisc replace dev "${iface}" root handle 1: htb default "${HTB_DEFAULT_MINOR}" || return 1
+    run_tc class replace dev "${iface}" parent 1: classid 1:1 \
+        htb rate "${line}mbit" ceil "${line}mbit" prio 0 \
+        burst "${burst}" cburst "${burst}" || return 1
     run_tc class replace dev "${iface}" parent 1:1 classid "1:${HTB_DEFAULT_MINOR}" \
-        htb rate "${ceiling}mbit" ceil "${ceiling}mbit" prio 3 || return 1
+        htb rate "${line}mbit" ceil "${line}mbit" prio 3 \
+        burst "${burst}" cburst "${burst}" || return 1
     run_tc qdisc replace dev "${iface}" parent "1:${HTB_DEFAULT_MINOR}" \
         handle "${HTB_DEFAULT_MINOR}:" fq_codel limit 10240 flows 1024 quantum 1514 || return 1
     return 0
@@ -396,17 +425,19 @@ PY
 
 # apply_shaper <iface> <class-minor> <wire-mbit>
 apply_shaper() {
-    local iface="$1" minor="$2" wire="$3" classid mark
+    local iface="$1" minor="$2" wire="$3" classid mark burst
     classid="1:${minor}"
     mark="$(mark_for_minor "${minor}")"
+    burst="$(burst_bytes "${wire}")"
 
     run_tc class replace dev "${iface}" parent 1:1 classid "${classid}" \
-        htb rate "${wire}mbit" ceil "${wire}mbit" prio 2 || return 1
+        htb rate "${wire}mbit" ceil "${wire}mbit" prio 2 \
+        burst "${burst}" cburst "${burst}" || return 1
     run_tc qdisc replace dev "${iface}" parent "${classid}" handle "${minor}:" \
         fq_codel limit 10240 flows 1024 quantum 1514 || return 1
     run_tc filter replace dev "${iface}" parent 1:0 protocol ip prio 2 \
         handle "${mark}" fw classid "${classid}" || return 1
-    dbg "${iface}: class ${classid} at ${wire}mbit, classified by mark ${mark}"
+    dbg "${iface}: class ${classid} at ${wire}mbit burst ${burst}, classified by mark ${mark}"
     return 0
 }
 
