@@ -1,0 +1,31 @@
+# Re-applies THN's per-client bandwidth limits after a reboot.
+#
+# Install with:
+#   sudo cp tools/thn-client-control.sh        /usr/local/bin/thn-client-control
+#   sudo chmod 755                             /usr/local/bin/thn-client-control
+#   sudo cp tools/thn-client-control-sync.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now thn-client-control-sync.service
+#
+# Traffic control is kernel state and does not survive a reboot, and the host's
+# own restore service reinstalls its CAKE discipline on the WAN root at boot.
+# If THN's HTB does not take that root over afterwards, every upload class is
+# orphaned and the upload limits silently stop applying. The ordering below is
+# what prevents that, so this unit must run AFTER thn-gateway-restore.service.
+
+[Unit]
+Description=Re-apply THN per-client bandwidth limits
+Documentation=file:/usr/local/bin/thn-client-control
+Wants=network-online.target
+After=network-online.target thn-gateway-restore.service
+PartOf=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/thn-client-control sync
+# tc and nft both require CAP_NET_ADMIN.
+User=root
+
+[Install]
+WantedBy=multi-user.target

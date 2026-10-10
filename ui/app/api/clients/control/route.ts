@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { ip, action, mbps } = body;
+    const { ip, action, mbps, direction } = body;
 
     if (!ip || typeof ip !== "string") {
       return NextResponse.json({ error: "Invalid or missing IP address" }, { status: 400 });
@@ -22,13 +22,21 @@ export async function POST(req: NextRequest) {
 
     if (action === "limit") {
       const rate = Number(mbps);
-      if (!rate || rate <= 0 || rate > 95) {
+      // The engine clamps to the real link ceiling and reports what it did.
+      // Rejecting 95+ here was wrong: it hard-coded Fast Ethernet into the
+      // API, so a gigabit uplink could never be given more than 95 Mbps.
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 10000) {
         return NextResponse.json(
-          { error: "Rate must be between 1 and 95 Mbps (due to Fast Ethernet limit)" },
+          { error: "Rate must be a whole number of Mbps between 1 and 10000" },
           { status: 400 }
         );
       }
-      args.push(String(Math.round(rate)));
+
+      // "both" is the default so an older client that does not send a
+      // direction still gets the previous, symmetric behaviour.
+      const dir = ["both", "upload", "download"].includes(direction) ? direction : "both";
+
+      args.push(String(Math.round(rate)), dir);
     }
 
     try {

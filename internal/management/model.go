@@ -93,6 +93,20 @@ type ClientDevice struct {
 	CurrentRxBps    uint64    `json:"current_rx_bps"`
 	CurrentTxBps    uint64    `json:"current_tx_bps"`
 	QoSPolicy       string    `json:"qos_policy,omitempty"`
+
+	// QoSDirection names which direction the recorded limit constrains:
+	// "both", "download" or "upload". Download and upload are shaped by two
+	// separate disciplines on two interfaces, so a limit that does not say
+	// which one it means cannot be checked against the kernel.
+	QoSDirection string `json:"qos_direction,omitempty"`
+
+	// QoSDownloadMbps and QoSUploadMbps are the configured ceilings, or zero
+	// when that direction is not limited. They are reported separately rather
+	// than as one number because a download-only limit is a real and common
+	// configuration, and collapsing it into a single figure loses that.
+	QoSDownloadMbps int `json:"qos_download_mbps,omitempty"`
+	QoSUploadMbps   int `json:"qos_upload_mbps,omitempty"`
+
 	IsolationStatus string    `json:"isolation_status"` // isolated, standard
 	Blocked         bool      `json:"blocked"`
 	Notes           string    `json:"notes,omitempty"`

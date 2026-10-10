@@ -499,6 +499,27 @@ To guarantee a stable connection:
 
 ### 11.3 Step-by-Step Traffic Control Script (`/etc/thn/apply-qos.sh`)
 
+> **Correction (Oct 2026): the upload filters below do not work.**
+>
+> This script classifies upload with
+> `tc filter ... u32 match ip src 10.77.0.50/32`. On a masquerading gateway that
+> filter matches nothing: by the time an upload packet reaches the WAN's egress
+> queue, nftables has already rewritten its source address to the gateway's WAN
+> address. The filter installs, the class exists, and no packet ever enters it —
+> so **the upload limits in this script have never applied.**
+>
+> The download half is correct and works as written.
+>
+> Upload classification must go through the packet mark, which is set before
+> masquerade runs. See [`QOS_AND_CLIENT_CONTROL.md`](QOS_AND_CLIENT_CONTROL.md)
+> §1.1 for the verified form, and use
+> `/usr/local/bin/thn-client-control` rather than hand-rolled `tc` for
+> per-client limits.
+>
+> The table below is retained because the HTB shape, the priorities and the
+> per-household model are correct and are what the working implementation
+> builds on.
+
 Because automated QoS activation is gated in [internal/cli/activate_production.go](internal/cli/activate_production.go#L244-L260), you apply this proven Linux `tc` hierarchy directly.
 
 Create `/etc/thn/apply-qos.sh`:

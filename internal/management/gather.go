@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
@@ -30,6 +31,68 @@ func NewCollector(cfg config.Config, store *state.Store) *Collector {
 		cfg:   cfg,
 		store: store,
 	}
+}
+
+// TraceEnabled turns on the discovery trace.
+//
+// Discovery is the part of this package that answers "which devices are on my
+// network", and when the answer is wrong the cause is almost always a filter
+// that dropped something silently. The trace names what each source produced
+// and why a device was excluded, so the question can be answered from the log
+// instead of by re-deriving the search by hand.
+var TraceEnabled = os.Getenv("THN_TRACE_DISCOVERY") != ""
+
+func tracef(format string, args ...any) {
+	if TraceEnabled {
+		fmt.Fprintf(os.Stderr, "thn:discovery: "+format+"\n", args...)
+	}
+}
+
+// lanPrefix is the network the client sources are filtered against.
+//
+// Read from the document rather than assumed. The previous code matched a
+// literal "10.77.0." prefix, so on any other LAN address every ARP-discovered
+// device was dropped and the network looked empty.
+func (c *Collector) lanPrefix() string {
+	if p := c.cfg.Network.LANPrefix; p != "" {
+		return p
+	}
+	return "10.77.0.1/24"
+}
+
+// lanInterfaceName resolves the LAN role to a kernel interface name.
+//
+// The configured value is a stable hardware identity, not a name, and it
+// cannot be decoded back into one -- so it is resolved by observing the host,
+// the same way the WAN name is. When the NIC is absent the selector itself is
+// returned, which is honest: this is the interface the operator asked about,
+// and it is not present.
+func (c *Collector) lanInterfaceName() string {
+	sel := c.cfg.Network.LAN
+	if sel == "" {
+		tracef("no LAN selector configured; falling back to prefix lookup")
+		return ""
+	}
+	if !strings.HasPrefix(sel, "hw:") {
+		return sel
+	}
+	name := interfaceForStableID(sel)
+	if name == sel {
+		tracef("LAN selector %s did not resolve to a present interface", sel)
+	} else {
+		tracef("LAN selector %s resolved to %s", sel, name)
+	}
+	return name
+}
+
+// lanNetwork parses the configured prefix, reporting whether it parsed.
+func (c *Collector) lanNetwork() (netip.Prefix, bool) {
+	p, err := netip.ParsePrefix(c.lanPrefix())
+	if err != nil {
+		tracef("LAN prefix %q does not parse (%v); address filtering disabled", c.lanPrefix(), err)
+		return netip.Prefix{}, false
+	}
+	return p.Masked(), true
 }
 
 // GatherStatus derives the top-level GatewayStatus document.
@@ -538,7 +601,7 @@ func parseDnsmasqLeases() []ClientDevice {
 				MAC:             mac,
 				IPv4:            ip,
 				Hostname:        hostname,
-				Interface:       "enx00e099001812",
+				Interface:       "",
 				NetworkID:       "lan",
 				LogicalGroup:    "dhcp",
 				Online:          online,
@@ -556,46 +619,102 @@ func parseDnsmasqLeases() []ClientDevice {
 	return nil
 }
 
+// parsePrefixOrZero parses a CIDR, reporting whether it was usable.
+func parsePrefixOrZero(cidr string) (netip.Prefix, bool) {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return p, true
+}
+
+// arpPathOverride redirects the ARP table for tests.
+//
+// The path is a variable rather than a constant so the filtering rules can be
+// exercised against a fixture. Version-dependent tables are exactly where a
+// silently-dropped entry hides, and a rule that is only ever run against
+// whatever the developer's own machine happens to have is not tested at all.
+var arpPathOverride string
+
 // parseArpTable reads live ARP entries from /proc/net/arp.
-func parseArpTable() []ClientDevice {
-	data, err := os.ReadFile("/proc/net/arp")
+//
+// The prefix and interface are parameters rather than constants because the
+// previous version matched a literal "10.77.0." and a literal interface name,
+// so on any other LAN address -- or after the NIC was replaced -- every
+// neighbour was silently discarded and the network looked empty.
+//
+// An ARP entry is the only evidence of presence for a device that has a static
+// address, which is why this source exists alongside the DHCP leases.
+func parseArpTable(lanPrefix string, lanIface string) []ClientDevice {
+	path := "/proc/net/arp"
+	if arpPathOverride != "" {
+		path = arpPathOverride
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
+		tracef("%s unreadable (%v)", path, err)
 		return nil
 	}
 
+	prefix, havePrefix := parsePrefixOrZero(lanPrefix)
+	gateway := netip.Addr{}
+	if havePrefix {
+		gateway = prefix.Addr()
+	}
+
 	var list []ClientDevice
+	complete := 0
 	for i, line := range strings.Split(string(data), "\n") {
 		if i == 0 {
 			continue
 		}
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 6 {
-			ip := fields[0]
-			flags := fields[2]
-			mac := fields[3]
-			dev := fields[5]
-
-			if flags != "0x2" || mac == "00:00:00:00:00:00" {
-				continue
-			}
-			if strings.HasPrefix(ip, "10.77.0.") && !strings.HasSuffix(ip, ".1") {
-				list = append(list, ClientDevice{
-					ID:              "client-" + strings.ReplaceAll(mac, ":", ""),
-					MAC:             mac,
-					IPv4:            ip,
-					Hostname:        ip,
-					Interface:       dev,
-					NetworkID:       "lan",
-					LogicalGroup:    "lan",
-					Online:          true,
-					LastSeen:        time.Now().UTC(),
-					QoSPolicy:       "default",
-					IsolationStatus: "standard",
-					Blocked:         false,
-				})
-			}
+		if len(fields) < 6 {
+			continue
 		}
+		ip, flags, mac, dev := fields[0], fields[2], fields[3], fields[5]
+
+		// 0x2 is ATF_COM: the entry was completed by a successful handshake.
+		// An incomplete or failed entry says the address was tried, not that
+		// anything is there.
+		if flags != "0x2" || mac == "00:00:00:00:00:00" {
+			continue
+		}
+		complete++
+
+		if lanIface != "" && dev != lanIface {
+			tracef("arp: %s on %s skipped (not the LAN interface %s)", ip, dev, lanIface)
+			continue
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil {
+			continue
+		}
+		if havePrefix && !prefix.Contains(addr) {
+			tracef("arp: %s skipped (outside %s)", ip, prefix)
+			continue
+		}
+		if gateway.IsValid() && addr == gateway {
+			continue
+		}
+
+		list = append(list, ClientDevice{
+			ID:              "client-" + strings.ReplaceAll(mac, ":", ""),
+			MAC:             mac,
+			IPv4:            ip,
+			Hostname:        ip,
+			Interface:       dev,
+			NetworkID:       "lan",
+			LogicalGroup:    "lan",
+			Online:          true,
+			LastSeen:        time.Now().UTC(),
+			QoSPolicy:       "default",
+			IsolationStatus: "standard",
+			Blocked:         false,
+		})
 	}
+	tracef("arp: %d complete entries, %d kept", complete, len(list))
 	return list
 }
 
@@ -623,17 +742,27 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 	var clients []ClientDevice
 	seenIP := make(map[string]bool)
 
+	// The LAN interface and network are resolved once and reused, rather than
+	// compiled into each source. A source that hardcodes them stops matching
+	// the moment the NIC is replaced or the subnet is renumbered, and it stops
+	// matching silently -- which presents as "the gateway cannot see my
+	// devices" rather than as a configuration error.
+	lanIface := c.lanInterfaceName()
+	lanPrefix := c.lanPrefix()
+	tracef("client discovery: lan interface %q, prefix %q", lanIface, lanPrefix)
+
 	// 1. If persistent records exist in the store, load them
 	if c.store != nil {
 		stored, err := c.store.ListClientRecords(ctx)
 		if err == nil && len(stored) > 0 {
+			tracef("store: %d stored client record(s)", len(stored))
 			for _, rec := range stored {
 				clients = append(clients, ClientDevice{
 					ID:              rec.ID,
 					MAC:             rec.MAC,
 					IPv4:            rec.IP,
 					Hostname:        rec.Hostname,
-					Interface:       "enx00e099001812",
+					Interface:       lanIface,
 					NetworkID:       rec.NetworkID,
 					LogicalGroup:    classifyGroup(rec.NetworkID),
 					Online:          true,
@@ -657,7 +786,7 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 					MAC:             qClient.MAC,
 					IPv4:            qClient.IP,
 					Hostname:        qClient.ID,
-					Interface:       "enx00e099001812",
+					Interface:       lanIface,
 					NetworkID:       "lan",
 					LogicalGroup:    classifyGroup(qClient.Group),
 					Online:          !qClient.Disabled,
@@ -672,31 +801,56 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 	}
 
 	// 3. Live DHCP leases from host dnsmasq
-	for _, l := range parseDnsmasqLeases() {
+	leases := parseDnsmasqLeases()
+	tracef("leases: %d entr(ies) parsed", len(leases))
+	for _, l := range leases {
 		if !seenIP[l.IPv4] {
+			l.Interface = lanIface
 			clients = append(clients, l)
 			seenIP[l.IPv4] = true
+		} else {
+			tracef("leases: %s already known from an earlier source", l.IPv4)
 		}
 	}
 
 	// 4. Live ARP entries from kernel
-	for _, a := range parseArpTable() {
+	arps := parseArpTable(lanPrefix, lanIface)
+	for _, a := range arps {
 		if !seenIP[a.IPv4] {
 			clients = append(clients, a)
 			seenIP[a.IPv4] = true
+		} else {
+			tracef("arp: %s already known from an earlier source", a.IPv4)
 		}
 	}
 
-	// 5. Apply live controls from client_controls.json
+	// 5. Apply live controls from client_controls.json.
+	//
+	// This is the only channel by which the operator's own rate limits reach
+	// the dashboard. A limit that is applied to the kernel but not reflected
+	// here is worse than no display at all: the operator sees "No limit" next
+	// to a client that is in fact capped, and goes looking for a problem in
+	// the wrong place.
 	controls := parseClientControls()
 	for i := range clients {
-		if ctrl, ok := controls[clients[i].IPv4]; ok {
-			if ctrl.DownloadMbps > 0 {
-				clients[i].QoSPolicy = fmt.Sprintf("%d Mbps (Limited)", ctrl.DownloadMbps)
-			}
-			if ctrl.Blocked {
-				clients[i].Blocked = true
-			}
+		ctrl, ok := controls[clients[i].IPv4]
+		if !ok {
+			continue
+		}
+
+		// The direction is derived from the rates rather than trusted from the
+		// record, because the rates are what the kernel was actually told. A
+		// record whose stated direction disagrees with its numbers is reported
+		// from the numbers.
+		clients[i].QoSDirection = normalizedDirection(ctrl.Direction, ctrl.DownloadMbps, ctrl.UploadMbps)
+		clients[i].QoSDownloadMbps = ctrl.DownloadMbps
+		clients[i].QoSUploadMbps = ctrl.UploadMbps
+
+		if ctrl.DownloadMbps > 0 || ctrl.UploadMbps > 0 {
+			clients[i].QoSPolicy = qosPolicyLabel(ctrl)
+		}
+		if ctrl.Blocked {
+			clients[i].Blocked = true
 		}
 	}
 
@@ -706,19 +860,83 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 	return clients
 }
 
-type clientControlEntry struct {
-	DownloadMbps int    `json:"download_mbps"`
-	Policy       string `json:"policy"`
-	Blocked      bool   `json:"blocked"`
+// normalizedDirection reports which direction a control record limits.
+//
+// The stored "direction" field is advisory: it is written by the enforcement
+// script, and a record written by an older build has none at all. The rates are
+// the fact, so they decide -- and an absent record is "both", which is what
+// both older builds and the UI default to.
+func normalizedDirection(stored string, down, up int) string {
+	switch {
+	case down > 0 && up > 0:
+		return "both"
+	case down > 0:
+		return "download"
+	case up > 0:
+		return "upload"
+	}
+	if stored != "" {
+		return stored
+	}
+	return "both"
 }
 
+// qosPolicyLabel renders a control record for display.
+//
+// The label is built from the rates rather than copied from the record's own
+// human-readable "policy" string, so the words and the numbers cannot drift
+// apart. The stored string is used only for a record that carries no rates.
+func qosPolicyLabel(ctrl clientControlEntry) string {
+	switch {
+	case ctrl.DownloadMbps > 0 && ctrl.UploadMbps > 0:
+		return fmt.Sprintf("%d Mbps down / %d Mbps up", ctrl.DownloadMbps, ctrl.UploadMbps)
+	case ctrl.DownloadMbps > 0:
+		return fmt.Sprintf("%d Mbps down only", ctrl.DownloadMbps)
+	case ctrl.UploadMbps > 0:
+		return fmt.Sprintf("%d Mbps up only", ctrl.UploadMbps)
+	}
+	if ctrl.Policy != "" {
+		return ctrl.Policy
+	}
+	return "Default (Uncapped)"
+}
+
+type clientControlEntry struct {
+	DownloadMbps int `json:"download_mbps"`
+	UploadMbps   int `json:"upload_mbps"`
+
+	// The wire rates are what the shaper was actually told, after the framing
+	// allowance. They are reported so an operator can see that a "30 Mbps"
+	// limit shapes at 33 Mbit/s and why.
+	DownloadWireMbit int    `json:"download_wire_mbit"`
+	UploadWireMbit   int    `json:"upload_wire_mbit"`
+	Direction        string `json:"direction"`
+	Policy           string `json:"policy"`
+	Blocked          bool   `json:"blocked"`
+}
+
+// clientControlsPathOverride redirects the controls file for tests.
+var clientControlsPathOverride *string
+
 func parseClientControls() map[string]clientControlEntry {
-	data, err := os.ReadFile("/var/lib/thn/client_controls.json")
+	path := "/var/lib/thn/client_controls.json"
+	if clientControlsPathOverride != nil {
+		path = *clientControlsPathOverride
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return nil
 	}
+
 	var out map[string]clientControlEntry
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		// Reported, not swallowed. Treating a corrupt file as "no limits"
+		// silently turns an enforced ceiling into an unenforced one on the
+		// dashboard, and the operator has no way to tell the two apart.
+		fmt.Fprintf(os.Stderr, "thn: %s is not valid JSON (%v); client limits are not shown\n", path, err)
+		return nil
+	}
 	return out
 }
 

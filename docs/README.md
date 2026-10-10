@@ -24,6 +24,7 @@ If you need to administer, monitor, and troubleshoot an active gateway:
 2. [docs/OPERATIONS.md](docs/OPERATIONS.md) — Day-2 monitoring, client inventory, logging, and safe maintenance.
 3. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — Scenario-based diagnostics and remediation procedures.
 4. [docs/SECURITY.md](docs/SECURITY.md) — Threat model, administrative access boundaries, and anti-spoofing rules.
+5. [docs/QOS_AND_CLIENT_CONTROL.md](docs/QOS_AND_CLIENT_CONTROL.md) — **Per-client bandwidth limits**: why upload is classified by packet mark, why 30 Mbps measures as 27-28, and how to see devices behind a router or AP.
 
 ### Path C: Software Engineering & Development
 If you are developing new subsystems, writing tests, or extending CLI commands:
@@ -46,6 +47,7 @@ If you are developing new subsystems, writing tests, or extending CLI commands:
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Configuration schema, development overrides, and live validation. | Operators |
 | [docs/ACTIVATION_RUNBOOK.md](docs/ACTIVATION_RUNBOOK.md) | Exact numbered runbook: preflight, dry-run, live activation, verification. | Operators (Physical Console) |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Monitoring commands, log analysis, client tracking, and routines. | Operators |
+| [docs/QOS_AND_CLIENT_CONTROL.md](docs/QOS_AND_CLIENT_CONTROL.md) | Per-client bandwidth limits, direction selection, framing allowance, and LAN device visibility. | Operators & Network Engineers |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Specific failure symptoms, root causes, diagnostic steps, and fixes. | Operators & Support |
 | [docs/ROLLBACK_AND_RECOVERY.md](docs/ROLLBACK_AND_RECOVERY.md) | Atomic rollbacks, journal recovery, and host restoration. | Operators |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model, firewall rule layout, management safety, and risks. | Security Architects |

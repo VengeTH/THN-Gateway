@@ -427,6 +427,10 @@ export interface ClientDevice {
   current_rx_bps: number;
   current_tx_bps: number;
   qos_policy?: string;
+  /** "both" | "download" | "upload" — which direction the limit applies to. */
+  qos_direction?: string;
+  qos_download_mbps?: number;
+  qos_upload_mbps?: number;
   isolation_status: string;
   blocked: boolean;
   notes?: string;

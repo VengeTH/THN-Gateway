@@ -4,6 +4,14 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { ClientDevice } from "@/lib/types";
 
+type Direction = "both" | "download" | "upload";
+
+const DIRECTION_LABELS: Record<Direction, { short: string; long: string }> = {
+  both: { short: "Both", long: "Both download and upload" },
+  download: { short: "Down", long: "Download only" },
+  upload: { short: "Up", long: "Upload only" },
+};
+
 export function DeviceControls({ client }: { client: ClientDevice }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -11,6 +19,7 @@ export function DeviceControls({ client }: { client: ClientDevice }) {
   const [currentPolicy, setCurrentPolicy] = useState(client.qos_policy || "Default (Uncapped)");
   const [isBlocked, setIsBlocked] = useState(client.blocked);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [direction, setDirection] = useState<Direction>("both");
 
   const presets = [
     { label: "Uncapped", value: 0 },
@@ -19,6 +28,13 @@ export function DeviceControls({ client }: { client: ClientDevice }) {
     { label: "30M", value: 30 },
     { label: "50M", value: 50 },
   ];
+
+  function policyLabel(mbps: number, dir: Direction): string {
+    if (mbps === 0) return "Default (Uncapped)";
+    if (dir === "download") return `${mbps} Mbps down only`;
+    if (dir === "upload") return `${mbps} Mbps up only`;
+    return `${mbps} Mbps down / ${mbps} Mbps up`;
+  }
 
   async function handleApplyLimit(mbps: number) {
     setFeedback(null);
@@ -32,6 +48,11 @@ export function DeviceControls({ client }: { client: ClientDevice }) {
             ip: client.ipv4,
             action,
             mbps: mbps > 0 ? mbps : undefined,
+            // The engine shapes download and upload separately, and the
+            // operator has to be able to say which one they meant. Sending
+            // nothing here would silently restore the old download-only
+            // behaviour that made upload limits look broken.
+            direction: mbps > 0 ? direction : undefined,
           }),
         });
         const data = await res.json();
@@ -39,9 +60,12 @@ export function DeviceControls({ client }: { client: ClientDevice }) {
           setFeedback(`Error: ${data.error || "Failed to set limit"}`);
           return;
         }
-        const newPolicy = mbps === 0 ? "Default (Uncapped)" : `${mbps} Mbps (Limited)`;
-        setCurrentPolicy(newPolicy);
-        setFeedback(mbps === 0 ? "Bandwidth uncapped" : `Limit set to ${mbps} Mbps`);
+        setCurrentPolicy(policyLabel(mbps, direction));
+        setFeedback(
+          mbps === 0
+            ? "Bandwidth uncapped"
+            : `Limit set to ${mbps} Mbps (${DIRECTION_LABELS[direction].long.toLowerCase()})`
+        );
         router.refresh();
       } catch (err: unknown) {
         setFeedback(`Network error: ${String(err)}`);
@@ -130,6 +154,37 @@ export function DeviceControls({ client }: { client: ClientDevice }) {
               </button>
             );
           })}
+        </div>
+
+        {/* Direction selector. Download and upload are shaped by two separate
+            disciplines on two interfaces, so a bare "limit" does not say which
+            one it means. The previous version silently applied download only,
+            which is exactly why upload limits appeared to do nothing. */}
+        <div
+          role="group"
+          aria-label={`Limit direction for ${client.hostname}`}
+          className="inline-flex items-center gap-1"
+        >
+          <span className="text-2xs uppercase tracking-wide text-ink-500">Dir</span>
+          <div className="inline-flex overflow-hidden rounded-md border border-ink-700">
+            {(Object.keys(DIRECTION_LABELS) as Direction[]).map((d) => (
+              <button
+                key={d}
+                type="button"
+                disabled={isPending}
+                aria-pressed={direction === d}
+                title={DIRECTION_LABELS[d].long}
+                onClick={() => setDirection(d)}
+                className={`tap border-r border-ink-700 px-2.5 py-1 text-2xs font-medium transition-colors last:border-r-0 disabled:opacity-50 sm:min-h-0 ${
+                  direction === d
+                    ? "bg-ink-700 text-ink-100"
+                    : "bg-ink-800 text-ink-400 hover:bg-ink-700 hover:text-ink-200"
+                }`}
+              >
+                {DIRECTION_LABELS[d].short}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Custom limit. */}
