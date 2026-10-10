@@ -72,7 +72,7 @@ export function Panel({
     <section className="panel mb-4">
       <div className="panel-header">
         <div>
-          <h2 className="panel-title">{title}</h2>
+          <h2 className="panel-title font-display">{title}</h2>
           {note ? <p className="mt-0.5 text-2xs text-ink-400">{note}</p> : null}
         </div>
         {action}
@@ -129,11 +129,11 @@ export function PageHeader({
   action?: React.ReactNode;
 }) {
   return (
-    <header className="mb-5 flex flex-wrap items-start justify-between gap-x-6 gap-y-3 border-b border-ink-800 pb-4">
+    <header className="mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3 border-b border-ink-800 pb-4">
       <div className="min-w-0">
-        <h1 className="text-lg font-bold tracking-tight text-ink-50 sm:text-xl">{title}</h1>
+        <h1 className="text-xl font-bold font-display tracking-tight text-ink-50 sm:text-2xl">{title}</h1>
         <p className="mt-1 text-sm text-ink-300">{plain}</p>
-        {detail ? <p className="mt-1 text-xs text-ink-500">{detail}</p> : null}
+        {detail ? <p className="mt-1 text-xs text-ink-400">{detail}</p> : null}
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
     </header>
@@ -168,13 +168,13 @@ export function Stat({
         ? "text-warning-fg"
         : tone === "critical"
           ? "text-critical-fg"
-          : "text-ink-100";
+          : "text-ink-50";
 
   return (
-    <div className="min-w-0 rounded-md border border-ink-800 bg-ink-950/60 p-2.5">
-      <span className="block text-2xs uppercase tracking-wide text-ink-400">{label}</span>
-      <span className={`mt-0.5 block truncate text-base font-bold ${toneClass}`}>{value}</span>
-      {hint ? <span className="mt-0.5 block text-2xs text-ink-500">{hint}</span> : null}
+    <div className="min-w-0 rounded-lg border border-ink-800 bg-ink-900/80 p-3 shadow-panel">
+      <span className="block text-2xs uppercase tracking-wider text-ink-400 font-medium">{label}</span>
+      <span className={`mt-1 block truncate text-lg font-bold font-display ${toneClass}`}>{value}</span>
+      {hint ? <span className="mt-0.5 block text-2xs text-ink-400">{hint}</span> : null}
     </div>
   );
 }
@@ -203,14 +203,14 @@ export function Callout({
       ? "border-critical-edge/50 bg-critical-muted/10"
       : tone === "warning"
         ? "border-warning-edge/50 bg-warning-muted/10"
-        : "border-ink-700 bg-ink-950/50";
+        : "border-accent/30 bg-accent/5";
 
   const titleClass =
     tone === "critical"
       ? "text-critical-fg"
       : tone === "warning"
         ? "text-warning-fg"
-        : "text-ink-200";
+        : "text-accent";
 
   return (
     <div className={`rounded-lg border px-3.5 py-3 ${toneClass}`}>

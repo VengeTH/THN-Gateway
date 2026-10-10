@@ -24,6 +24,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { HexagonalEyeLogo } from "./logo";
 
 export interface NavItem {
   href: string;
@@ -133,17 +134,12 @@ export function Nav({
         <div className="shell flex h-14 items-center justify-between gap-3">
           <Link
             href="/"
-            className="flex min-w-0 items-center gap-2"
+            className="flex min-w-0 items-center gap-2.5"
             aria-label="THN Gateway, go to dashboard"
           >
-            <span
-              aria-hidden="true"
-              className="grid h-7 w-7 shrink-0 place-items-center rounded bg-accent text-2xs font-bold text-accent-text"
-            >
-              TH
-            </span>
+            <HexagonalEyeLogo className="h-7 w-7" />
             <span className="min-w-0">
-              <span className="block truncate text-sm font-semibold leading-tight text-ink-50">
+              <span className="block truncate text-sm font-bold font-display leading-tight text-ink-50">
                 THN Gateway
               </span>
               <span className="block truncate text-2xs leading-tight text-ink-400">
@@ -228,7 +224,10 @@ export function Nav({
             className="absolute inset-y-0 left-0 flex w-[min(20rem,85vw)] animate-slide-down flex-col border-r border-ink-800 bg-ink-900 shadow-pop"
           >
             <div className="flex h-14 shrink-0 items-center justify-between border-b border-ink-800 px-3">
-              <span className="text-sm font-semibold text-ink-50">Menu</span>
+              <div className="flex items-center gap-2">
+                <HexagonalEyeLogo className="h-6 w-6" />
+                <span className="text-sm font-bold font-display text-ink-50">Navigation</span>
+              </div>
               <button
                 type="button"
                 onClick={() => setOpen(false)}

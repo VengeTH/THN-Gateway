@@ -68,17 +68,17 @@ export default async function DashboardPage() {
       {/* Grid: 1 col on mobile, 2 cols on tablet/desktop */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Card 1: Internet & Uplink */}
-        <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm flex flex-col justify-between">
+        <section className="rounded-lg border border-ink-800 bg-ink-900 p-4 shadow-panel flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
+              <h2 className="text-sm font-semibold font-display text-ink-100 tracking-tight">
                 Internet Connection
               </h2>
               <span className="text-2xs text-ink-400">WAN: {wan.interface_name}</span>
             </div>
 
             <div className="my-4 text-center">
-              <div className="text-xl font-bold text-ink-50 sm:text-2xl">
+              <div className="text-xl font-bold font-display text-ink-50 sm:text-2xl">
                 {wan.internet_reachable ? "Internet is working" : "No internet"}
               </div>
               <p className="mt-1 text-xs text-ink-400">
@@ -88,48 +88,48 @@ export default async function DashboardPage() {
             </div>
 
             <div className="grid grid-cols-2 gap-3 border-t border-ink-800/80 pt-3 text-center">
-              <div className="rounded bg-ink-850/50 p-2">
-                <span className="block text-2xs uppercase text-ink-400">Downloading now</span>
-                <span className="text-base font-semibold text-ink-100">
+              <div className="rounded bg-ink-850 p-2.5">
+                <span className="block text-2xs uppercase tracking-wider text-ink-400">Downloading now</span>
+                <span className="text-base font-semibold font-display text-ink-100">
                   {formatSpeed(wan.rx_throughput_bps)}
                 </span>
               </div>
-              <div className="rounded bg-ink-850/50 p-2">
-                <span className="block text-2xs uppercase text-ink-400">Uploading now</span>
-                <span className="text-base font-semibold text-ink-100">
+              <div className="rounded bg-ink-850 p-2.5">
+                <span className="block text-2xs uppercase tracking-wider text-ink-400">Uploading now</span>
+                <span className="text-base font-semibold font-display text-ink-100">
                   {formatSpeed(wan.tx_throughput_bps)}
                 </span>
               </div>
             </div>
           </div>
-          <div className="mt-4 text-2xs text-ink-500 text-center">
+          <div className="mt-4 text-2xs text-ink-400 text-center">
             DNS Resolvers: {wan.dns_servers.join(", ")}
           </div>
         </section>
 
         {/* Card 2: Connected Devices Summary */}
-        <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm flex flex-col justify-between">
+        <section className="rounded-lg border border-ink-800 bg-ink-900 p-4 shadow-panel flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
+              <h2 className="text-sm font-semibold font-display text-ink-100 tracking-tight">
                 Connected Devices
               </h2>
-              <Link href="/devices" className="text-xs text-ok-fg hover:underline">
+              <Link href="/devices" className="text-xs text-accent hover:underline">
                 View all ({clients.length}) &rarr;
               </Link>
             </div>
 
             <div className="grid grid-cols-3 gap-2 my-3 text-center">
-              <div className="rounded border border-ink-800 bg-ink-850/40 p-2">
-                <span className="block text-lg font-bold text-ink-100">{groupCounts.family}</span>
+              <div className="rounded border border-ink-800 bg-ink-850 p-2">
+                <span className="block text-lg font-bold font-display text-ink-100">{groupCounts.family}</span>
                 <span className="block text-2xs text-ink-400">Family</span>
               </div>
-              <div className="rounded border border-ink-800 bg-ink-850/40 p-2">
-                <span className="block text-lg font-bold text-ink-100">{groupCounts.neighbor}</span>
+              <div className="rounded border border-ink-800 bg-ink-850 p-2">
+                <span className="block text-lg font-bold font-display text-ink-100">{groupCounts.neighbor}</span>
                 <span className="block text-2xs text-ink-400">Neighbors</span>
               </div>
-              <div className="rounded border border-ink-800 bg-ink-850/40 p-2">
-                <span className="block text-lg font-bold text-ink-100">{groupCounts.guest}</span>
+              <div className="rounded border border-ink-800 bg-ink-850 p-2">
+                <span className="block text-lg font-bold font-display text-ink-100">{groupCounts.guest}</span>
                 <span className="block text-2xs text-ink-400">Guests</span>
               </div>
             </div>
@@ -142,8 +142,16 @@ export default async function DashboardPage() {
                     <span className="font-medium text-ink-200">{c.hostname}</span>
                     <span className="text-2xs text-ink-400 block">{c.ipv4} &middot; {c.logical_group}</span>
                   </div>
-                  <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${c.blocked ? "bg-critical-muted text-critical-text" : "bg-ok-muted/20 text-ok-fg"}`}>
-                    {c.blocked ? "Blocked" : "Online"}
+                  <span
+                    className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${
+                      c.blocked
+                        ? "bg-critical-muted text-critical-fg"
+                        : c.online
+                          ? "bg-ok-muted/20 text-ok-fg"
+                          : "bg-ink-800 text-ink-400"
+                    }`}
+                  >
+                    {c.blocked ? "Blocked" : c.online ? "Online" : "Offline"}
                   </span>
                 </li>
               ))}
@@ -158,12 +166,12 @@ export default async function DashboardPage() {
         </section>
 
         {/* Card 3: Security & Network Control */}
-        <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm">
+        <section className="rounded-lg border border-ink-800 bg-ink-900 p-4 shadow-panel">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
+            <h2 className="text-sm font-semibold font-display text-ink-100 tracking-tight">
               Security &amp; Network Control
             </h2>
-            <Link href="/networks" className="text-xs text-ok-fg hover:underline">
+            <Link href="/networks" className="text-xs text-accent hover:underline">
               Zones &rarr;
             </Link>
           </div>
@@ -194,13 +202,13 @@ export default async function DashboardPage() {
               <Link
                 key={item.title}
                 href={item.href}
-                className="flex items-center justify-between gap-3 rounded bg-ink-850/50 p-2 transition-colors hover:bg-ink-800"
+                className="flex items-center justify-between gap-3 rounded bg-ink-850 p-2.5 transition-colors hover:bg-ink-800"
               >
                 <span className="min-w-0">
                   <span className="block font-medium text-ink-200">{item.title}</span>
                   <span className="block text-2xs text-ink-400">{item.note}</span>
                 </span>
-                <span aria-hidden="true" className="shrink-0 text-2xs text-ink-500">
+                <span aria-hidden="true" className="shrink-0 text-2xs text-accent">
                   →
                 </span>
               </Link>
@@ -209,13 +217,13 @@ export default async function DashboardPage() {
         </section>
 
         {/* Card 4: Gateway System Vitals */}
-        <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm flex flex-col justify-between">
+        <section className="rounded-lg border border-ink-800 bg-ink-900 p-4 shadow-panel flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
+              <h2 className="text-sm font-semibold font-display text-ink-100 tracking-tight">
                 Gateway Health
               </h2>
-              <Link href="/monitoring" className="text-xs text-ok-fg hover:underline">
+              <Link href="/monitoring" className="text-xs text-accent hover:underline">
                 Vitals &rarr;
               </Link>
             </div>
@@ -258,7 +266,7 @@ export default async function DashboardPage() {
             </div>
           </div>
 
-          <p className="mt-2 border-t border-ink-800/80 pt-2 text-2xs text-ink-500">
+          <p className="mt-2 border-t border-ink-800/80 pt-2 text-2xs text-ink-400">
             Safety behaviour: if the gateway cannot read the state of the
             network, it stops rather than letting traffic through unchecked.
           </p>
@@ -266,9 +274,9 @@ export default async function DashboardPage() {
       </div>
 
       {/* Recent activity */}
-      <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-panel">
+      <section className="rounded-lg border border-ink-800 bg-ink-900 p-4 shadow-panel">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-ink-100">Recent activity</h2>
+          <h2 className="text-sm font-semibold font-display text-ink-100 tracking-tight">Recent activity</h2>
           <Link href="/incidents" className="link text-xs">
             See all problems →
           </Link>

@@ -22,33 +22,23 @@ const config: Config = {
         // A neutral ramp rather than pure greys. The slight blue cast matters
         // on the severity colours below: a warm grey behind a red reads as
         // alarming even when it is not.
+        // The Heedful Official Corporate Palette:
+        // Dark-first, minimal, technical, data-focused.
+        // Primary bg #0F0F0F, Surface #1A1A1A, Secondary surface #2B2B2B,
+        // Primary gray #424242, Text secondary #BDBDBD, Text primary #FFFFFF.
         ink: {
-          50: "#f6f7f9",
-          100: "#eceef2",
-          200: "#d4d8e0",
-          300: "#aeb5c4",
-          /*
-           * 400 and 500 were originally #8189a0 and #5f6780, which are only
-           * 3.4:1 against the page background. That is fine for a border and
-           * wrong for the secondary text this console puts a great deal of
-           * its explanation into — every "because", every note, every hint.
-           *
-           * An audit of all 10 pages at two widths found 78 failing text
-           * nodes, essentially all of them one of these two shades. Both are
-           * lightened here until they clear 4.5:1, and 600 is added for the
-           * cases that genuinely want to recede.
-           */
-          400: "#9aa3b8",
-          500: "#8791a8",
-          600: "#6b7488",
-          700: "#333849",
-          800: "#1f2331",
-          // Row dividers need to sit between the panel and the page, and
-          // neither 800 nor 900 does: 800 is the panel edge and reads as a
-          // border, 900 is the page and reads as nothing at all.
-          850: "#191d28",
-          900: "#13161f",
-          950: "#0b0d13",
+          50: "#FFFFFF",
+          100: "#F5F5F5",
+          200: "#EEEEEE",
+          300: "#E0E0E0",
+          400: "#BDBDBD",
+          500: "#9E9E9E",
+          600: "#616161",
+          700: "#424242",
+          800: "#2B2B2B",
+          850: "#222222",
+          900: "#1A1A1A",
+          950: "#0F0F0F",
         },
         // Severity. Each is paired with a text colour that meets contrast on
         // its own background, because a status pill is often the only text on
@@ -131,13 +121,20 @@ const config: Config = {
       },
       fontFamily: {
         sans: [
+          "Inter",
           "ui-sans-serif",
           "system-ui",
           "-apple-system",
+          "BlinkMacSystemFont",
           "Segoe UI",
           "Roboto",
-          "Helvetica Neue",
-          "Arial",
+          "sans-serif",
+        ],
+        display: [
+          "Space Grotesk",
+          "Inter",
+          "system-ui",
+          "-apple-system",
           "sans-serif",
         ],
         mono: [

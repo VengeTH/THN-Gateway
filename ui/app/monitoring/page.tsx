@@ -74,7 +74,7 @@ export default async function MonitoringPage() {
                 key: "ipv4",
                 label: "addresses",
                 render: (i) =>
-                  i.ipv4.length > 0 ? (
+                  (i.ipv4?.length ?? 0) > 0 ? (
                     <span className="value break-all text-ink-300">{i.ipv4.join(", ")}</span>
                   ) : (
                     <span className="text-2xs text-ink-500">none</span>

@@ -276,7 +276,8 @@ func (c *Collector) GatherInterfaces() []InterfaceMonitoring {
 			state = "unknown"
 		}
 
-		var v4, v6 []string
+		v4 := []string{}
+		v6 := []string{}
 		for _, cidr := range addrsByIface[iface.SystemName] {
 			if strings.Contains(cidr, ":") {
 				v6 = append(v6, cidr)

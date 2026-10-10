@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Nav, type NavItem } from "@/components/nav";
+import { HexagonalEyeLogo } from "@/components/logo";
 import { thn } from "@/lib/thn";
 import type { MonitoringResponse } from "@/lib/types";
 import "./globals.css";
@@ -82,23 +83,26 @@ export default async function RootLayout({ children }: { children: React.ReactNo
 
   return (
     <html lang="en">
-      <body className="min-h-screen">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body className="min-h-screen bg-ink-950 font-sans text-ink-100 antialiased selection:bg-accent selection:text-ink-950">
         {/* ---- Desktop header ---------------------------------------- */}
         <header className="sticky top-0 z-30 hidden border-b border-ink-800 bg-ink-900/90 backdrop-blur lg:block">
           <div className="shell flex h-16 items-center justify-between gap-4">
-            <Link href="/" className="flex min-w-0 items-center gap-2.5">
-              <span
-                aria-hidden="true"
-                className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent text-xs font-bold text-accent-text"
-              >
-                TH
-              </span>
+            <Link href="/" className="flex min-w-0 items-center gap-3 group">
+              <HexagonalEyeLogo className="h-8 w-8 transition-transform group-hover:scale-105" />
               <span className="min-w-0">
-                <span className="block truncate text-sm font-semibold leading-tight text-ink-50">
+                <span className="block truncate text-sm font-bold font-display tracking-tight text-ink-50">
                   THN Gateway
                 </span>
                 <span className="block truncate text-2xs leading-tight text-ink-400">
-                  Your network&apos;s control panel
+                  The Heedful Network Appliance
                 </span>
               </span>
             </Link>
