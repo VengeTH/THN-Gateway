@@ -31,9 +31,27 @@ Measured state on `heedful-dev` at 2026-10-10:
 | `https://www.google.com` from box | **HTTP 200** |
 | Default route | `via 192.168.1.1 dev enp0s31f6` |
 | `192.168.1.1` identity | `ac:51:ab:cc:9f:45`, ports 53+443 open (TP-Link serving DNS) |
-| `ip neigh show dev enx00e099001812` | only `192.168.1.1 lladdr 54:df:24:30:1f:7b` — **no `10.77.0.x` clients** |
-| DHCP leases issued | one historical lease, `10.77.0.143`, now stale |
+| `ip neigh show dev enx00e099001812` | `10.77.0.143 lladdr 08:8f:c3:1b:9c:84 REACHABLE` (Windows workstation) |
+| DHCP leases issued | `10.77.0.143` active and reachable |
 | `ip_forward` | `1` on all interfaces |
+
+**Observed Client State (Windows Workstation on Ethernet):**
+```
+Ethernet adapter Ethernet:
+   IPv4 Address:    10.77.0.143
+   Subnet Mask:     255.255.255.0
+   Default Gateway: 192.168.1.1
+                    10.77.0.1
+```
+*Note on dual default gateway:* The client has two gateways listed because the TP-Link is still announcing `192.168.1.1` via DHCP/router advertisement on the same physical segment while `dnsmasq` serves `10.77.0.1`.
+
+**Host Firewall (UFW) Impact on 10.77.0.1 Web UI Access:**
+In addition to the router mode fault, Ubuntu host `ufw` is active with `DEFAULT_INPUT_POLICY="DROP"`. While ICMP is allowed (ping to `10.77.0.1` succeeds at <1 ms), incoming TCP connections from `enx00e099001812` to ports 1717 and 80 are dropped by host UFW.
+Resolution on `heedful-dev`:
+```bash
+sudo ufw allow in on enx00e099001812
+```
+Combined with THN's prerouting redirect (`iifname "enx00e099001812" tcp dport 80 redirect to :1717`), browsing to `http://10.77.0.1` transparently routes directly into the Web UI console.
 
 Two independent faults, **both required** before downstream clients work:
 
@@ -257,6 +275,61 @@ Commits `3b2a00f`, `250fc5f` — surfaced while syncing `heedful-dev`.
 
 npm 10.9 writes `libc` fields for Linux-only optional dependencies; 10.8 does not. Each side strips the other's fields, leaving a dirty lockfile that makes `git pull` refuse with *"local changes would be overwritten by merge"*. Recovery: `git checkout -- ui/package-lock.json && git pull`. **Use `npm ci` on the gateway box** — it installs what the lockfile pins and never rewrites it.
 
+### Phase 12: Observed State vs. Asserted State (Telemetry Honesty)
+
+Commit `e465573` (9 files, +880/−99).
+
+Surfaced when the console reported a device as connected hours after it had physically disconnected and claimed the uplink was online on an interface carrying no traffic.
+
+- **GatherWAN 4-stage pipeline**: Replaced hardcoded status "online" and literal boolean flags (`LinkUp`, `GatewayReachable`, `InternetReachable`, `DNSReachable`) with empirical measurements executed in packet order. Status is now derived directly from those four verified measurements.
+- **GatherInterfaces dynamic observation**: Replaced hardcoded interface structs (which had asserted a 1000 Mbps NIC at `192.168.1.150`) with live discovery of host interfaces via sysfs and netlink, preserving role classification and reporting only observed devices.
+- **Dual-condition presence rule**: Fixed `parseDnsmasqLeases`. A lease is only a grant and outlives disconnected devices. Presence now requires BOTH an unexpired lease AND an active kernel neighbor entry (`/proc/net/arp` / netlink). Stamping `LastSeen` with `time.Now()` was removed so stale entries no longer claim to have been active this instant.
+- **Hexadecimal ARP flag parsing**: Resolved a parser defect where hex `0x2` flags were parsed as decimal, causing all neighbor entries to be discarded and marking reachable gateways as unreachable.
+- **ICMP evasion**: Replaced ICMP ping probes with TCP handshakes and neighbor state to function properly when unprivileged processes cannot open raw ICMP sockets (`ping_group_range 1 0`). `probe_other.go` fails closed off Linux rather than inventing a healthy uplink.
+
+### Phase 13: Corporate Brand Identity Modernization & Visual Design
+
+Commit `6c6dc65` (9 files, +203/−134).
+
+Aligned the gateway console with The Heedful official design guidelines.
+
+- **The Heedful design system palette**: Updated corporate colors to `#0F0F0F` (page background), `#1A1A1A` (surface/panel), `#2B2B2B` (borders), `#FFC107` (TH yellow interactive accent), and `#424242` (subtle dividers).
+- **Typography hierarchy**: Introduced Space Grotesk display typography for headings, metrics, and branding, paired with Inter for clear body copy.
+- **Official V4 Hexagonal Eye logo**: Added [ui/components/logo.tsx](ui/components/logo.tsx) SVG mark in desktop header, navigation drawer, and branding surfaces.
+- **Inventory presence & device sorting**: Fixed device presence badge checking `c.online` instead of defaulting to Online when unblocked; added active vs total device sorting and summary indicators.
+- **Slice serialization safety**: Ensured Go slice serialization emits empty arrays (`[]`) instead of `null` for interface IPs and related lists.
+
+### Phase 14: Removal of Shipped Credentials & PBKDF2 Auth
+
+Commit `b961966` (5 files, +305/−23).
+
+Eliminated security vulnerability of static credentials compiled into every build.
+
+- **No implicit accounts**: Removed hardcoded credentials (`admin/thn-admin-password`, operator, viewer) from `NewAuthManager`. Fixed credentials in source code are an unauthenticated write path into house LANs.
+- **Config-driven operator account**: Added `management.operator_username` and `management.operator_password` to `config.Config`. Hashed with PBKDF2-HMAC-SHA256 (100,000 iterations, 16-byte cryptographically secure salt) on initialization.
+- **Explicit 503 unconfigured error**: Login against a gateway with unconfigured operator credentials returns HTTP 503 "management is not configured" with specific remediation steps, rather than misleading HTTP 401 "invalid credentials".
+- **Comprehensive test coverage**: Added `auth_hardcoded_test.go` covering no implicit account creation, rejection of documented default passwords, 503 response semantics, config-driven bootstrap idempotency, and empty credential handling.
+
+### Phase 15: Router-Style LAN Web UI Access (10.77.0.1) & Operator Login Flow
+
+Phase 15 connects physical Ethernet clients to a seamless, secure router experience at `10.77.0.1`.
+
+- **Router Web UI Experience**: Just like accessing a commercial router at `192.168.1.1` or `10.77.0.1`, connecting to the gateway LAN now provides a full browser administration experience with operator credentials.
+- **Next.js Authentication Layer**:
+  - Implemented [ui/components/login-view.tsx](ui/components/login-view.tsx) with The Heedful branding, providing operator username and password inputs, unconfigured gateway status alerts, and feedback.
+  - Implemented [ui/lib/auth.ts](ui/lib/auth.ts), `ui/app/api/auth/login/route.ts`, `ui/app/api/auth/logout/route.ts`, and `ui/app/api/auth/status/route.ts`. Session management uses secure HTTP-only cookies (`thn_session`).
+  - Added [ui/components/user-badge.tsx](ui/components/user-badge.tsx) displaying active operator identity (`👤 admin`) with one-click sign-out.
+  - Protected `RootLayout` in [ui/app/layout.tsx](ui/app/layout.tsx) so unauthenticated users see the clean router login screen, while authenticated operators access the full console.
+- **CLI Management Auth Command**:
+  - Added `thn management auth` subcommand in [internal/cli/management_commands.go](internal/cli/management_commands.go). Supports `--status` for configuration checks and `--username` / `--password` for credential verification via `AuthManager.Authenticate`.
+  - Added `"auth"` to `ALLOWED.management` allowlist in [ui/lib/thn.ts](ui/lib/thn.ts).
+  - Added unit test suite in [internal/cli/management_auth_test.go](internal/cli/management_auth_test.go).
+- **Firewall & Routing for LAN Web Access**:
+  - Updated [internal/firewall/nft/render.go](internal/firewall/nft/render.go) to explicitly permit LAN management traffic (TCP 80, 1717, 8080) and local DNS/DHCP (UDP 53, 67, TCP 53).
+  - Added prerouting redirect rule `iifname <LAN> tcp dport 80 redirect to :1717` in `render.go`, `driver_production.go`, and `linux_driver.go`. Navigating to `http://10.77.0.1` in any browser automatically routes to the Next.js console on port 1717 without disrupting Docker services on WAN.
+- **Physical Lab Configuration**:
+  - Added `management:` block to [configs/physical_dell_lab.yaml](configs/physical_dell_lab.yaml) and [configs/gateway.yaml](configs/gateway.yaml) binding `0.0.0.0:1717` and allowing `10.77.0.0/24`, `127.0.0.0/8`, and `100.64.0.0/10`.
+
 ---
 
 ## 3. Git Commit History Reference
@@ -276,6 +349,11 @@ npm 10.9 writes `libc` fields for Linux-only optional dependencies; 10.8 does no
 | `0f2ac3c` | `feat(ui): standardize page headers with PageHeader component` — console defect remediation, responsive rewrite, telemetry honesty (§2 Phase 10) |
 | `3b2a00f` | `chore: ignore gateway build output at repo root and document lockfile churn` |
 | `250fc5f` | `chore(tools): mark thn-client-control.sh executable` |
+| `b5ce05c` | `docs: record console rewrite, downstream outage and topology decisions` |
+| `e465573` | `fix(management): report observed state instead of asserted state` — Phase 12 |
+| `6c6dc65` | `feat(ui): modernize brand identity to The Heedful guide and fix device presence bug` — Phase 13 |
+| `b961966` | `fix(management): remove hardcoded credentials shipped with every build` — Phase 14 |
+| `HEAD` | `feat: router-style LAN Web UI access on 10.77.0.1 and operator authentication` — Phase 15 |
 
 ---
 
@@ -315,6 +393,18 @@ dhcp:
 
 dns:
   enabled: false   # Handled externally by host dnsmasq service
+
+management:
+  enabled: true
+  bind_address: "0.0.0.0:1717"
+  allowed_networks:
+    - 10.77.0.0/24
+    - 127.0.0.0/8
+    - 100.64.0.0/10
+  wan_access: false
+  session_ttl: 24h
+  operator_username: "admin"
+  operator_password: ""
 ```
 
 ---

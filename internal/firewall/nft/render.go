@@ -129,10 +129,21 @@ func writeInputChain(b *strings.Builder, p policy.Policy) {
 		"udp dport 41641 accept",
 		"preserve Tailscale WireGuard peering")
 
-	if p.ICMP.AllowLAN && p.Interfaces.LAN != "" {
+	if p.Interfaces.LAN != "" {
+		if p.ICMP.AllowLAN {
+			writeRule(b, p, "\t\t",
+				fmt.Sprintf("iifname %q icmp accept", p.Interfaces.LAN),
+				"LAN clients may reach this host")
+		}
 		writeRule(b, p, "\t\t",
-			fmt.Sprintf("iifname %q icmp accept", p.Interfaces.LAN),
-			"LAN clients may reach this host")
+			fmt.Sprintf("iifname %q tcp dport { 80, 1717, 8080 } accept", p.Interfaces.LAN),
+			"LAN management web console access")
+		writeRule(b, p, "\t\t",
+			fmt.Sprintf("iifname %q udp dport { 53, 67 } accept", p.Interfaces.LAN),
+			"LAN DNS and DHCP queries")
+		writeRule(b, p, "\t\t",
+			fmt.Sprintf("iifname %q tcp dport 53 accept", p.Interfaces.LAN),
+			"LAN DNS TCP queries")
 	}
 
 	if p.ICMP.AllowWAN {
@@ -291,6 +302,12 @@ func writeNatChain(b *strings.Builder, p policy.Policy) {
 	fmt.Fprintf(b, "\tchain prerouting {\n")
 	fmt.Fprintf(b, "\t\ttype nat hook prerouting priority dstnat; policy accept\n")
 	fmt.Fprintf(b, "\n")
+	if p.Interfaces.LAN != "" {
+		writeComment(b, "Redirect HTTP (port 80) from LAN to management console port 1717")
+		writeRule(b, p, "\t\t",
+			fmt.Sprintf("iifname %q tcp dport 80 redirect to :1717", p.Interfaces.LAN),
+			"router-style web console access on 10.77.0.1")
+	}
 	writeComment(b, "No inbound port forwards are generated. The policy denies")
 	writeComment(b, "unsolicited WAN-to-LAN traffic, so there is nothing to")
 	writeComment(b, "forward; add a rule here only alongside a matching")

@@ -63,7 +63,7 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   networks: [],
   monitoring: [],
   events: [],
-  management: ["status", "check"],
+  management: ["status", "check", "auth"],
 };
 
 export type ThnCommand = keyof typeof ALLOWED;

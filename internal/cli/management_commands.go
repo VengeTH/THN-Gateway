@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/VengeTH/THN-Gateway/internal/management"
 	"github.com/VengeTH/THN-Gateway/internal/state"
@@ -255,10 +256,11 @@ func runEvents(env *Env, args []string) ExitCode {
 // runManagement serves the local management HTTP API or reports configuration.
 func runManagement(env *Env, args []string) ExitCode {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
-		env.printf("Usage: thn management [status|check|serve] [options]\n\n")
+		env.printf("Usage: thn management [status|check|serve|auth] [options]\n\n")
 		env.printf("Subcommands:\n")
 		env.printf("  status, check   Inspect the management service model and bind policy (default)\n")
-		env.printf("  serve           Start the local LAN-only management HTTP API server\n\n")
+		env.printf("  serve           Start the local LAN-only management HTTP API server\n")
+		env.printf("  auth            Authenticate operator credentials or check auth configuration\n\n")
 		env.printf("Options:\n")
 		env.printf("  --config <path> Path to configuration file\n")
 		env.printf("  --help, -h      Show this help message\n")
@@ -365,6 +367,99 @@ func runManagement(env *Env, args []string) ExitCode {
 		if err := server.Start(ctx); err != nil && err != http.ErrServerClosed {
 			return env.fatalf("thn management: %v\n", err)
 		}
+		return ExitOK
+
+	case "auth":
+		fs := newFlagSet()
+		configPath := fs.String("config", "")
+		username := fs.String("username", "")
+		password := fs.String("password", "")
+		status := fs.Bool("status", false)
+		help := fs.Bool("help", false)
+		h := fs.Bool("h", false)
+		_, err := fs.Parse(rest)
+		if err != nil {
+			return env.fatalf("thn management auth: %v\n", err)
+		}
+		if *help || *h {
+			env.printf("Usage: thn management auth [--status] [--username <user> --password <pass>] [--config <path>]\n\n")
+			env.printf("Authenticates operator credentials or checks if gateway auth is configured.\n")
+			return ExitOK
+		}
+		path := env.resolveConfigPath(*configPath)
+		cfg, err := loadConfig(env, path)
+		if err != nil {
+			return env.fatalf("thn management auth: %v\n", err)
+		}
+
+		configured := strings.TrimSpace(cfg.Management.OperatorUsername) != "" && strings.TrimSpace(cfg.Management.OperatorPassword) != ""
+
+		if *status || (*username == "" && *password == "") {
+			doc := map[string]any{
+				"configured": configured,
+				"username":   cfg.Management.OperatorUsername,
+				"role":       "admin",
+			}
+			if env.IsJSON {
+				if err := env.printJSON(doc); err != nil {
+					return env.fatalf("thn management auth: %v\n", err)
+				}
+				return ExitOK
+			}
+			if configured {
+				env.printf("Operator authentication: CONFIGURED (operator: %s)\n", cfg.Management.OperatorUsername)
+			} else {
+				env.printf("Operator authentication: UNCONFIGURED (set management.operator_username and management.operator_password)\n")
+			}
+			return ExitOK
+		}
+
+		if !configured {
+			doc := map[string]any{
+				"authenticated": false,
+				"error":         "management is not configured",
+				"detail":        "no operator credential exists. set management.operator_username and management.operator_password in the gateway configuration.",
+			}
+			if env.IsJSON {
+				_ = env.printJSON(doc)
+				return ExitProblems
+			}
+			env.errorf("thn management auth: management is not configured (no operator credentials)\n")
+			return ExitProblems
+		}
+
+		am := management.NewAuthManager(cfg.Management.SessionTTL)
+		_ = am.BootstrapOperator(cfg.Management.OperatorUsername, cfg.Management.OperatorPassword)
+
+		sess, err := am.Authenticate(*username, *password)
+		if err != nil {
+			doc := map[string]any{
+				"authenticated": false,
+				"error":         "invalid username or password",
+			}
+			if env.IsJSON {
+				_ = env.printJSON(doc)
+				return ExitProblems
+			}
+			env.errorf("thn management auth: invalid username or password\n")
+			return ExitProblems
+		}
+
+		doc := map[string]any{
+			"authenticated": true,
+			"username":      sess.Username,
+			"role":          sess.Role,
+			"token":         sess.Token,
+			"csrf_token":    sess.CSRFToken,
+			"expires_at":    sess.ExpiresAt.Format(time.RFC3339),
+		}
+		if env.IsJSON {
+			if err := env.printJSON(doc); err != nil {
+				return env.fatalf("thn management auth: %v\n", err)
+			}
+			return ExitOK
+		}
+		env.printf("Authenticated successfully as %s (%s)\n", sess.Username, sess.Role)
 		return ExitOK
 
 	default:

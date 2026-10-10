@@ -291,3 +291,28 @@ activation:
   # so holding root over SSH must not by itself be enough to activate. Setting
   # this to false is a validation error, not a warning.
   require_physical_presence: true
+
+management:
+  # Enabled controls whether the management plane and dashboard are available.
+  enabled: true
+
+  # Network address and port for the local management HTTP API and console.
+  bind_address: 0.0.0.0:1717
+
+  # CIDRs permitted to query and manage the gateway.
+  allowed_networks:
+    - 10.77.0.0/24
+    - 127.0.0.0/8
+    - 100.64.0.0/10
+
+  # WAN access is strictly prohibited by safety policy.
+  wan_access: false
+
+  # Duration before an authenticated operator session expires.
+  session_ttl: 24h
+
+  # Operator username and password for router-style authentication on 10.77.0.1.
+  # Empty means NO account exists and the gateway reports unconfigured.
+  operator_username: ""
+  operator_password: ""
+

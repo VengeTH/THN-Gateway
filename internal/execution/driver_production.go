@@ -370,6 +370,14 @@ func (d *ProductionDriver) applyTHNTable(ctx context.Context, o OpNFTApplyTHNTab
 		_ = run("add", "rule", "inet", "thn", "input", "iifname", "tailscale0", "accept")
 		_ = run("add", "rule", "inet", "thn", "input", "udp", "dport", "41641", "accept")
 		_ = run("add", "rule", "inet", "thn", "input", "tcp", "dport", "22", "accept")
+
+		// Router-style management web console: transparently redirect port 80 to port 1717 on LAN.
+		if o.LANInterface != "" {
+			if err := run("add", "chain", "inet", "thn", "prerouting",
+				"{", "type", "nat", "hook", "prerouting", "priority", "dstnat", ";", "policy", "accept", ";", "}"); err == nil {
+				_ = run("add", "rule", "inet", "thn", "prerouting", "iifname", o.LANInterface, "tcp", "dport", "80", "redirect", "to", ":1717")
+			}
+		}
 	}
 
 	if len(o.NATInterfaces) > 0 {

@@ -62,3 +62,18 @@ qos:
   #     upload_kbps: 5000
   #     priority: high
   clients: []
+
+management:
+  enabled: true
+  bind_address: "0.0.0.0:1717"
+  allowed_networks:
+    - 10.77.0.0/24
+    - 127.0.0.0/8
+    - 100.64.0.0/10
+  wan_access: false
+  session_ttl: 24h
+  # Operator account for Web UI and management API on 10.77.0.1.
+  # Set a secure password before enabling management write operations.
+  operator_username: "admin"
+  operator_password: ""
+

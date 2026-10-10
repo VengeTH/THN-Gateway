@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Nav, type NavItem } from "@/components/nav";
 import { HexagonalEyeLogo } from "@/components/logo";
+import { LoginView } from "@/components/login-view";
+import { UserBadge } from "@/components/user-badge";
+import { getSession, getAuthStatus } from "@/lib/auth";
 import { thn } from "@/lib/thn";
 import type { MonitoringResponse } from "@/lib/types";
 import "./globals.css";
@@ -79,7 +82,11 @@ async function gatewayStatus(): Promise<{
 }
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const status = await gatewayStatus();
+  const [session, authStatus, status] = await Promise.all([
+    getSession(),
+    getAuthStatus(),
+    gatewayStatus(),
+  ]);
 
   return (
     <html lang="en">
@@ -92,64 +99,84 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         />
       </head>
       <body className="min-h-screen bg-ink-950 font-sans text-ink-100 antialiased selection:bg-accent selection:text-ink-950">
-        {/* ---- Desktop header ---------------------------------------- */}
-        <header className="sticky top-0 z-30 hidden border-b border-ink-800 bg-ink-900/90 backdrop-blur lg:block">
-          <div className="shell flex h-16 items-center justify-between gap-4">
-            <Link href="/" className="flex min-w-0 items-center gap-3 group">
-              <HexagonalEyeLogo className="h-8 w-8 transition-transform group-hover:scale-105" />
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-bold font-display tracking-tight text-ink-50">
-                  THN Gateway
-                </span>
-                <span className="block truncate text-2xs leading-tight text-ink-400">
-                  The Heedful Network Appliance
-                </span>
-              </span>
-            </Link>
-
-            {status ? (
-              <span className="flex items-center gap-2 text-xs text-ink-300">
-                <span
-                  aria-hidden="true"
-                  className={`h-2 w-2 rounded-full ${
-                    status.tone === "ok"
-                      ? "bg-ok"
-                      : status.tone === "warning"
-                        ? "bg-warning"
-                        : "bg-critical"
-                  }`}
-                />
-                {status.label}
-              </span>
-            ) : (
-              <span className="text-xs text-ink-500">Status unavailable</span>
-            )}
+        {!session ? (
+          <div className="min-h-screen flex flex-col justify-between">
+            <LoginView
+              configured={authStatus.configured}
+              operatorUsername={authStatus.username}
+            />
+            <footer className="border-t border-ink-850 py-6">
+              <div className="shell flex flex-col gap-1 text-2xs text-ink-500 sm:flex-row sm:items-center sm:justify-between">
+                <span>THN Gateway · The Heedful</span>
+                <span>Manageable only from inside your own network</span>
+              </div>
+            </footer>
           </div>
-        </header>
+        ) : (
+          <>
+            {/* ---- Desktop header ---------------------------------------- */}
+            <header className="sticky top-0 z-30 hidden border-b border-ink-800 bg-ink-900/90 backdrop-blur lg:block">
+              <div className="shell flex h-16 items-center justify-between gap-4">
+                <Link href="/" className="flex min-w-0 items-center gap-3 group">
+                  <HexagonalEyeLogo className="h-8 w-8 transition-transform group-hover:scale-105" />
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-bold font-display tracking-tight text-ink-50">
+                      THN Gateway
+                    </span>
+                    <span className="block truncate text-2xs leading-tight text-ink-400">
+                      The Heedful Network Appliance
+                    </span>
+                  </span>
+                </Link>
 
-        {/*
-          The mobile chrome sits OUTSIDE the content row. It used to be inside
-          it, which made the mobile bar and the status strip flex siblings of
-          <main>: at 874px the row had three children competing for the width
-          and <main> was squeezed to zero, so the page rendered as a sidebar
-          and nothing else.
-        */}
-        <div className="lg:hidden">
-          <Nav items={NAV} status={status} variant="mobile" />
-        </div>
+                <div className="flex items-center gap-5">
+                  {status ? (
+                    <span className="flex items-center gap-2 text-xs text-ink-300">
+                      <span
+                        aria-hidden="true"
+                        className={`h-2 w-2 rounded-full ${
+                          status.tone === "ok"
+                            ? "bg-ok"
+                            : status.tone === "warning"
+                              ? "bg-warning"
+                              : "bg-critical"
+                        }`}
+                      />
+                      {status.label}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-ink-500">Status unavailable</span>
+                  )}
+                  <UserBadge username={session.username} />
+                </div>
+              </div>
+            </header>
 
-        <div className="shell flex gap-8 pb-16 pt-4 lg:pt-6">
-          <Nav items={NAV} status={status} variant="desktop" />
+            {/*
+              The mobile chrome sits OUTSIDE the content row.
+            */}
+            <div className="lg:hidden">
+              <div className="border-b border-ink-800 bg-ink-900/90 px-4 py-2 flex items-center justify-between">
+                <span className="text-2xs text-ink-400">THN Appliance</span>
+                <UserBadge username={session.username} />
+              </div>
+              <Nav items={NAV} status={status} variant="mobile" />
+            </div>
 
-          <main className="min-w-0 flex-1">{children}</main>
-        </div>
+            <div className="shell flex gap-8 pb-16 pt-4 lg:pt-6">
+              <Nav items={NAV} status={status} variant="desktop" />
 
-        <footer className="border-t border-ink-850 py-6">
-          <div className="shell flex flex-col gap-1 text-2xs text-ink-500 sm:flex-row sm:items-center sm:justify-between">
-            <span>THN Gateway · The Heedful</span>
-            <span>Manageable only from inside your own network</span>
-          </div>
-        </footer>
+              <main className="min-w-0 flex-1">{children}</main>
+            </div>
+
+            <footer className="border-t border-ink-850 py-6">
+              <div className="shell flex flex-col gap-1 text-2xs text-ink-500 sm:flex-row sm:items-center sm:justify-between">
+                <span>THN Gateway · The Heedful</span>
+                <span>Manageable only from inside your own network</span>
+              </div>
+            </footer>
+          </>
+        )}
       </body>
     </html>
   );

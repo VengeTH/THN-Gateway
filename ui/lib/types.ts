@@ -463,3 +463,23 @@ export interface MonitoringResponse {
   wan: WANHealth;
 }
 
+// ---------------------------------------------------- Authentication
+
+export interface AuthStatusResponse {
+  configured: boolean;
+  username?: string;
+  role?: string;
+}
+
+export interface AuthLoginResponse {
+  authenticated: boolean;
+  username?: string;
+  role?: string;
+  token?: string;
+  csrf_token?: string;
+  expires_at?: string;
+  error?: string;
+  detail?: string;
+}
+
+

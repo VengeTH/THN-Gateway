@@ -106,7 +106,7 @@ func (am *AuthManager) BootstrapOperator(username, password string) error {
 	if err != nil {
 		return fmt.Errorf("hashing operator password: %w", err)
 	}
-	am.users[username] = User{
+	am.users[strings.ToLower(username)] = User{
 		Username:     username,
 		PasswordHash: hash,
 		Role:         RoleAdmin,
