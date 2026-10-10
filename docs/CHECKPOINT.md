@@ -7,8 +7,10 @@ This document records the exact state of **THN Gateway**, every change implement
 ## 1. Executive Summary & Where We Are Right Now
 
 As of **October 10, 2026**:
-- **Gateway Status**: Live activation has been executed and **COMMITTED** to the Linux kernel on `heedful-dev`.
+- **Gateway Status**: Live activation has been executed, **COMMITTED**, and **VERIFIED** on `heedful-dev`.
 - **Forwarding & NAT**: Active (`net.ipv4.ip_forward = 1`, `table inet thn` masquerade NAT via `enp0s31f6`).
+- **Firewall Ruleset Verified**: `table inet thn` contains stateful input/forward filtering, LAN forwarding (`enx00e099001812` -> `enp0s31f6`), and persistent remote management rules (`tailscale0`, UDP 41641, TCP 22).
+- **Remote Administration**: Fully operational and verified over Tailscale (`100.65.7.40`) and Wi-Fi.
 - **LAN Hardware**: 100 Mbps USB Ethernet adapter (`enx00e099001812`, `hw:2c886f45ad0cb12f`).
 - **Policy Classification**: **Approved for this hardware deployment** with an operational caution regarding the 100 Mbps Fast Ethernet line rate (~94 Mbps payload limit).
 - **Embedded vs External Services**:
@@ -136,18 +138,16 @@ dns:
 
 ## 5. Future Actions & Roadmap Checkpoints
 
-### Immediate Next Steps (Current Sprint)
-1. **Pull and Re-apply on `heedful-dev`**:
-   Pull commit `44159d3` and run:
-   ```bash
-   cd ~/THN-Gateway && git pull origin main && go build -o thn ./cmd/thn
-   sudo ./thn activate --config configs/physical_dell_lab.yaml --confirm --confirm-present
-   ```
-   This loads the updated `table inet thn` with Tailscale input acceptance and the clean 100 Mbps caution note.
+### Immediate Next Steps (Current Sprint - Completed & Verified)
+1. **Re-activation on `heedful-dev`**: **COMPLETED & VERIFIED**.
+   - Activation committed with result `COMMITTED`.
+   - `table inet thn` verified on live host via `nft list table inet thn`.
+   - Input chain includes persistent `tailscale0`, UDP 41641, and TCP 22 acceptance.
+   - Tailscale connectivity (`100.65.7.40`) and remote SSH confirmed functional.
 2. **Post-Activation Verification**:
-   - Verify Tailscale SSH connectivity remains responsive (`100.65.7.40`).
-   - Connect a downstream device and confirm DHCP lease allocation (`10.77.0.100+`), DNS resolution, and internet access.
-   - Confirm bandwidth throughput reaches ~90–94 Mbps line rate.
+   - Connect downstream devices (in Router Mode) and verify DHCP lease allocation (`10.77.0.100+`) from `dnsmasq`.
+   - Verify DNS resolution via `10.77.0.1` (`dig @10.77.0.1 google.com`).
+   - Confirm internet browsing and bandwidth throughput reaching the ~90–94 Mbps line rate.
 
 ### Medium-Term Actions (Hardware & Production Hardening)
 1. **Gigabit USB 3.0 Adapter Replacement**:
