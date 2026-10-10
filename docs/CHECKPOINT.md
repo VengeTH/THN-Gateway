@@ -71,6 +71,13 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
   - Updated [configs/physical_dell_lab.yaml](configs/physical_dell_lab.yaml) with the approved production block.
   - Added regression test `TestApprovedFastEthernetLANIsApprovedForProduction`.
 
+### Phase 7: Driver Execution Management Protection in `applyTHNTable`
+- **Problem**: In live activation, `ProductionDriver.applyTHNTable` constructs `table inet thn` rules directly. When flushed and populated, it lacked `tailscale0`, WireGuard UDP 41641, and SSH port 22 in the input chain.
+- **Fix**: Updated `ProductionDriver.applyTHNTable` in [internal/execution/driver_production.go](internal/execution/driver_production.go) and `LinuxDriver.applyTHNTable` in [internal/execution/linux_driver.go](internal/execution/linux_driver.go) to automatically insert:
+  - `add rule inet thn input iifname tailscale0 accept`
+  - `add rule inet thn input udp dport 41641 accept`
+  - `add rule inet thn input tcp dport 22 accept`
+
 ---
 
 ## 3. Git Commit History Reference
@@ -82,6 +89,8 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
 | `7476c2f` | `fix(cli): parse --config flag in activation inspect command` |
 | `d877555` | `feat: approve Fast Ethernet LAN adapter for production with 100 Mbps line rate caution` |
 | `44159d3` | `fix(firewall): permit Tailscale tunnel and WireGuard port in input chain` |
+| `dbd251b` | `docs: add master checkpoint document and update documentation index` |
+| `834d3fb` | `fix(execution): add management input rules for Tailscale and SSH in applyTHNTable` |
 
 ---
 
