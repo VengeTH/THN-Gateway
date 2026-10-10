@@ -1,4 +1,4 @@
-import { Failure, Panel, Pre, Because } from "@/components/primitives";
+import { Failure, Panel, PageHeader, Pre, Because } from "@/components/primitives";
 import { thn } from "@/lib/thn";
 import type { RenderResponse } from "@/lib/types";
 
@@ -59,16 +59,11 @@ export default async function RenderPage() {
 
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">Rendered artefacts</h1>
-      <p className="mb-2 text-xs text-ink-400">
-        The configurations THN would install, as text.
-      </p>
-      <p className="mb-5 text-xs text-ink-500">
-        None of it has been applied, and this build has no code path that could
-        apply it. The value of these panels is that the intent is reviewable
-        before anything is applied — which is the only stage at which reviewing
-        it is free.
-      </p>
+      <PageHeader
+        title="Configuration preview"
+        plain="Exactly what the gateway is set up to do, written out in plain text."
+        detail="Useful if you want to check a setting is really doing what you think — or to show it to someone else. Nothing here has been applied, and this build has no way to apply it."
+      />
 
       {results.map(({ artefact, result }) => (
         <Panel key={artefact.key} title={artefact.title} note={artefact.note}>

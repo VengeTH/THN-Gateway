@@ -1,4 +1,4 @@
-import { Panel, Pill, Because } from "@/components/primitives";
+import { Panel, PageHeader, Pill, Because } from "@/components/primitives";
 import { availableCommands, isPermitted, withheldCommands } from "@/lib/thn";
 
 /**
@@ -12,10 +12,38 @@ import { availableCommands, isPermitted, withheldCommands } from "@/lib/thn";
 export default function AboutPage() {
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">About</h1>
-      <p className="mb-5 text-xs text-ink-400">
-        What this console is, and the one thing it deliberately cannot do.
-      </p>
+      <PageHeader
+        title="About"
+        plain="What this console shows you, and the one thing it deliberately cannot do."
+      />
+
+      <Panel title="Plain-language glossary" note="The words this console uses, and what they mean">
+        <dl className="panel-body grid gap-x-8 gap-y-3 sm:grid-cols-2">
+          {[
+            ["Gateway", "The box that sits between your internet connection and your devices. It is what this console manages."],
+            ["WAN", "Your connection to the internet — the cable running out to your provider."],
+            ["LAN", "Your own local network, the one your devices are on."],
+            ["Device", "Anything connected to your network: a phone, a laptop, a TV, a printer."],
+            ["Zone / VLAN", "A separate group of devices kept apart from the others, so they cannot see each other."],
+            ["Isolation", "Stopping devices in the same group from talking directly to each other."],
+            ["DHCP", "The service that automatically hands out addresses to devices that join."],
+            ["DNS", "The service that turns a name like example.com into an address."],
+            ["Speed limit", "A cap on how much bandwidth a device may use, so one device cannot slow down everything else."],
+            ["Schedule", "A time window during which a setting applies, such as a slower limit overnight."],
+            ["Rule", "One automatic check. Each has a name, how serious it is, and how long a fault must last before you are told."],
+            ["Incident", "A problem the gateway has decided is real, worked out from what its rules found."],
+            ["Pending", "A fault that is happening but has not lasted long enough to be reported yet."],
+            ["Undecidable", "A check whose input could not be read. This is not the same as the check being fine."],
+            ["Fail-closed", "If the gateway cannot read the state of the network, it stops rather than letting traffic through unchecked."],
+            ["Preview", "A configuration written out as text, not applied."],
+          ].map(([term, meaning]) => (
+            <div key={term}>
+              <dt className="text-xs font-semibold text-ink-100">{term}</dt>
+              <dd className="mt-0.5 text-2xs leading-relaxed text-ink-400">{meaning}</dd>
+            </div>
+          ))}
+        </dl>
+      </Panel>
 
       <Panel title="The boundary">
         <div className="panel-body space-y-3 text-xs leading-relaxed text-ink-300">
@@ -48,7 +76,7 @@ export default function AboutPage() {
           {withheldCommands.map((c) => (
             <div key={c.command}>
               <div className="mb-1 flex items-center gap-2">
-                <code className="value text-critical-text">thn {c.command}</code>
+                <code className="value text-critical-fg">thn {c.command}</code>
                 <Pill>not permitted</Pill>
               </div>
               <Because>{c.why}</Because>

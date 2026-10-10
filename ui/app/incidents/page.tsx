@@ -1,4 +1,14 @@
-import { Failure, Panel, SeverityPill, Pill, Because, Empty } from "@/components/primitives";
+import Link from "next/link";
+import {
+  Failure,
+  Panel,
+  PageHeader,
+  Callout,
+  SeverityPill,
+  Pill,
+  Because,
+  Empty,
+} from "@/components/primitives";
 import { thn } from "@/lib/thn";
 import type { ThnResult } from "@/lib/thn";
 import type { IncidentsResponse } from "@/lib/types";
@@ -42,78 +52,83 @@ export default async function IncidentsPage({
 
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">Incidents</h1>
+      <PageHeader
+        title="Problems"
+        plain="What is wrong with your network right now, and what to do about it."
+        detail="The gateway runs the checks on the Rules page and reports anything that needs your attention here."
+      />
 
-      {/* The limitation, above everything. */}
-      <div className="panel mb-4 border-ink-700 bg-ink-900">
-        <div className="panel-body">
-          <div className="flex items-center gap-2">
-            <span className="text-2xs font-semibold uppercase tracking-wide text-ink-200">
-              no retained history
-            </span>
-            <Pill>no daemon in this build</Pill>
-          </div>
-          <p className="mt-2 text-xs text-ink-300">
-            Nothing on this page is a record of what has happened. The state
-            database and the daemon that would write to it are not part of this
-            build, so there is nothing to read back and nothing is remembered
-            between requests.
+      {/* The limitation, immediately after the page says what the page is. */}
+      <div className="mb-4">
+        <Callout tone="info" title="This build does not keep a history">
+          <p>
+            Nothing on this page is a record of something that happened. The
+            part of the gateway that would save history is not built yet, so
+            problems are not remembered between visits.
           </p>
-          <p className="mt-1 text-2xs text-ink-400">
-            Supply an observation below to run the rules and see what they would
-            conclude. The result is computed from what you typed, not observed
-            from the gateway.
+          <p>
+            Describe a situation below and the gateway will run its checks
+            against it. What you see is worked out from what you typed — it is
+            not something the gateway has observed.
           </p>
-        </div>
+        </Callout>
       </div>
 
       <Panel
-        title="Observe"
-        note="space-separated name=value pairs; ? means the value could not be read"
+        title="Describe a situation"
+        note="Write what you observed as name=value pairs, separated by spaces"
       >
-        <form method="get" className="panel-body">
-          <div className="flex flex-wrap gap-2">
+        <form method="get" className="panel-body space-y-3">
+          <div>
+            <label htmlFor="observe" className="label mb-1 block">
+              What you are seeing
+            </label>
             <input
+              id="observe"
               type="text"
               name="observe"
               defaultValue={observe ?? ""}
               placeholder="network.inspect.supported=true network.wan.present=true network.wan.up=false"
-              className="min-w-[24rem] flex-1 rounded border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-ink-100 outline-none focus:border-ink-500"
+              className="field"
+              autoComplete="off"
+              spellCheck={false}
             />
-            <button
-              type="submit"
-              className="rounded border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-ink-100 hover:bg-ink-700"
-            >
-              Evaluate
-            </button>
+            <p className="mt-1.5 text-2xs leading-relaxed text-ink-500">
+              Use <code className="text-ink-400">?</code> for anything you could
+              not find out. The gateway treats &ldquo;could not check&rdquo;
+              differently from a genuine <code className="text-ink-400">false</code>.
+            </p>
           </div>
-          {observe ? (
-            <a
-              href="/incidents"
-              className="mt-2 inline-block text-2xs text-ink-400 underline decoration-ink-700 hover:text-ink-200"
-            >
-              clear
-            </a>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="submit" className="btn btn-primary tap">
+              Run the checks
+            </button>
+            {observe ? (
+              <Link href="/incidents" className="link">
+                Clear
+              </Link>
+            ) : null}
+          </div>
         </form>
       </Panel>
 
       {listed === null ? (
-        <Panel title="Incidents" note="nothing was evaluated">
+        <Panel title="Problems" note="nothing was checked">
           <Empty>
-            No observation was supplied, so no rule ran and there is nothing to
-            report. That is not the same as a gateway with no incidents — it is
-            the absence of a question. Supply observations above, or open the{" "}
-            <a href="/rules" className="underline decoration-ink-700">
+            You have not described a situation, so no check has run and there is
+            nothing to report. That is not the same as your network having no
+            problems — it means nobody has asked yet. Describe a situation
+            above, or open the{" "}
+            <Link href="/rules" className="link">
               rules page
-            </a>{" "}
-            to see each rule&apos;s conclusion individually.
+            </Link>{" "}
+            to see each check&apos;s conclusion on its own.
           </Empty>
         </Panel>
       ) : listed.ok ? (
         <Panel
-          title="Implied by your observation"
-          note="computed from the observation above; not observed from the gateway"
+          title="What your description implies"
+          note="worked out from what you typed above; not observed from the gateway"
           action={
             <span className="flex gap-1.5">
               <Pill>{listed.data.summary.active} active</Pill>
@@ -126,14 +141,15 @@ export default async function IncidentsPage({
         >
           {listed.data.incidents.length === 0 ? (
             <Empty>
-              No incidents. If that surprises you, check the{" "}
-              <a href="/rules" className="underline decoration-ink-700">
+              No problems found. If that surprises you, open the{" "}
+              <Link href="/rules" className="link">
                 rules page
-              </a>{" "}
-              with the same observations: every rule has a duration threshold, so
-              a condition that is genuinely true is reported as pending rather
-              than firing, and a rule that could not read its input is reported
-              as undecidable rather than as fine.
+              </Link>{" "}
+              with the same description: every check has a minimum duration, so a
+              fault that is genuinely true is reported as &ldquo;waiting&rdquo;
+              rather than &ldquo;happening&rdquo;, and a check that could not
+              read its input is reported as &ldquo;unknown&rdquo; rather than as
+              fine.
             </Empty>
           ) : (
             listed.data.incidents.map((inc) => (
@@ -145,45 +161,43 @@ export default async function IncidentsPage({
                   {inc.flaps > 0 ? <Pill>flapped {inc.flaps}×</Pill> : null}
                 </div>
 
-                <div className="mb-2 grid grid-cols-4 gap-3">
+                <div className="mb-2 grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <div>
-                    <div className="label">opened</div>
+                    <div className="label">started</div>
                     <div className="value text-ink-300">{shortTime(inc.opened_at)}</div>
                   </div>
                   <div>
-                    <div className="label">duration</div>
+                    <div className="label">lasting</div>
                     <div className="value text-ink-300">{inc.duration}</div>
                   </div>
                   <div>
-                    <div className="label">causes</div>
+                    <div className="label">root causes</div>
                     <div className="value text-ink-300">{inc.causes.length}</div>
                   </div>
                   <div>
-                    <div className="label">consequences</div>
-                    <div className="value text-ink-300">
-                      {inc.consequences?.length ?? 0}
-                    </div>
+                    <div className="label">knock-on effects</div>
+                    <div className="value text-ink-300">{inc.consequences?.length ?? 0}</div>
                   </div>
                 </div>
 
-                <div className="label mb-1">Causes</div>
+                <div className="label mb-1">What caused it</div>
                 {inc.causes.map((c) => (
-                  <div key={c.rule} className="flex items-baseline gap-2 py-0.5">
-                    <span className="value w-56 shrink-0 text-ink-200">{c.rule}</span>
+                  <div key={c.rule} className="kv py-0.5">
+                    <span className="value break-all text-ink-200">{c.rule}</span>
                     <span className="text-2xs text-ink-400">{c.title}</span>
                   </div>
                 ))}
 
                 {inc.consequences && inc.consequences.length > 0 ? (
                   <>
-                    <div className="label mb-1 mt-2">Suppressed as consequences</div>
+                    <div className="label mb-1 mt-2">Also affected, but not reported separately</div>
                     {inc.consequences.map((c) => (
-                      <div key={c.rule} className="flex items-baseline gap-2 py-0.5">
-                        <span className="value w-56 shrink-0 text-ink-400 line-through decoration-ink-700">
+                      <div key={c.rule} className="kv py-0.5">
+                        <span className="value break-all text-ink-400 line-through decoration-ink-700">
                           {c.rule}
                         </span>
                         <span className="text-2xs text-ink-500">
-                          suppressed by {c.suppressed_by}
+                          because of {c.suppressed_by}
                         </span>
                       </div>
                     ))}

@@ -5,14 +5,31 @@
 @layer base {
   :root {
     color-scheme: dark;
+
+    /*
+     * A safe area for notched phones. Without it the sticky header sits under
+     * the status bar on a device that has one, and the first thing the user
+     * cannot read is the product's name.
+     */
+    --thn-header-h: 3.5rem;
+  }
+
+  * {
+    @apply border-ink-800;
   }
 
   html {
     @apply bg-ink-950 text-ink-100 antialiased;
+    /*
+     * Stops iOS from silently enlarging text in landscape, which breaks every
+     * layout in the application at exactly the widths where there is least
+     * room for the change.
+     */
+    -webkit-text-size-adjust: 100%;
   }
 
   body {
-    @apply text-sm;
+    @apply font-sans text-sm;
   }
 
   /*
@@ -25,15 +42,71 @@
   pre {
     @apply font-mono;
   }
+
+  /*
+   * A single, consistent focus ring. The console is keyboard-operable and
+   * every interactive element inherits this; `:focus-visible` keeps it off
+   * mouse clicks, which is the only way it is tolerable on a dense page.
+   */
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-ink-950;
+  }
+
+  /*
+   * A visible scrollbar on the surfaces that scroll. The default overlay
+   * scrollbar is invisible until used, which means a table that continues
+   * off-screen reads as a table that ended.
+   */
+  ::-webkit-scrollbar {
+    @apply h-2 w-2;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-700;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-600;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
 @layer components {
-  .panel {
-    @apply rounded-lg border border-ink-800 bg-ink-900;
+  /*
+   * The page shell. One column on a phone, sidebar plus content from the
+   * `lg` step up, which is where a 224px rail stops eating a third of the
+   * viewport.
+   */
+  .shell {
+    @apply mx-auto w-full max-w-console px-3 sm:px-5 lg:px-8;
   }
 
+  /* ------------------------------------------------------------- panels */
+
+  .panel {
+    @apply rounded-lg border border-ink-800 bg-ink-900 shadow-panel;
+  }
+
+  /*
+   * The header stacks on a phone. `flex-wrap` rather than a breakpoint, so a
+   * long title wraps under its own action instead of being crushed beside it.
+   */
   .panel-header {
-    @apply flex items-baseline justify-between gap-4 border-b border-ink-800 px-4 py-3;
+    @apply flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-ink-800 px-4 py-3;
   }
 
   .panel-title {
@@ -50,11 +123,22 @@
    * because nothing here is a button.
    */
   .row {
-    @apply grid items-baseline gap-x-4 border-b border-ink-850 px-4 py-2 last:border-b-0;
+    @apply grid items-baseline gap-x-4 gap-y-0.5 border-b border-ink-850 px-4 py-2 last:border-b-0;
   }
 
   .row:hover {
     @apply bg-ink-850/40;
+  }
+
+  /*
+   * A two-column label/value row that collapses to one column on a phone.
+   *
+   * The label goes above the value rather than beside it, because a 8rem
+   * label column beside a 320px value column is the difference between a
+   * readable screen and a column of two-word lines.
+   */
+  .kv {
+    @apply grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-[8rem_minmax(0,1fr)] sm:items-baseline;
   }
 
   .label {
@@ -75,7 +159,100 @@
    * carrier reports it down" is the thing an operator can act on.
    */
   .because {
-    @apply text-2xs text-ink-400;
+    @apply text-2xs leading-relaxed text-ink-400;
+  }
+
+  /* ------------------------------------------------------------ buttons */
+
+  /*
+   * Buttons carry their own affordance: a border, a hover and a disabled
+   * state. A control that relies on colour alone is invisible to anyone who
+   * cannot distinguish it, and the selected preset needs to be obvious to
+   * everyone.
+   */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-700
+           bg-ink-850 px-3 py-1.5 text-xs font-medium text-ink-100
+           transition-colors hover:border-ink-600 hover:bg-ink-800
+           disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply border-accent/60 bg-accent font-semibold text-accent-text hover:bg-accent-hover hover:border-accent;
+  }
+
+  /*
+   * A link that navigates rather than acts. Underlined by default, because a
+   * console reader scanning for "where does this go" should not have to know
+   * our colour convention to find it.
+   */
+  .link {
+    @apply text-ink-300 underline decoration-ink-700 underline-offset-2
+           transition-colors hover:text-ink-100 hover:decoration-ink-500;
+  }
+
+  /* -------------------------------------------------------------- input */
+
+  .field {
+    @apply w-full rounded-md border border-ink-700 bg-ink-950 px-3 py-2
+           font-mono text-xs text-ink-100 placeholder:text-ink-500
+           outline-none transition-colors focus:border-accent;
+  }
+
+  /*
+   * Anything that can be a touch target is at least 44px tall on a phone.
+   * 36px is the desktop floor, which is denser and correct with a mouse.
+   */
+  .tap {
+    @apply min-h-[2.25rem];
+  }
+
+  @media (min-width: 480px) {
+    .tap {
+      @apply min-h-0;
+    }
+  }
+
+  /* -------------------------------------------------------------- table */
+
+  /*
+   * A scroll container for a table that is genuinely wider than the screen.
+   *
+   * The shadow gradient is the important part: it is the only signal that
+   * says "there is more to the right", which a truncated column otherwise
+   * hides completely.
+   */
+  .table-scroll {
+    @apply overflow-x-auto;
+    background:
+      linear-gradient(to right, #13161f 30%, rgb(19 22 31 / 0)) left center,
+      linear-gradient(to left, #13161f 30%, rgb(19 22 31 / 0)) right center,
+      radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 0.5), rgb(0 0 0 / 0)) left center,
+      radial-gradient(farthest-side at 100% 50%, rgb(0 0 0 / 0.5), rgb(0 0 0 / 0)) right center;
+    background-repeat: no-repeat;
+    background-size:
+      2.5rem 100%,
+      2.5rem 100%,
+      0.75rem 100%,
+      0.75rem 100%;
+    background-attachment: local, local, scroll, scroll;
+  }
+
+  /*
+   * A table on a wide screen. Below `sm` the same markup is replaced by the
+   * card list in `<DataTable>`, so this never has to squeeze four columns
+   * into 320px.
+   */
+  .data-table {
+    @apply hidden w-full border-collapse text-left sm:table;
+  }
+
+  .data-table thead th {
+    @apply whitespace-nowrap border-b border-ink-800 pb-2 pr-3 align-bottom;
+  }
+
+  .data-table tbody td {
+    @apply border-b border-ink-850 py-2 pr-3 align-top last:border-b-0;
   }
 }
 

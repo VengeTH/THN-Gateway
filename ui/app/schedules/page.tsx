@@ -1,4 +1,4 @@
-import { Failure, Panel, Pill, Because, Empty } from "@/components/primitives";
+import { Failure, Panel, PageHeader, Pill, Because, Empty } from "@/components/primitives";
 import { thn } from "@/lib/thn";
 import type { PolicyListResponse, ScheduleJSON } from "@/lib/types";
 
@@ -31,38 +31,46 @@ export default async function SchedulesPage({
 
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">Schedules</h1>
-      <p className="mb-5 text-xs text-ink-400">
-        When a policy applies. Evaluated at a moment you choose, because a
-        schedule that is correct in the abstract is still wrong at three in the
-        morning.
-      </p>
+      <PageHeader
+        title="Schedules"
+        plain="When a setting applies — for example, a slower speed limit only between 22:00 and 06:00."
+        detail="Checked against a moment you choose, because a schedule that is right on paper is still wrong at three in the morning."
+      />
 
-      <Panel title="At" note="an RFC 3339 instant; blank uses the server's clock">
-        <form method="get" className="panel-body flex flex-wrap items-center gap-2">
-          <input
-            type="text"
-            name="at"
-            defaultValue={at}
-            placeholder="2026-03-14T23:00:00Z"
-            className="w-64 rounded border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-ink-100 outline-none focus:border-ink-500"
-          />
-          <button
-            type="submit"
-            className="rounded border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-ink-100 hover:bg-ink-700"
-          >
-            Evaluate
-          </button>
-          <div className="flex gap-1.5">
+      <Panel title="Check against a time" note="Leave blank to use the current time">
+        <form method="get" className="panel-body space-y-3">
+          <div>
+            <label htmlFor="at" className="label mb-1 block">
+              Moment to check
+            </label>
+            <input
+              id="at"
+              type="text"
+              name="at"
+              defaultValue={at}
+              placeholder="2026-03-14T23:00:00Z"
+              className="field sm:max-w-xs"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="mt-1.5 text-2xs text-ink-500">
+              Format: <code className="text-ink-400">2026-03-14T23:00:00Z</code> — date,
+              then time, then <code className="text-ink-400">Z</code> for UTC.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="submit" className="btn btn-primary tap">
+              Check
+            </button>
             {[
-              { label: "midday", v: "2026-03-14T12:00:00Z" },
-              { label: "evening", v: "2026-03-14T23:00:00Z" },
-              { label: "small hours", v: "2026-03-15T03:00:00Z" },
+              { label: "Midday", v: "2026-03-14T12:00:00Z" },
+              { label: "Evening", v: "2026-03-14T23:00:00Z" },
+              { label: "Small hours", v: "2026-03-15T03:00:00Z" },
             ].map((p) => (
               <a
                 key={p.label}
                 href={`/schedules?at=${encodeURIComponent(p.v)}`}
-                className="rounded border border-ink-800 px-2 py-1 text-2xs text-ink-400 hover:border-ink-600 hover:text-ink-200"
+                className="btn !py-1 text-2xs"
               >
                 {p.label}
               </a>
@@ -87,7 +95,7 @@ export default async function SchedulesPage({
             </Empty>
           ) : (
             Object.entries(listed.data.policies.schedules ?? {}).map(([name, s]) => (
-              <div key={name} className="row grid-cols-[10rem_1fr]">
+              <div key={name} className="kv border-b border-ink-850 px-4 py-3 last:border-b-0">
                 <div>
                   <div className="value text-ink-100">{name}</div>
                   <div className="label">{s.kind}</div>

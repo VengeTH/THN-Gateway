@@ -1,4 +1,13 @@
-import { Failure, Panel, Pill, Because, Empty, Pre } from "@/components/primitives";
+import {
+  Failure,
+  Panel,
+  PageHeader,
+  Pill,
+  Because,
+  Empty,
+  Pre,
+} from "@/components/primitives";
+import { DataTable } from "@/components/data-table";
 import { thn } from "@/lib/thn";
 import type { PolicyListResponse, PolicyResolveResponse } from "@/lib/types";
 
@@ -38,11 +47,11 @@ export default async function PoliciesPage({
 
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">Policies</h1>
-      <p className="mb-5 text-xs text-ink-400">
-        Named settings selected per device and per time. A device with no
-        profile gets the host defaults, which is a complete configuration.
-      </p>
+      <PageHeader
+        title="Policies"
+        plain="Speed limits and other settings, applied to a device at a given time."
+        detail="If a device has no policy of its own, the gateway's default settings apply — which is a complete, working setup, not a gap."
+      />
 
       <ResolveForm mac={mac ?? ""} at={at ?? ""} />
 
@@ -139,41 +148,46 @@ export default async function PoliciesPage({
               <Empty>No bindings. Nothing overrides the host defaults.</Empty>
             ) : (
               <div className="panel-body">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-ink-800 text-left">
-                      <th className="label w-24 pb-2">kind</th>
-                      <th className="label w-56 pb-2">subject</th>
-                      <th className="label w-40 pb-2">profile</th>
-                      <th className="label pb-2">when</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(listed.data.policies.bindings ?? []).map((b, i) => (
-                      <tr key={`${b.kind}-${i}`} className="border-b border-ink-850 last:border-b-0">
-                        <td className="py-1.5 pr-3">
-                          <span className="value text-ink-300">{b.kind}</span>
-                        </td>
-                        <td className="py-1.5 pr-3">
-                          <span className="value text-ink-200">
-                            {b.subject.mac ?? b.subject.device_id ?? b.subject.hostname ?? "(any device)"}
-                          </span>
-                        </td>
-                        <td className="py-1.5 pr-3">
-                          <span className="value text-ink-200">{b.profile}</span>
-                        </td>
-                        <td className="py-1.5">
-                          {b.schedule ? (
-                            <span className="value text-ink-300">{b.schedule}</span>
-                          ) : (
-                            <Pill>always</Pill>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <DataTable
+                caption="Policy bindings"
+                rows={listed.data.policies.bindings ?? []}
+                rowKey={(b, i) => `${b.kind}-${i}`}
+                columns={[
+                  {
+                    key: "kind",
+                    label: "applies to",
+                    render: (b) => <span className="value text-ink-300">{b.kind}</span>,
+                  },
+                  {
+                    key: "subject",
+                    label: "device",
+                    render: (b) => (
+                      <span className="value break-all text-ink-200">
+                        {b.subject.mac ??
+                          b.subject.device_id ??
+                          b.subject.hostname ??
+                          "any device"}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: "profile",
+                    label: "gets",
+                    render: (b) => <span className="value break-all text-ink-200">{b.profile}</span>,
+                  },
+                  {
+                    key: "schedule",
+                    label: "when",
+                    render: (b) =>
+                      b.schedule ? (
+                        <span className="value break-all text-ink-300">{b.schedule}</span>
+                      ) : (
+                        <Pill>always</Pill>
+                      ),
+                  },
+                ]}
+              />
+            </div>
             )}
           </Panel>
         </>
@@ -198,8 +212,8 @@ function ProfileGroup({
     <div className="mb-3 last:mb-0">
       <div className="label mb-1">{title}</div>
       {entries.map((e) => (
-        <div key={e.name} className="flex items-baseline gap-3 py-0.5">
-          <span className="value w-40 shrink-0 text-ink-200">{e.name}</span>
+        <div key={e.name} className="kv py-0.5">
+          <span className="value break-all text-ink-200">{e.name}</span>
           <span className="text-2xs text-ink-400">{e.summary}</span>
         </div>
       ))}
@@ -224,7 +238,7 @@ function Resolution({
       note={`${mac || "every device"} at ${r.at}`}
       action={unresolved.length > 0 ? <Pill>{unresolved.length} unresolved</Pill> : null}
     >
-      <div className="panel-body grid grid-cols-2 gap-4 border-b border-ink-800">
+      <div className="panel-body grid grid-cols-1 gap-4 border-b border-ink-800 sm:grid-cols-2">
         <Effective label="device" value={r.device?.name} note={describeDevice(r.device?.name)} />
         <Effective
           label="bandwidth"
@@ -266,7 +280,7 @@ function Resolution({
                 key={`${reason.binding.kind}-${i}`}
                 className={`rounded border px-3 py-2 ${
                   reason.selected
-                    ? "border-ok/40 bg-ok-muted/20"
+                    ? "border-ok-edge/50 bg-ok-muted/20"
                     : "border-ink-800 bg-ink-950"
                 }`}
               >
@@ -294,11 +308,11 @@ function Resolution({
       </div>
 
       {unresolved.length > 0 ? (
-        <div className="panel-body border-t border-critical/30">
-          <div className="label mb-1 text-critical-text">Configuration problems</div>
+        <div className="panel-body border-t border-critical-edge/40">
+          <div className="label mb-1 text-critical-fg">Configuration problems</div>
           <ul className="space-y-1">
             {unresolved.map((u) => (
-              <li key={u} className="text-2xs text-critical-text">
+              <li key={u} className="text-2xs text-critical-fg">
                 {u}
               </li>
             ))}
@@ -343,41 +357,46 @@ function describeDevice(name: string | undefined): string | undefined {
 
 function ResolveForm({ mac, at }: { mac: string; at: string }) {
   return (
-    <Panel title="Resolve" note="what a given device gets at a given moment">
-      <form method="get" className="panel-body space-y-2">
-        <div className="flex flex-wrap gap-2">
-          <label className="flex items-center gap-2">
-            <span className="label">mac</span>
+    <Panel
+      title="Work out what a device would get"
+      note="Useful when two policies could both apply and you need to know which one wins"
+    >
+      <form method="get" className="panel-body space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label htmlFor="mac" className="label mb-1 block">
+              Device (its MAC address)
+            </label>
             <input
+              id="mac"
               type="text"
               name="mac"
               defaultValue={mac}
               placeholder="aa:bb:cc:dd:ee:01"
-              className="w-56 rounded border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-ink-100 outline-none focus:border-ink-500"
+              className="field"
+              autoComplete="off"
+              spellCheck={false}
             />
-          </label>
-          <label className="flex items-center gap-2">
-            <span className="label">at</span>
+          </div>
+          <div>
+            <label htmlFor="at" className="label mb-1 block">
+              At this moment (leave blank for now)
+            </label>
             <input
+              id="at"
               type="text"
               name="at"
               defaultValue={at}
               placeholder="2026-03-14T23:00:00Z"
-              className="w-56 rounded border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-ink-100 outline-none focus:border-ink-500"
+              className="field"
+              autoComplete="off"
+              spellCheck={false}
             />
-          </label>
-          <button
-            type="submit"
-            className="rounded border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-ink-100 hover:bg-ink-700"
-          >
-            Resolve
-          </button>
+          </div>
         </div>
-        <Because>
-          The time is an RFC 3339 instant. It matters: a policy gated by an
-          overnight window resolves differently at 23:00 and at 03:00, and
-          that difference is the whole reason the layer has a time model.
-        </Because>
+        <button type="submit" className="btn btn-primary tap">
+          Work it out
+        </button>
       </form>
     </Panel>
   );

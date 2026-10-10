@@ -82,10 +82,17 @@ export function Panel({
   );
 }
 
-/** A label/value row, the console's basic unit. */
+/**
+ * A label/value row, the console's basic unit.
+ *
+ * The label sits beside its value on a wide screen and above it on a narrow
+ * one. That is the single most load-bearing responsive decision in the
+ * application: a fixed 8rem label column leaves a 220px value column on a
+ * phone, which turns every sentence into three two-word lines.
+ */
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="row grid-cols-[8rem_1fr]">
+    <div className="kv border-b border-ink-850 px-4 py-2 last:border-b-0">
       <span className="label">{label}</span>
       <div className="min-w-0">{children}</div>
     </div>
@@ -95,6 +102,126 @@ export function Field({ label, children }: { label: string; children: React.Reac
 /** A heading above a group of fields. */
 export function Group({ children }: { children: React.ReactNode }) {
   return <div className="mb-2 mt-4 first:mt-0">{children}</div>;
+}
+
+// ----------------------------------------------------------- page header
+
+/**
+ * The top of every page.
+ *
+ * `plain` is the sentence a non-technical reader actually needs, written
+ * before the technical one rather than after it. Several pages in this
+ * console open with a caveat instead, which is the right instinct and the
+ * wrong order: someone who cannot tell what a page is for cannot act on the
+ * caveat once they reach it.
+ */
+export function PageHeader({
+  title,
+  plain,
+  detail,
+  action,
+}: {
+  title: string;
+  /** One plain sentence: what this page is for. */
+  plain: string;
+  /** Optional second sentence, for the mechanism behind it. */
+  detail?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <header className="mb-5 flex flex-wrap items-start justify-between gap-x-6 gap-y-3 border-b border-ink-800 pb-4">
+      <div className="min-w-0">
+        <h1 className="text-lg font-bold tracking-tight text-ink-50 sm:text-xl">{title}</h1>
+        <p className="mt-1 text-sm text-ink-300">{plain}</p>
+        {detail ? <p className="mt-1 text-xs text-ink-500">{detail}</p> : null}
+      </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </header>
+  );
+}
+
+// -------------------------------------------------------------- key/value
+
+/**
+ * A number with a label, for the small multiples on the dashboard.
+ *
+ * The value is set in the largest weight on the card because it is the thing
+ * being read; the label is above it in the muted tone because it is the
+ * context. A statistic whose unit is in the label rather than the value is a
+ * statistic that gets quoted without its unit.
+ */
+export function Stat({
+  label,
+  value,
+  hint,
+  tone = "neutral",
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint?: string;
+  tone?: "neutral" | "ok" | "warning" | "critical";
+}) {
+  const toneClass =
+    tone === "ok"
+      ? "text-ok-fg"
+      : tone === "warning"
+        ? "text-warning-fg"
+        : tone === "critical"
+          ? "text-critical-fg"
+          : "text-ink-100";
+
+  return (
+    <div className="min-w-0 rounded-md border border-ink-800 bg-ink-950/60 p-2.5">
+      <span className="block text-2xs uppercase tracking-wide text-ink-400">{label}</span>
+      <span className={`mt-0.5 block truncate text-base font-bold ${toneClass}`}>{value}</span>
+      {hint ? <span className="mt-0.5 block text-2xs text-ink-500">{hint}</span> : null}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- callouts
+
+/**
+ * A note that changes how the rest of the page should be read.
+ *
+ * `tone` is about the reader's situation, not about severity: `info` is a
+ * limitation to understand, `warning` is something to check, `critical` is
+ * something that failed. Using it for anything else would dilute the one
+ * thing colour means in this application.
+ */
+export function Callout({
+  tone = "info",
+  title,
+  children,
+}: {
+  tone?: "info" | "warning" | "critical";
+  title?: string;
+  children: React.ReactNode;
+}) {
+  const toneClass =
+    tone === "critical"
+      ? "border-critical-edge/50 bg-critical-muted/10"
+      : tone === "warning"
+        ? "border-warning-edge/50 bg-warning-muted/10"
+        : "border-ink-700 bg-ink-950/50";
+
+  const titleClass =
+    tone === "critical"
+      ? "text-critical-fg"
+      : tone === "warning"
+        ? "text-warning-fg"
+        : "text-ink-200";
+
+  return (
+    <div className={`rounded-lg border px-3.5 py-3 ${toneClass}`}>
+      {title ? (
+        <div className={`text-2xs font-semibold uppercase tracking-wide ${titleClass}`}>
+          {title}
+        </div>
+      ) : null}
+      <div className="mt-1 space-y-1.5 text-xs leading-relaxed text-ink-300">{children}</div>
+    </div>
+  );
 }
 
 // -------------------------------------------------------------- failures
@@ -120,12 +247,12 @@ const ERROR_TITLE: Record<ThnError["kind"], string> = {
  */
 export function Failure({ error }: { error: ThnError }) {
   return (
-    <div className="panel border-critical/40">
+    <div className="panel border-critical-edge/40">
       <div className="panel-header">
-        <h2 className="panel-title text-critical-text">
+        <h2 className="panel-title text-critical-fg">
           {ERROR_TITLE[error.kind]}
         </h2>
-        <span className="value text-ink-500">{error.kind}</span>
+        <span className="value text-ink-400">{error.kind}</span>
       </div>
       <div className="panel-body space-y-3">
         <p className="text-xs text-ink-200">{error.message}</p>

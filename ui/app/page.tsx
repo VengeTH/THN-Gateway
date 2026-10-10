@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Failure } from "@/components/primitives";
+import { Failure, PageHeader, Stat } from "@/components/primitives";
 import { thn } from "@/lib/thn";
 import type {
   ClientDevice,
@@ -37,32 +37,33 @@ export default async function DashboardPage() {
 
   const internetStatusTone =
     gateway.internet_status === "online"
-      ? "bg-ok/10 text-ok border-ok/30"
+      ? "bg-ok-muted/20 text-ok-fg border-ok-edge/40"
       : gateway.internet_status === "degraded"
-      ? "bg-warning-muted text-warning-text border-warning-border"
-      : "bg-critical-muted text-critical-text border-critical-border";
+      ? "bg-warning-muted text-warning-text border-warning-edge"
+      : "bg-critical-muted text-critical-text border-critical-edge";
 
   return (
     <div className="space-y-6">
       {/* Top Banner / Gateway Identity */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-ink-800 pb-4">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-ink-50">
-            {gateway.hostname}
-          </h1>
-          <p className="text-xs text-ink-400">
-            THN Gateway &middot; Uptime: {gateway.uptime} &middot; Mode: {gateway.activation_state}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${internetStatusTone}`}>
-            ● {gateway.internet_status.toUpperCase()}
+      <PageHeader
+        title={gateway.hostname}
+        plain={
+          gateway.internet_status === "online"
+            ? "Your network and internet are working."
+            : gateway.internet_status === "degraded"
+              ? "Your local network works, but the internet connection is unstable."
+              : "Your local network is up, but the internet is not reachable."
+        }
+        detail={`Up for ${gateway.uptime} · ${describeActivation(gateway.activation_state)}`}
+        action={
+          <span
+            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${internetStatusTone}`}
+          >
+            <span aria-hidden="true" className="h-2 w-2 rounded-full bg-current" />
+            {describeStatus(gateway.internet_status)}
           </span>
-          <span className="rounded bg-ink-800 px-2 py-0.5 text-2xs text-ink-300">
-            {gateway.health_state.toUpperCase()}
-          </span>
-        </div>
-      </div>
+        }
+      />
 
       {/* Grid: 1 col on mobile, 2 cols on tablet/desktop */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -77,22 +78,27 @@ export default async function DashboardPage() {
             </div>
 
             <div className="my-4 text-center">
-              <div className="text-2xl font-bold text-ink-50">
-                {wan.internet_reachable ? "Connected & Healthy" : "Offline"}
+              <div className="text-xl font-bold text-ink-50 sm:text-2xl">
+                {wan.internet_reachable ? "Internet is working" : "No internet"}
               </div>
-              <p className="text-xs text-ink-400 mt-1">
-                Gateway: {wan.gateway_ip} &middot; Latency: {wan.latency_ms > 0 ? `${wan.latency_ms} ms` : "unknown"}
+              <p className="mt-1 text-xs text-ink-400">
+                Reply time {wan.latency_ms > 0 ? `${wan.latency_ms} ms` : "unknown"} &middot;{" "}
+                lost packets {wan.packet_loss_pct}%
               </p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-ink-800/80 text-center">
-              <div className="bg-ink-850/50 rounded p-2">
-                <span className="block text-2xs uppercase text-ink-400">Estimated Download</span>
-                <span className="text-base font-semibold text-ok">↓ 100 Mbps</span>
+            <div className="grid grid-cols-2 gap-3 border-t border-ink-800/80 pt-3 text-center">
+              <div className="rounded bg-ink-850/50 p-2">
+                <span className="block text-2xs uppercase text-ink-400">Downloading now</span>
+                <span className="text-base font-semibold text-ink-100">
+                  {formatSpeed(wan.rx_throughput_bps)}
+                </span>
               </div>
-              <div className="bg-ink-850/50 rounded p-2">
-                <span className="block text-2xs uppercase text-ink-400">Estimated Upload</span>
-                <span className="text-base font-semibold text-ink-100">↑ 20 Mbps</span>
+              <div className="rounded bg-ink-850/50 p-2">
+                <span className="block text-2xs uppercase text-ink-400">Uploading now</span>
+                <span className="text-base font-semibold text-ink-100">
+                  {formatSpeed(wan.tx_throughput_bps)}
+                </span>
               </div>
             </div>
           </div>
@@ -108,7 +114,7 @@ export default async function DashboardPage() {
               <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
                 Connected Devices
               </h2>
-              <Link href="/devices" className="text-xs text-ok hover:underline">
+              <Link href="/devices" className="text-xs text-ok-fg hover:underline">
                 View all ({clients.length}) &rarr;
               </Link>
             </div>
@@ -136,7 +142,7 @@ export default async function DashboardPage() {
                     <span className="font-medium text-ink-200">{c.hostname}</span>
                     <span className="text-2xs text-ink-400 block">{c.ipv4} &middot; {c.logical_group}</span>
                   </div>
-                  <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${c.blocked ? "bg-critical-muted text-critical-text" : "bg-ok/10 text-ok"}`}>
+                  <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${c.blocked ? "bg-critical-muted text-critical-text" : "bg-ok-muted/20 text-ok-fg"}`}>
                     {c.blocked ? "Blocked" : "Online"}
                   </span>
                 </li>
@@ -157,51 +163,48 @@ export default async function DashboardPage() {
             <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
               Security &amp; Network Control
             </h2>
-            <Link href="/networks" className="text-xs text-ok hover:underline">
+            <Link href="/networks" className="text-xs text-ok-fg hover:underline">
               Zones &rarr;
             </Link>
           </div>
 
-          <div className="space-y-2.5 text-xs">
-            <div className="flex items-center justify-between p-2 rounded bg-ink-850/50">
-              <div>
-                <span className="font-medium text-ink-200 block">Traffic Shaping (QoS)</span>
-                <span className="text-2xs text-ink-400">Fair queueing and bufferbloat protection</span>
-              </div>
-              <span className="text-2xs font-semibold px-2 py-0.5 rounded bg-ok/10 text-ok">
-                ACTIVE
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-ink-850/50">
-              <div>
-                <span className="font-medium text-ink-200 block">Firewall &amp; NAT</span>
-                <span className="text-2xs text-ink-400">Drop unauthorized incoming traffic</span>
-              </div>
-              <span className="text-2xs font-semibold px-2 py-0.5 rounded bg-ok/10 text-ok">
-                PROTECTED
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-ink-850/50">
-              <div>
-                <span className="font-medium text-ink-200 block">Client Isolation</span>
-                <span className="text-2xs text-ink-400">Neighbors &amp; Guests isolated from Family LAN</span>
-              </div>
-              <span className="text-2xs font-semibold px-2 py-0.5 rounded bg-ok/10 text-ok">
-                ENFORCED
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between p-2 rounded bg-ink-850/50">
-              <div>
-                <span className="font-medium text-ink-200 block">Management Access</span>
-                <span className="text-2xs text-ink-400">Restricted to local network (No WAN access)</span>
-              </div>
-              <span className="text-2xs font-semibold px-2 py-0.5 rounded bg-ok/10 text-ok">
-                LAN ONLY
-              </span>
-            </div>
+          <div className="space-y-2 text-xs">
+            {[
+              {
+                title: "Speed shaping",
+                note: "Devices with a speed limit get one, so one device cannot use up everyone else's",
+                href: "/policies",
+              },
+              {
+                title: "Firewall",
+                note: "Incoming connections from outside your network are refused",
+                href: "/render",
+              },
+              {
+                title: "Device separation",
+                note: "Guest and neighbour devices cannot see each other or your main devices",
+                href: "/networks",
+              },
+              {
+                title: "Management access",
+                note: "This console can only be reached from inside your network",
+                href: "/about",
+              },
+            ].map((item) => (
+              <Link
+                key={item.title}
+                href={item.href}
+                className="flex items-center justify-between gap-3 rounded bg-ink-850/50 p-2 transition-colors hover:bg-ink-800"
+              >
+                <span className="min-w-0">
+                  <span className="block font-medium text-ink-200">{item.title}</span>
+                  <span className="block text-2xs text-ink-400">{item.note}</span>
+                </span>
+                <span aria-hidden="true" className="shrink-0 text-2xs text-ink-500">
+                  →
+                </span>
+              </Link>
+            ))}
           </div>
         </section>
 
@@ -212,89 +215,149 @@ export default async function DashboardPage() {
               <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
                 Gateway Health
               </h2>
-              <Link href="/monitoring" className="text-xs text-ok hover:underline">
+              <Link href="/monitoring" className="text-xs text-ok-fg hover:underline">
                 Vitals &rarr;
               </Link>
             </div>
 
-            <div className="grid grid-cols-2 gap-3 my-2 text-xs">
-              <div className="bg-ink-850/50 rounded p-2.5">
-                <span className="block text-2xs text-ink-400">CPU Usage</span>
-                <span className="text-lg font-bold text-ink-100">
-                  {system.cpu_usage_percent > 0 ? `${system.cpu_usage_percent.toFixed(1)}%` : "Normal"}
-                </span>
-                <span className="block text-2xs text-ink-500 mt-0.5">Load: {system.cpu_load_average.join(", ")}</span>
-              </div>
+            <div className="my-2 grid grid-cols-2 gap-3 text-xs">
+              <Stat
+                label="Processor"
+                value={
+                  system.cpu_usage_percent > 0
+                    ? `${system.cpu_usage_percent.toFixed(0)}%`
+                    : "—"
+                }
+                hint={`Load ${system.cpu_load_average.join(", ")}`}
+                tone={system.cpu_usage_percent > 85 ? "warning" : "neutral"}
+              />
+              <Stat
+                label="Temperature"
+                value={
+                  system.temperature_celsius > 0 ? `${system.temperature_celsius.toFixed(0)}°C` : "—"
+                }
+                tone={
+                  system.temperature_celsius >= 80
+                    ? "warning"
+                    : system.temperature_celsius > 0
+                      ? "ok"
+                      : "neutral"
+                }
+              />
 
-              <div className="bg-ink-850/50 rounded p-2.5">
-                <span className="block text-2xs text-ink-400">Temperature</span>
-                <span className="text-lg font-bold text-ink-100">
-                  {system.temperature_celsius > 0 ? `${system.temperature_celsius.toFixed(1)} °C` : "Normal"}
-                </span>
-                <span className="block text-2xs text-ok mt-0.5">Hardware cool</span>
-              </div>
-
-              <div className="bg-ink-850/50 rounded p-2.5">
-                <span className="block text-2xs text-ink-400">Memory</span>
-                <span className="text-sm font-semibold text-ink-100">
-                  {(system.memory_used_bytes / (1024 * 1024)).toFixed(0)} MB
-                </span>
-                <span className="block text-2xs text-ink-500 mt-0.5">of {(system.memory_total_bytes / (1024 * 1024)).toFixed(0)} MB</span>
-              </div>
-
-              <div className="bg-ink-850/50 rounded p-2.5">
-                <span className="block text-2xs text-ink-400">Storage</span>
-                <span className="text-sm font-semibold text-ink-100">
-                  {(system.storage_used_bytes / (1024 * 1024 * 1024)).toFixed(0)} GB
-                </span>
-                <span className="block text-2xs text-ink-500 mt-0.5">of {(system.storage_total_bytes / (1024 * 1024 * 1024)).toFixed(0)} GB</span>
-              </div>
+              <Stat
+                label="Memory used"
+                value={`${(system.memory_used_bytes / (1024 * 1024)).toFixed(0)} MB`}
+                hint={`of ${(system.memory_total_bytes / (1024 * 1024)).toFixed(0)} MB`}
+              />
+              <Stat
+                label="Storage used"
+                value={`${(system.storage_used_bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`}
+                hint={`of ${(system.storage_total_bytes / (1024 * 1024 * 1024)).toFixed(0)} GB`}
+              />
             </div>
           </div>
 
-          <div className="pt-2 text-2xs text-ink-400 flex justify-between items-center">
-            <span>Kernel fail-closed safety active</span>
-            <span className="text-ok">● No errors</span>
-          </div>
+          <p className="mt-2 border-t border-ink-800/80 pt-2 text-2xs text-ink-500">
+            Safety behaviour: if the gateway cannot read the state of the
+            network, it stops rather than letting traffic through unchecked.
+          </p>
         </section>
       </div>
 
-      {/* Notifications / Alerts Section */}
-      <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-ink-100 uppercase tracking-wider">
-            Recent Gateway Alerts &amp; Notifications
-          </h2>
-          <span className="text-2xs text-ink-400">{events.length} recorded</span>
+      {/* Recent activity */}
+      <section className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-panel">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-ink-100">Recent activity</h2>
+          <Link href="/incidents" className="link text-xs">
+            See all problems →
+          </Link>
         </div>
 
-        <ul className="divide-y divide-ink-800/80 text-xs">
-          {events.slice(0, 4).map((e) => (
-            <li key={e.id} className="py-2.5 flex items-start justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${
-                    e.severity === "critical"
-                      ? "bg-critical-muted text-critical-text"
-                      : e.severity === "warning"
-                      ? "bg-warning-muted text-warning-text"
-                      : "bg-info-muted text-info-text"
-                  }`}>
-                    {e.severity.toUpperCase()}
+        {events.length === 0 ? (
+          <p className="py-4 text-center text-xs text-ink-400">
+            Nothing has been recorded yet.
+          </p>
+        ) : (
+          <ul className="divide-y divide-ink-800/80 text-xs">
+            {events.slice(0, 4).map((e) => (
+              <li key={e.id} className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-2xs font-semibold ${
+                        e.severity === "critical"
+                          ? "bg-critical-muted text-critical-text"
+                          : e.severity === "warning"
+                            ? "bg-warning-muted text-warning-text"
+                            : "bg-info-muted text-info-text"
+                      }`}
+                    >
+                      {e.severity}
+                    </span>
+                    <span className="font-medium text-ink-200">{e.message}</span>
+                  </div>
+                  <span className="mt-0.5 block text-2xs text-ink-500">
+                    {e.source} &middot; {formatTime(e.timestamp)}
                   </span>
-                  <span className="font-medium text-ink-200">{e.message}</span>
                 </div>
-                <span className="text-2xs text-ink-500 block mt-0.5">
-                  Source: {e.source} &middot; {new Date(e.timestamp).toLocaleTimeString()}
+                <span className="shrink-0 text-2xs text-ink-400">
+                  {e.acknowledged ? "Seen" : "New"}
                 </span>
-              </div>
-              <span className="text-2xs text-ink-400 shrink-0">
-                {e.acknowledged ? "Acknowledged" : "Active"}
-              </span>
-            </li>
-          ))}
-        </ul>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </div>
   );
+}
+
+// ------------------------------------------------------------- helpers
+
+/**
+ * Renders a bit rate for a person.
+ *
+ * The unit is inside the value rather than in the label, because a speed is
+ * quoted without its label and "1.4" means nothing on its own.
+ */
+function formatSpeed(bps: number): string {
+  if (!Number.isFinite(bps) || bps <= 0) return "idle";
+  if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbit/s`;
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbit/s`;
+  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbit/s`;
+  return `${Math.round(bps)} bit/s`;
+}
+
+function formatTime(timestamp: string): string {
+  const d = new Date(timestamp);
+  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleTimeString();
+}
+
+/**
+ * The binary speaks in states; a person does not. These two renderings exist
+ * so the vocabulary of the machine never reaches the top of a page.
+ */
+function describeStatus(status: string): string {
+  switch (status) {
+    case "online":
+      return "Internet working";
+    case "degraded":
+      return "Internet unstable";
+    case "offline":
+      return "No internet";
+    default:
+      return "Status unknown";
+  }
+}
+
+function describeActivation(state: string): string {
+  switch (state) {
+    case "active":
+      return "running normally";
+    case "dryrun":
+      return "in test mode — nothing is being applied";
+    default:
+      return `mode: ${state}`;
+  }
 }

@@ -1,8 +1,25 @@
-import { Failure, Panel, SeverityPill, StatePill, Pill, Because, Empty } from "@/components/primitives";
+import {
+  Failure,
+  Panel,
+  PageHeader,
+  SeverityPill,
+  StatePill,
+  Pill,
+  Because,
+  Empty,
+} from "@/components/primitives";
+import { DataTable } from "@/components/data-table";
 import { thn } from "@/lib/thn";
-import type { RulesListResponse, RulesTestResponse, Signal } from "@/lib/types";
+import type { RulesListResponse, RulesTestResponse, Signal, Severity } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
+
+/*
+ * Most serious first. The binary returns rules in whatever order the rule
+ * file declares, and the order that is convenient for the author of a YAML
+ * file is not the order a person triaging a fault wants to read them in.
+ */
+const SEVERITY_ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
 
 /**
  * The rule set, and a way to try a rule against a made-up gateway.
@@ -39,13 +56,20 @@ export default async function RulesPage({
         ])
       : null;
 
+  const sorted =
+    listed.ok
+      ? [...listed.data.rules].sort(
+          (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity],
+        )
+      : [];
+
   return (
     <>
-      <h1 className="mb-1 text-lg font-semibold tracking-tight text-ink-50">Rules</h1>
-      <p className="mb-5 text-xs text-ink-400">
-        The conditions THN evaluates, and what it concludes. Evaluating a rule
-        changes nothing; the binary has no apply path.
-      </p>
+      <PageHeader
+        title="Rules"
+        plain="The automatic checks your gateway runs to spot problems before you notice them."
+        detail="Each check has a name, a level of seriousness, and how long the problem must last before it is reported. Looking at these changes nothing."
+      />
 
       <ObservationForm defaultValue={raw ?? ""} />
 
@@ -59,69 +83,93 @@ export default async function RulesPage({
 
       {listed.ok ? (
         <Panel
-          title="Shipped rule set"
-          note={`${listed.data.count} rules`}
+          title={`The ${listed.data.count} checks your gateway runs`}
+          note="Sorted by how serious each one is. “Reports after” is how long a fault must persist before you are told about it."
         >
           <div className="panel-body">
-            <table className="w-full table-fixed">
-              <thead>
-                <tr className="border-b border-ink-800 text-left">
-                  <th className="label w-8 pb-2">severity</th>
-                  <th className="label w-48 pb-2">rule</th>
-                  <th className="label w-24 pb-2">threshold</th>
-                  <th className="label pb-2">holds when</th>
-                </tr>
-              </thead>
-              <tbody>
-                {listed.data.rules.map((r) => (
-                  <tr key={r.name} className="border-b border-ink-850 align-top last:border-b-0">
-                    <td className="py-2 pr-3">
-                      <SeverityPill severity={r.severity} />
-                    </td>
-                    <td className="py-2 pr-3">
-                      <div className="value">{r.name}</div>
+            <DataTable
+              caption="The checks the gateway runs"
+              rows={sorted}
+              rowKey={(r) => r.name}
+              columns={[
+                {
+                  key: "name",
+                  label: "check",
+                  render: (r) => (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <SeverityPill severity={r.severity} />
+                        <span className="value text-ink-100">{r.name}</span>
+                      </div>
                       <Because>{r.title}</Because>
                       {r.remedy ? (
                         <Because>
-                          <span className="text-ink-500">remedy:</span> {r.remedy}
+                          <span className="text-ink-500">what to do:</span> {r.remedy}
                         </Because>
                       ) : null}
-                    </td>
-                    <td className="py-2 pr-3">
-                      {r.for > 0 ? (
-                        <span className="value text-ink-300">{formatFor(r.for)}</span>
-                      ) : (
-                        <Pill>immediate</Pill>
-                      )}
-                    </td>
-                    <td className="py-2">
-                      <code className="value text-ink-300">{r.condition}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </>
+                  ),
+                },
+                {
+                  key: "for",
+                  label: "reports after",
+                  render: (r) =>
+                    r.for > 0 ? (
+                      <span className="value text-ink-300">{formatFor(r.for)}</span>
+                    ) : (
+                      <Pill>straight away</Pill>
+                    ),
+                },
+                {
+                  key: "condition",
+                  label: "checks whether",
+                  render: (r) =>
+                    r.condition ? (
+                      <code className="value break-words text-ink-300">{r.condition}</code>
+                    ) : (
+                      <span className="text-2xs text-ink-500">not shown here</span>
+                    ),
+                },
+              ]}
+            />
           </div>
         </Panel>
       ) : (
         <Failure error={listed.error} />
       )}
 
-      {listed.ok ? (
+      {listed.ok && listed.data.inhibitions.length > 0 ? (
         <Panel
-          title="Suppressions"
-          note="which conditions are consequences of which, so one fault is reported once"
+          title="Avoiding duplicate alarms"
+          note="When one fault causes another, only the root cause is reported"
         >
-          {listed.data.inhibitions.map((i) => (
-            <div key={`${i.source}-${i.target}`} className="row grid-cols-[1fr]">
-              <div>
-                <span className="value">{i.source}</span>
-                <span className="muted"> suppresses </span>
-                <span className="value">{i.target}</span>
-              </div>
-              <Because>{i.reason}</Because>
-            </div>
-          ))}
+          <div className="panel-body">
+            <DataTable
+              caption="Which problems suppress which"
+              rows={listed.data.inhibitions}
+              rowKey={(i) => `${i.source}-${i.target}`}
+              columns={[
+                {
+                  key: "pair",
+                  label: "instead of",
+                  render: (i) => (
+                    <span className="min-w-0 break-words">
+                      <span className="value text-ink-200">{i.source}</span>
+                      <span className="muted"> is reported, not </span>
+                      <span className="value text-ink-400 line-through decoration-ink-600">
+                        {i.target}
+                      </span>
+                    </span>
+                  ),
+                },
+                {
+                  key: "reason",
+                  label: "because",
+                  render: (i) => <Because>{i.reason}</Because>,
+                },
+              ]}
+            />
+          </div>
         </Panel>
       ) : null}
     </>
@@ -160,31 +208,43 @@ const EXAMPLES: ReadonlyArray<{ label: string; value: string }> = [
 function ObservationForm({ defaultValue }: { defaultValue: string }) {
   return (
     <Panel
-      title="Try the rules against an observation"
-      note="pairs of name=value; use ? for a value that could not be read"
+      title="Try a check against a made-up situation"
+      note="Useful if you want to see what the gateway would do, without waiting for something to go wrong."
     >
       <form method="get" className="panel-body space-y-3">
-        <input
-          type="text"
-          name="observe"
-          defaultValue={defaultValue}
-          placeholder="network.inspect.supported=true network.wan.up=false"
-          className="w-full rounded border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-xs text-ink-100 outline-none focus:border-ink-500"
-        />
+        <div>
+          <label htmlFor="observe" className="label mb-1 block">
+            Describe what you are seeing
+          </label>
+          <input
+            id="observe"
+            type="text"
+            name="observe"
+            defaultValue={defaultValue}
+            placeholder="network.inspect.supported=true network.wan.up=false"
+            className="field"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <p className="mt-1.5 text-2xs leading-relaxed text-ink-500">
+            Write what you observed as <code className="text-ink-400">name=value</code> pairs,
+            separated by spaces. Use <code className="text-ink-400">?</code> for something you
+            could not find out — the gateway treats that differently from a genuine{" "}
+            <code className="text-ink-400">false</code>.
+          </p>
+        </div>
+
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="submit"
-            className="rounded border border-ink-600 bg-ink-800 px-3 py-1.5 text-xs font-medium text-ink-100 hover:bg-ink-700"
-          >
-            Evaluate
+          <button type="submit" className="btn btn-primary tap">
+            Run the checks
           </button>
           {EXAMPLES.map((ex) => (
             <a
               key={ex.label}
               href={`/rules?observe=${encodeURIComponent(ex.value)}`}
-              className="rounded border border-ink-800 px-2 py-1 text-2xs text-ink-400 hover:border-ink-600 hover:text-ink-200"
+              className="btn !py-1 text-2xs"
             >
-              {ex.label}
+              Try: {ex.label}
             </a>
           ))}
         </div>
@@ -200,21 +260,21 @@ function Conclusions({ tested }: { tested: RulesTestResponse }) {
 
   return (
     <Panel
-      title="What the rules concluded"
-      note={`evaluated at ${tested.at}`}
+      title="What the checks concluded"
+      note={`Run against your description at ${tested.at}`}
       action={
-        <span className="flex gap-1.5">
+        <span className="flex flex-wrap gap-1.5">
           <Pill>{tested.firing.length} firing</Pill>
-          <Pill>{tested.pending.length} pending</Pill>
-          <Pill>{tested.undecidable.length} undecidable</Pill>
+          <Pill>{tested.pending.length} waiting</Pill>
+          <Pill>{tested.undecidable.length} unknown</Pill>
         </span>
       }
     >
       {tested.observations.length === 0 ? (
-        <Empty>No observations were supplied.</Empty>
+        <Empty>Nothing was described, so there was nothing to check.</Empty>
       ) : (
         <div className="panel-body pb-2">
-          <div className="label mb-1">Observations</div>
+          <div className="label mb-1">What you described</div>
           <div className="flex flex-wrap gap-1.5">
             {tested.observations.map((s) => (
               <ObservationChip key={s.name} signal={s} />
@@ -228,39 +288,42 @@ function Conclusions({ tested }: { tested: RulesTestResponse }) {
           that correctly did not fire would hide exactly the thing an operator
           needs. */}
       {undecidable.size > 0 ? (
-        <div className="row grid-cols-1 bg-warning-muted/20">
-          <div className="flex items-center gap-2">
-            <span className="text-2xs font-semibold uppercase tracking-wide text-warning-text">
+        <div className="border-b border-ink-850 bg-warning-muted/20 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-warning-fg">
               could not be determined
             </span>
-            <span className="muted">{undecidable.size} rule(s)</span>
+            <span className="muted text-2xs">{undecidable.size} check(s)</span>
           </div>
           <Because>
-            These rules did not fire and did not clear. THN could not read what
-            they depend on, which is not the same as their condition being
-            false. A rule that was firing and lost sight of its input stays
-            firing, because losing visibility is not evidence of recovery.
+            These checks neither fired nor cleared. The gateway could not read
+            what they depend on, which is not the same as their condition
+            being false. A check that was firing and lost sight of its input
+            stays firing, because losing visibility is not evidence of
+            recovery.
           </Because>
         </div>
       ) : null}
 
       {tested.firing.length === 0 && tested.pending.length === 0 ? (
         <Empty>
-          Nothing fired and nothing is pending. Every rule needs a condition
-          that holds for its threshold, so a single observation never shows a
+          Nothing fired and nothing is waiting. Every check needs its condition
+          to hold for the full threshold, so a single observation never shows a
           firing rule — the clock has to advance.
         </Empty>
       ) : (
         [...tested.firing, ...tested.pending].map((inst) => (
-          <div key={`${inst.rule}-${inst.group ?? ""}`} className="row grid-cols-[7rem_1fr]">
-            <div className="flex items-start gap-2">
+          <div key={`${inst.rule}-${inst.group ?? ""}`} className="kv border-b border-ink-850 px-4 py-2 last:border-b-0">
+            <div className="flex flex-wrap items-center gap-2">
               <StatePill state={inst.state} />
               <SeverityPill severity={inst.severity} />
             </div>
             <div className="min-w-0">
               <div className="value">{inst.rule}</div>
               <Because>{inst.title}</Because>
-              <code className="value mt-1 block text-ink-400">{inst.condition}</code>
+              {inst.condition ? (
+                <code className="value mt-1 block break-words text-ink-400">{inst.condition}</code>
+              ) : null}
             </div>
           </div>
         ))
@@ -280,7 +343,7 @@ function ObservationChip({ signal }: { signal: Signal }) {
 
   const tone = signal.value.known
     ? "border-ink-700 bg-ink-850 text-ink-200"
-    : "border-warning/40 bg-warning-muted text-warning-text";
+    : "border-warning-edge/50 bg-warning-muted text-warning-text";
 
   return (
     <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-2xs ${tone}`}>

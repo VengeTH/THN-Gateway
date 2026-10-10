@@ -1,4 +1,4 @@
-import { Failure, Panel, Pill } from "@/components/primitives";
+import { Failure, PageHeader, Pill } from "@/components/primitives";
 import { DeviceControls } from "@/components/device-controls";
 import { thn } from "@/lib/thn";
 import type { ClientDevice } from "@/lib/types";
@@ -16,65 +16,78 @@ export default async function DevicesPage() {
 
   return (
     <div className="space-y-6">
-      <div className="border-b border-ink-800 pb-4">
-        <h1 className="text-xl font-bold tracking-tight text-ink-50">
-          Connected Devices ({clients.length})
-        </h1>
-        <p className="text-xs text-ink-400">
-          Inventory of devices discovered on the network, their assigned zone, live controls, and active bandwidth policies.
-        </p>
-      </div>
+      <PageHeader
+        title={`Devices (${clients.length})`}
+        plain="Every computer, phone and smart device currently on your network."
+        detail="You can set a speed limit or block internet access for any of them."
+      />
 
-      <div className="grid grid-cols-1 gap-4">
-        {clients.map((c) => (
-          <div
-            key={c.id}
-            className="rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-sm flex flex-col justify-between gap-3"
-          >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div className="space-y-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-ink-100 truncate">
+      {clients.length === 0 ? (
+        <div className="panel">
+          <div className="panel-body py-10 text-center">
+            <p className="text-sm font-medium text-ink-200">No devices seen yet</p>
+            <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-ink-400">
+              Devices appear here as they join the network. If you expected to
+              see some, they may be on the internet connection rather than
+              your own network, or they may not have connected since the
+              gateway last looked.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4">
+          {clients.map((c) => (
+            <div
+              key={c.id}
+              className="flex flex-col justify-between gap-3 rounded-lg border border-ink-800 bg-ink-900/60 p-4 shadow-panel"
+            >
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start sm:gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-sm font-semibold text-ink-100">
                     {c.hostname}
                   </span>
                   <span
-                    className={`text-2xs font-semibold px-2 py-0.5 rounded ${
+                    className={`rounded px-2 py-0.5 text-2xs font-semibold ${
                       c.blocked
                         ? "bg-critical-muted text-critical-text"
-                        : "bg-ok/10 text-ok"
+                        : "bg-ok-muted/20 text-ok-fg"
                     }`}
                   >
-                    {c.blocked ? "BLOCKED" : "ONLINE"}
+                    {c.blocked ? "Blocked" : "Online"}
                   </span>
-                  <span className="bg-ink-800 text-ink-400 text-2xs px-2 py-0.5 rounded uppercase">
+                  <span className="rounded bg-ink-800 px-2 py-0.5 text-2xs uppercase text-ink-400">
                     {c.logical_group}
                   </span>
                 </div>
 
-                <div className="text-xs text-ink-400 flex flex-wrap gap-x-4 gap-y-1">
-                  <span>IP: <strong className="text-ink-200 font-mono">{c.ipv4}</strong></span>
-                  <span>MAC: <span className="font-mono">{c.mac}</span></span>
-                  <span>Zone: <span className="text-ink-300">{c.network_id}</span></span>
-                  <span>Isolation: <span className="text-ink-300">{c.isolation_status}</span></span>
-                </div>
+                <dl className="mt-2 grid grid-cols-[5rem_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-2xs">
+                  <dt className="text-ink-500">Address</dt>
+                  <dd className="truncate font-mono text-ink-200">{c.ipv4}</dd>
+                  <dt className="text-ink-500">Group</dt>
+                  <dd className="truncate font-mono text-ink-200">{c.network_id}</dd>
+                  <dt className="text-ink-500">Visibility</dt>
+                  <dd className="truncate text-ink-300">{c.isolation_status}</dd>
+                </dl>
               </div>
 
-              <div className="flex sm:flex-col items-center sm:items-end justify-between border-t sm:border-t-0 pt-2 sm:pt-0 border-ink-800/80 gap-1 text-xs shrink-0">
-                <span className="text-2xs uppercase text-ink-400">Policy Allocation</span>
-                <span className="font-medium text-ink-200">
-                  {c.qos_policy || "Default (Uncapped)"}
+              <div className="shrink-0 border-t border-ink-800/80 pt-2 text-xs sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0 sm:text-right">
+                <span className="block text-2xs uppercase text-ink-400">Speed limit</span>
+                <span className="block font-medium text-ink-200">
+                  {c.qos_policy || "No limit"}
                 </span>
-                <span className="text-2xs text-ink-500">
-                  Throughput: {(c.current_rx_bps / 1000000).toFixed(1)} Mbps &darr;
+                <span className="mt-0.5 block text-2xs text-ink-500">
+                  Using {(c.current_rx_bps / 1_000_000).toFixed(1)} Mbit/s now
                 </span>
               </div>
             </div>
 
             {/* Live Interactive Bandwidth & Access Controls */}
-            <DeviceControls client={c} />
-          </div>
-        ))}
-      </div>
+              <DeviceControls client={c} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
