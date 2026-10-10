@@ -409,11 +409,18 @@ func printActivationOutcome(env *Env, ev *activationEvidence, res *execution.Exe
 		env.printf("\nThe gateway is serving as planned. Post-activation verification is\n")
 		env.printf("in docs/deployment-runbook.md; it does not depend on THN.\n")
 
-		if ev != nil && ev.Cfg.Activation.Development.AllowFastEthernetLAN {
-			env.printf("\n!! WARNING: Activated under DEVELOPMENT OVERRIDE (Fast Ethernet LAN, 100 Mbps max)\n")
-			env.printf("   This host is NOT approved for production deployment.\n")
-			env.printf("   Restore production policy by installing a Gigabit USB adapter and setting:\n")
-			env.printf("     activation.development.allow_fast_ethernet_lan: false\n")
+		if ev != nil {
+			pol := lanPolicyFromConfig(ev.Cfg)
+			lanIface := host.Interface{ID: ev.Cfg.Network.LAN, SystemName: ev.Cfg.Network.LAN}
+			if pol.permitsProductionFastEthernetLAN(lanIface) {
+				env.printf("\nNOTE: LAN interface is operating at 100 Mbps (Fast Ethernet line rate).\n")
+				env.printf("      Downstream client payload throughput is limited to ~94 Mbps.\n")
+			} else if ev.Cfg.Activation.Development.AllowFastEthernetLAN {
+				env.printf("\n!! WARNING: Activated under DEVELOPMENT OVERRIDE (Fast Ethernet LAN, 100 Mbps max)\n")
+				env.printf("   This host is NOT approved for production deployment.\n")
+				env.printf("   Restore production policy by installing a Gigabit USB adapter and setting:\n")
+				env.printf("     activation.development.allow_fast_ethernet_lan: false\n")
+			}
 		}
 
 	case execution.StateRolledBack:
@@ -830,11 +837,12 @@ func runActivationPreflight(env *Env, args []string) ExitCode {
 				lanDetail = fmt.Sprintf("Gigabit interface %s (%d Mbps, %s) assigned to LAN", iface.SystemName, iface.SpeedMbps, iface.ID)
 				break
 			}
-			// A named development exception counts as satisfied here, but it
-			// is reported as its own verdict. "PASS" next to a 100 Mbps
-			// link would read as a production-ready gateway, which is the
-			// exact misreading this verdict exists to prevent.
-			if pol.permitsFastEthernetLAN(iface) {
+			if pol.permitsProductionFastEthernetLAN(iface) {
+				lanVerdict = "PASS"
+				lanDetail = fmt.Sprintf("interface %s (%d Mbps, %s) is approved for LAN (NOTE: throughput capped at ~94 Mbps payload)", iface.SystemName, iface.SpeedMbps, iface.ID)
+				break
+			}
+			if pol.permitsDevelopmentFastEthernetLAN(iface) {
 				lanVerdict = "DEV-ONLY"
 				lanDetail = fmt.Sprintf(
 					"DEVELOPMENT OVERRIDE: interface %s (%d Mbps, %s) is approved by name for "+

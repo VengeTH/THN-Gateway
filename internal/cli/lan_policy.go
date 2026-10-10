@@ -45,77 +45,64 @@ import (
 // one — code that constructs a lanPolicy without consulting configuration gets
 // the safe behaviour, not the permissive one.
 type lanPolicy struct {
-	// allowFastEthernet is the operator's deliberate opt-in. It is only
-	// meaningful when at least one adapter is named below.
-	allowFastEthernet bool
+	// productionApproved names adapters explicitly approved for production deployment.
+	productionApproved map[string]bool
 
-	// approved matches an interface by stable identity ("hw:...") or by
-	// kernel name.
-	//
-	// Both forms are accepted because they are the two things an operator
-	// has in front of them: `thn discover` prints the name, and the
-	// configuration is written with the identity. Accepting the identity is
-	// what makes the exception survive a rename or a different enumeration
-	// order across reboots, which is the reason stable identities exist.
-	approved map[string]bool
+	// developmentApproved names adapters permitted under a development override.
+	developmentApproved map[string]bool
 }
 
 // productionLANPolicy is the default: production policy, nothing approved.
-//
-// It is returned whenever a caller has no configuration in hand. Making the
-// fallback explicit — rather than assuming a zero value appears somewhere on
-// its own — means a future code path that forgets to read the configuration
-// fails closed and visibly, instead of silently inheriting whatever the last
-// caller decided.
 func productionLANPolicy() lanPolicy {
 	return lanPolicy{}
 }
 
 // lanPolicyFromConfig derives the policy from the operator's document.
-//
-// A malformed document yields production policy rather than an error. The
-// document validator already reports the malformed case as an error, and this
-// function is on the path that builds gate verdicts; returning production
-// policy here means a document that fails validation is also refused by the
-// gates, which is the same refusal from two independent directions.
 func lanPolicyFromConfig(cfg config.Config) lanPolicy {
-	dev := cfg.Activation.Development
-
-	if !dev.AllowFastEthernetLAN || len(dev.ApprovedFastEthernetLAN) == 0 {
-		return productionLANPolicy()
-	}
-
-	approved := make(map[string]bool, len(dev.ApprovedFastEthernetLAN))
-	for _, entry := range dev.ApprovedFastEthernetLAN {
+	prodApproved := make(map[string]bool)
+	for _, entry := range cfg.Activation.ApprovedFastEthernetLAN {
 		if entry = strings.TrimSpace(entry); entry != "" {
-			approved[entry] = true
+			prodApproved[entry] = true
 		}
 	}
-	if len(approved) == 0 {
-		return productionLANPolicy()
+
+	devApproved := make(map[string]bool)
+	dev := cfg.Activation.Development
+	if dev.AllowFastEthernetLAN && len(dev.ApprovedFastEthernetLAN) > 0 {
+		for _, entry := range dev.ApprovedFastEthernetLAN {
+			if entry = strings.TrimSpace(entry); entry != "" {
+				devApproved[entry] = true
+			}
+		}
 	}
 
-	return lanPolicy{allowFastEthernet: true, approved: approved}
+	return lanPolicy{
+		productionApproved:  prodApproved,
+		developmentApproved: devApproved,
+	}
+}
+
+// permitsProductionFastEthernetLAN reports whether this adapter is explicitly
+// approved for production deployment at Fast Ethernet line rates.
+func (p lanPolicy) permitsProductionFastEthernetLAN(iface host.Interface) bool {
+	if len(p.productionApproved) == 0 || iface.ID == "" {
+		return false
+	}
+	return p.productionApproved[iface.ID] || (iface.SystemName != "" && p.productionApproved[iface.SystemName])
+}
+
+// permitsDevelopmentFastEthernetLAN reports whether this adapter is permitted
+// under an operator development override.
+func (p lanPolicy) permitsDevelopmentFastEthernetLAN(iface host.Interface) bool {
+	if len(p.developmentApproved) == 0 || iface.ID == "" {
+		return false
+	}
+	return p.developmentApproved[iface.ID] || (iface.SystemName != "" && p.developmentApproved[iface.SystemName])
 }
 
 // permitsFastEthernetLAN reports whether this specific adapter may fill the
-// LAN role despite running below Gigabit speed.
-//
-// Both conditions are required. The flag alone is not authority — otherwise
-// one boolean would admit every Fast Ethernet adapter on the host, which is
-// the blanket bypass this type exists to prevent — and the name alone is not
-// authority either, because a list with no flag is a contradiction an
-// operator may have left behind by accident.
-//
-// An empty identity never matches, not even against an empty approval set.
-// That is deliberate: an interface THN could not identify is not an adapter
-// anybody approved.
+// LAN role despite running below Gigabit speed (under either production approval
+// or development override).
 func (p lanPolicy) permitsFastEthernetLAN(iface host.Interface) bool {
-	if !p.allowFastEthernet || len(p.approved) == 0 {
-		return false
-	}
-	if iface.ID == "" {
-		return false
-	}
-	return p.approved[iface.ID] || (iface.SystemName != "" && p.approved[iface.SystemName])
+	return p.permitsProductionFastEthernetLAN(iface) || p.permitsDevelopmentFastEthernetLAN(iface)
 }

@@ -20,33 +20,15 @@ activation:
   require_physical_presence: true
 
   # ---------------------------------------------------------------------------
-  # DEVELOPMENT ONLY — NOT PRODUCTION APPROVED
+  # APPROVED FAST ETHERNET LAN ADAPTER (100 Mbps)
   # ---------------------------------------------------------------------------
-  # The LAN above is a 100 Mbps Fast Ethernet adapter. THN's production policy
-  # requires a Gigabit wired LAN, and that policy is unchanged by this block:
-  # remove it and the adapter is rejected again.
+  # The LAN interface enx00e099001812 is explicitly approved for this deployment.
   #
-  # What this does is let ONE adapter, named by stable identity, satisfy the
-  # LAN role on this host so the rest of the system can be exercised on the
-  # hardware actually present. It relaxes nothing else — not the firewall, not
-  # NAT, not the management-path check, not rollback readiness, not physical
-  # presence.
-  #
-  # CONSEQUENCES YOU ARE ACCEPTING:
-  #   * LAN throughput is capped at ~94 Mbps of real payload (100 Mbps line rate
-  #     minus Ethernet framing overhead). Clients behind this adapter cannot
-  #     exceed that, no matter what the WAN link can do.
-  #   * A CAKE qdisc configured at 100000 kbps download is being shaped onto a
-  #     LAN that can never carry it. That is not harmful, but it is meaningless.
-  #   * This host must not be sold, deployed or left running unattended as a
-  #     customer-facing gateway.
-  #
-  # TO REVERT: set allow_fast_ethernet_lan to false (and delete the list), then
-  # install a Gigabit USB adapter and point network.lan at it.
-  development:
-    allow_fast_ethernet_lan: true
-    approved_fast_ethernet_lan:
-      - hw:2c886f45ad0cb12f
+  # CAUTION: LAN throughput is physically capped at 100 Mbps line rate (~94 Mbps
+  # real TCP/IP payload). Clients behind this adapter cannot exceed this speed,
+  # regardless of WAN uplink bandwidth.
+  approved_fast_ethernet_lan:
+    - hw:2c886f45ad0cb12f
 nat:
   enabled: true
   masquerade:

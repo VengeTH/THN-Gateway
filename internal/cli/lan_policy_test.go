@@ -71,6 +71,38 @@ func TestExplicitDevelopmentOverridePermitsNamedAdapter(t *testing.T) {
 	}
 }
 
+// TestApprovedFastEthernetLANIsApprovedForProduction verifies that an adapter
+// listed in activation.approved_fast_ethernet_lan satisfies the LAN gate as an
+// approved production interface without a development override.
+func TestApprovedFastEthernetLANIsApprovedForProduction(t *testing.T) {
+	dev := hostWith100MbpsUSBNIC()
+	usbID := host.IDFor("2c:88:6f:45:ad:0c")
+
+	res := host.Resolve(dev, []host.Assignment{
+		{Role: host.RoleWAN, Selector: host.IDFor("7c:61:70:fd:7f:34")},
+		{Role: host.RoleLAN, Selector: usbID},
+	})
+
+	cfg := config.Defaults()
+	cfg.Activation.ApprovedFastEthernetLAN = []string{usbID}
+
+	pol := lanPolicyFromConfig(cfg)
+	gate := roleGate(dev, res, host.RoleLAN, usbID, pol)
+
+	if !gate.Satisfied {
+		t.Fatalf("expected approved adapter to satisfy LAN gate: %s", gate.Reason)
+	}
+	if gate.DevelopmentOverride {
+		t.Error("production approved adapter was reported as a development override")
+	}
+	if !strings.Contains(gate.Reason, "APPROVED") {
+		t.Errorf("expected reason to state APPROVED, got: %s", gate.Reason)
+	}
+	if !strings.Contains(gate.Reason, "CAUTION") {
+		t.Errorf("expected reason to include CAUTION note, got: %s", gate.Reason)
+	}
+}
+
 // TestOverrideIsScopedToNamedAdapter is the most important test in this file.
 //
 // A blanket relaxation is the failure mode that matters. If approving one

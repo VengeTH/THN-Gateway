@@ -557,6 +557,12 @@ type ActivationConfig struct {
 	// as root on a remote host is not by itself sufficient to activate.
 	RequirePhysicalPresence bool `yaml:"require_physical_presence"`
 
+	// ApprovedFastEthernetLAN explicitly authorizes named Fast Ethernet (100 Mbps)
+	// wired adapters to fill the LAN role for this gateway.
+	//
+	// LAN throughput is limited to Fast Ethernet line rate (~94 Mbps payload).
+	ApprovedFastEthernetLAN []string `yaml:"approved_fast_ethernet_lan"`
+
 	// Development carries relaxations an operator may opt into when bringing
 	// THN up on development or controlled home-lab hardware.
 	//
@@ -1493,6 +1499,18 @@ func (c Config) Validate() ValidationResult {
 	if !c.Activation.RequirePhysicalPresence {
 		v.Add("activation.require_physical_presence", SeverityError,
 			"must remain true: THN is developed remotely against an unattended device, so root access alone must not be sufficient to activate")
+	}
+
+	// --- Activation approved Fast Ethernet adapters ---
+	for _, id := range c.Activation.ApprovedFastEthernetLAN {
+		if strings.TrimSpace(id) == "" {
+			v.Add("activation.approved_fast_ethernet_lan", SeverityError,
+				"must not contain an empty entry")
+		}
+	}
+	if len(c.Activation.ApprovedFastEthernetLAN) > 0 {
+		v.Add("activation.approved_fast_ethernet_lan", SeverityInfo,
+			"NOTE: Fast Ethernet LAN adapter approved for this gateway (throughput limited to 100 Mbps line rate)")
 	}
 
 	// --- Activation development overrides ---

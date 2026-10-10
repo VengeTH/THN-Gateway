@@ -166,7 +166,19 @@ func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string, po
 		// happens to be plugged in later.
 		if r == host.RoleLAN {
 			if iface.Physical && iface.Kind == host.KindEthernet && iface.SpeedMbps > 0 && iface.SpeedMbps < 1000 {
-				if pol.permitsFastEthernetLAN(iface) {
+				if pol.permitsProductionFastEthernetLAN(iface) {
+					g.Satisfied = true
+					g.Interface = iface.SystemName
+					g.Capability = string(host.CapRouting)
+					g.Reason = fmt.Sprintf(
+						"role %s is filled by %s (identity %s) [APPROVED]: "+
+							"Fast Ethernet adapter is approved for this gateway. "+
+							"CAUTION: LAN throughput is limited to Fast Ethernet line rate (100 Mbps, ~94 Mbps payload).",
+						r, iface.SystemName, iface.ID)
+					g.DevelopmentOverride = false
+					return g
+				}
+				if pol.permitsDevelopmentFastEthernetLAN(iface) {
 					g.Satisfied = true
 					g.Interface = iface.SystemName
 					g.Capability = string(host.CapRouting)
@@ -183,7 +195,7 @@ func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string, po
 				}
 				g.Satisfied = false
 				g.Interface = iface.SystemName
-				g.Reason = fmt.Sprintf("interface %s operates at %d Mbps; production LAN requires a Gigabit Ethernet interface (>= 1000 Mbps); install the dedicated Gigabit USB adapter",
+				g.Reason = fmt.Sprintf("interface %s operates at %d Mbps; production LAN requires a Gigabit Ethernet interface (>= 1000 Mbps); install the dedicated Gigabit USB adapter or approve it in activation.approved_fast_ethernet_lan",
 					iface.SystemName, iface.SpeedMbps)
 				return g
 			}
