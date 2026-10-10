@@ -599,6 +599,38 @@ func TestMissingOrInferredCapabilityRejection(t *testing.T) {
 	}
 }
 
+// TestObservedHostCapabilitiesSatisfyRequiredTools tests that host-level
+// capability names ("nftables", "routing", "forwarding") satisfy the executor's
+// tool-level capability requirements ("nft", "ip", "sysctl").
+func TestObservedHostCapabilitiesSatisfyRequiredTools(t *testing.T) {
+	ctx := context.Background()
+	obs, des, assignments, plan := labFixtures()
+
+	driver := NewSimulatedDriver()
+	executor := NewExecutor()
+
+	caps := []activation.CapabilityGate{
+		{Name: "routing", Available: true, Confidence: "observed"},
+		{Name: "nftables", Available: true, Confidence: "observed"},
+		{Name: "forwarding", Available: true, Confidence: "observed"},
+	}
+
+	opts := ExecutionOptions{
+		Observed:     obs,
+		Desired:      des,
+		Assignments:  assignments,
+		Capabilities: caps,
+	}
+
+	res, err := executor.ExecutePlan(ctx, plan, driver, opts)
+	if err != nil {
+		t.Fatalf("expected successful execution with observed host capabilities, got error: %v", err)
+	}
+	if res.FinalState != StateCommitted {
+		t.Errorf("expected StateCommitted, got %s", res.FinalState)
+	}
+}
+
 // 11. Failure H: Management safety failure rejection
 func TestManagementSafetyFailureRejection(t *testing.T) {
 	ctx := context.Background()

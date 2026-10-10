@@ -28,39 +28,39 @@ BASELINE_FILE=~/thn-baselines/baseline-$(date +%Y%m%d-%H%M%S).txt
 {
   echo "=== 1. HOST IDENTIFICATION ==="
   hostname; uname -a; uptime
-  
+
   echo "=== 2. THN REPO STATUS & COMMIT ==="
   cd ~/THN-Gateway && git status -s && git rev-parse HEAD
-  
+
   echo "=== 3. NETWORK INTERFACES & OPERSTATE ==="
   ip -d link show
-  
+
   echo "=== 4. IP ADDRESSES ==="
   ip addr show
-  
+
   echo "=== 5. ROUTING TABLES ==="
   ip -4 route show
   ip -4 route show table all
-  
+
   echo "=== 6. IP FORWARDING SYSCTL ==="
   sysctl net.ipv4.ip_forward
-  
+
   echo "=== 7. NFTABLES RULES & TABLES ==="
   sudo nft list tables
   sudo nft list ruleset
-  
+
   echo "=== 8. UFW STATUS ==="
   sudo ufw status numbered
-  
+
   echo "=== 9. TC QDISCS & SHAPING ==="
   tc -s qdisc show
-  
+
   echo "=== 10. ACTIVE NETWORKING SERVICES ==="
   systemctl status --no-pager dnsmasq thn-gateway-restore.service systemd-networkd
-  
+
   echo "=== 11. DNS RESOLVER ==="
   cat /etc/resolv.conf
-  
+
   echo "=== 12. TAILSCALE STATUS ==="
   tailscale status
 } | tee "$BASELINE_FILE"

@@ -718,6 +718,20 @@ func productionAuthorization(ev *activationEvidence, gates activation.GateResult
 // so making these conditional on some flag would create a way to apply a plan
 // with its digest binding switched off.
 func executionOptions(ev *activationEvidence, journal execution.JournalStore) execution.ExecutionOptions {
+	caps := capabilityGates(ev.Device)
+	for tool, sysCap := range executionCapabilityHostCapability {
+		for _, cg := range caps {
+			if cg.Name == sysCap {
+				caps = append(caps, activation.CapabilityGate{
+					Name:       tool,
+					Available:  cg.Available,
+					Confidence: cg.Confidence,
+					Reason:     cg.Reason,
+				})
+				break
+			}
+		}
+	}
 	return execution.ExecutionOptions{
 		Observed:                 ev.Obs,
 		Desired:                  ev.Desired,
@@ -729,7 +743,7 @@ func executionOptions(ev *activationEvidence, journal execution.JournalStore) ex
 		ExpectedAssignmentDigest: ev.Plan.Inputs.AssignmentDigest,
 		ManagementSafe:           ev.Management.Safe,
 		ManagementProblem:        ev.Management.Reason,
-		Capabilities:             capabilityGates(ev.Device),
+		Capabilities:             caps,
 	}
 }
 

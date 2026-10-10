@@ -94,10 +94,10 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
   ```bash
   # Check if dnsmasq is running
   sudo systemctl status dnsmasq
-  
+
   # Check if dnsmasq is listening on UDP port 67
   sudo ss -ulpn | grep :67
-  
+
   # Check live dnsmasq lease logs
   sudo journalctl -u dnsmasq -n 50 --no-pager
   ```
@@ -109,7 +109,7 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
   ```bash
   # Verify dnsmasq configuration references enx00e099001812
   cat /etc/dnsmasq.d/thn-gateway.conf
-  
+
   # Restart dnsmasq
   sudo systemctl restart dnsmasq
   ```
@@ -123,7 +123,7 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
   ```bash
   # From client:
   dig @10.77.0.1 google.com
-  
+
   # From host:
   sudo ss -tulpn | grep :53
   cat /etc/resolv.conf
@@ -141,13 +141,13 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
   ```bash
   # 1. Check kernel forwarding
   sysctl net.ipv4.ip_forward
-  
+
   # 2. Check default gateway on WAN
   ip -4 route show default
-  
+
   # 3. Check nftables forward chain counters
   sudo nft list chain inet thn forward
-  
+
   # 4. Check nftables masquerade NAT rule
   sudo nft list chain inet thn postrouting
   ```
@@ -159,11 +159,11 @@ This guide provides targeted diagnostic procedures, root cause analysis, and rem
   ```bash
   # Ensure IP forwarding is enabled
   sudo sysctl -w net.ipv4.ip_forward=1
-  
+
   # Verify default route exists via enp0s31f6
   ip route show default
   # Should show: default via 192.168.1.1 dev enp0s31f6
-  
+
   # Check if WAN can reach internet directly
   ping -I enp0s31f6 -c 3 1.1.1.1
   ```

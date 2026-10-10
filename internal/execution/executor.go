@@ -189,7 +189,7 @@ func (e *Executor) ExecutePlan(ctx context.Context, plan *planner.Plan, driver E
 		for _, rc := range requiredCaps {
 			found := false
 			for _, cg := range opts.Capabilities {
-				if cg.Name == rc {
+				if capabilityMatches(cg.Name, rc) {
 					found = true
 					if !cg.Satisfied() {
 						res.FinalState = StateBlocked
@@ -599,4 +599,25 @@ func BackupScopeFor(ops []Operation, obs diff.Observed) BackupScope {
 		scope.Interfaces = append(scope.Interfaces, iface)
 	}
 	return scope
+}
+
+// capabilityMatches reports whether an observed capability gate satisfies a
+// required tool capability, bridging the system-level vocabulary ("nftables",
+// "routing", "forwarding", "tc") with the tool-level vocabulary ("nft", "ip",
+// "sysctl", "tc").
+func capabilityMatches(gateName, requiredTool string) bool {
+	if gateName == requiredTool {
+		return true
+	}
+	switch requiredTool {
+	case "nft":
+		return gateName == "nftables" || gateName == "firewall"
+	case "ip":
+		return gateName == "routing"
+	case "sysctl":
+		return gateName == "forwarding"
+	case "tc":
+		return gateName == "tc" || gateName == "qos" || gateName == "cake"
+	}
+	return false
 }

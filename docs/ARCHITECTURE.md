@@ -12,16 +12,16 @@ THN Gateway is designed as a **fail-closed, transactional network appliance cont
 flowchart TD
     Config[Configuration /etc/thn/config.yaml] --> Load[Config Loader & Validator]
     Host[Host Observation rtnetlink / sysfs] --> Observe[Hardware & Subsystem Discovery]
-    
+
     Load --> Gates[13 Activation Safety Gates]
     Observe --> Gates
-    
+
     Gates -->|All Satisfied| Plan[Planner: Desired vs Observed Diff]
     Gates -->|Any Blocked| Refusal[Strict Activation Refusal: Network Untouched]
-    
+
     Plan --> Preconditions[Precondition Validation]
     Preconditions --> Executor[6-Phase Transactional Executor]
-    
+
     subgraph Execution Transaction
         Phase1[1. PREPARE: Digests & Auth] --> Phase2[2. BACKUP: Baseline Capture]
         Phase2 --> Phase3[3. VALIDATE: Syntactic Ruleset Check]
@@ -30,7 +30,7 @@ flowchart TD
         Phase5 -->|Pass| Phase6[6. COMMIT: Transaction Journal Recorded]
         Phase5 -->|Fail| Rollback[Atomic Rollback: Compensating Ops]
     end
-    
+
     Executor --> Execution Transaction
 ```
 

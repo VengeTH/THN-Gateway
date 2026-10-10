@@ -17,10 +17,10 @@ gateway:
 network:
   # Onboard Intel Gigabit NIC (enp0s31f6)
   wan: hw:7c6170fd7f34317a
-  
+
   # USB Fast Ethernet Adapter (enx00e099001812)
   lan: hw:2c886f45ad0cb12f
-  
+
   # LAN Gateway address and CIDR prefix
   lan_prefix: 10.77.0.1/24
   mtu: 1500

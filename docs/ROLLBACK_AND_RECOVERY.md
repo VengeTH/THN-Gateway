@@ -71,7 +71,7 @@ Reason:
    ```bash
    # Compare nftables tables
    sudo nft list tables
-   
+
    # Compare addresses
    ip addr show dev enx00e099001812
    ```
