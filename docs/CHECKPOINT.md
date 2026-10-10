@@ -89,6 +89,14 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
   - Added flag parsing (`--config <path>`) to `thn monitoring`, `thn clients`, and `thn events` in [internal/cli/management_commands.go](internal/cli/management_commands.go).
   - Commented out placeholder QoS clients in [configs/physical_dell_lab.yaml](configs/physical_dell_lab.yaml) so only real connected devices appear.
 
+### Phase 9: Interactive Web UI Bandwidth Limiting & Access Controls
+- **Implementation**:
+  - Created [tools/thn-client-control.sh](tools/thn-client-control.sh) to apply per-client HTB FQ-CoDel rate limiting on `enx00e099001812` and nftables forward drops without disrupting global shaping.
+  - Created Next.js API route `ui/app/api/clients/control/route.ts` to execute live control actions.
+  - Created interactive Client Component `ui/components/device-controls.tsx` with preset buttons (`Uncapped`, `10M`, `20M`, `30M`, `50M`), custom Mbps input, and `Block / Unblock` toggle.
+  - Updated `ui/app/devices/page.tsx` so operators can set bandwidth limits and block devices directly from the web browser.
+  - Updated [internal/management/gather.go](internal/management/gather.go) to dynamically reflect active client limits and blocks in both CLI (`thn clients`) and the Web UI.
+
 ---
 
 ## 3. Git Commit History Reference
@@ -104,6 +112,7 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
 | `834d3fb` | `fix(execution): add management input rules for Tailscale and SSH in applyTHNTable` |
 | `523bc9c` | `fix(management): remove hardcoded mock clients and telemetry, read live dnsmasq leases and system stats` |
 | `03ad8c9` | `chore(config): empty placeholder clients list in physical lab configuration` |
+| `848f4c5` | `feat(ui): add interactive bandwidth limit and client controls to Web UI` |
 
 ---
 
