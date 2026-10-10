@@ -51,6 +51,7 @@ If you are developing new subsystems, writing tests, or extending CLI commands:
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model, firewall rule layout, management safety, and risks. | Security Architects |
 | [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) | Implemented vs planned features, production blockers, and manual roles. | All |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Test suites, test conventions, adding gates, and policy workflows. | Developers |
+| [docs/CHECKPOINT.md](docs/CHECKPOINT.md) | Master state record, implemented changes history, and future roadmap. | All |
 
 ---
 
