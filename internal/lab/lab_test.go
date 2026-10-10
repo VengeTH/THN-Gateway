@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/VengeTH/THN-Gateway/internal/config"
 )
 
 func TestCanonicalTopologyAddressing(t *testing.T) {
@@ -501,4 +503,51 @@ func mustAddr(t *testing.T, cidr string) netip.Addr {
 		t.Fatalf("parsing %q: %v", cidr, err)
 	}
 	return prefix.Addr()
+}
+
+// TestIsolatedLabConfigFileValidation verifies configs/isolated_lab.yaml directly.
+func TestIsolatedLabConfigFileValidation(t *testing.T) {
+	path := "../../configs/isolated_lab.yaml"
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("loading configs/isolated_lab.yaml: %v", err)
+	}
+
+	res := cfg.Validate()
+	if res.HasErrors() {
+		t.Fatalf("configs/isolated_lab.yaml failed validation: %v", res.Findings)
+	}
+
+	// Verify virtual interface roles
+	if cfg.Network.WAN != "veth-wan" {
+		t.Errorf("expected WAN veth-wan, got %s", cfg.Network.WAN)
+	}
+	if cfg.Network.LAN != "veth-lan" {
+		t.Errorf("expected LAN veth-lan, got %s", cfg.Network.LAN)
+	}
+	if cfg.Network.Management != "veth-mgmt" {
+		t.Errorf("expected Management veth-mgmt, got %s", cfg.Network.Management)
+	}
+
+	// Verify unsupported/unimplemented services are explicitly disabled
+	if cfg.DHCP.Enabled {
+		t.Error("DHCP must remain disabled in isolated lab configuration")
+	}
+	if cfg.DNS.Enabled {
+		t.Error("DNS must remain disabled in isolated lab configuration")
+	}
+}
+
+// TestIsolatedLabTopologyHasNoHostInterfaces ensures lab interfaces do not collide with host hardware.
+func TestIsolatedLabTopologyHasNoHostInterfaces(t *testing.T) {
+	forbiddenPrefixes := []string{"eth", "enp", "wlan", "wlp", "enx", "docker", "tailscale"}
+	top := Canonical()
+
+	for _, iface := range top.Interfaces {
+		for _, pref := range forbiddenPrefixes {
+			if strings.HasPrefix(strings.ToLower(iface.Name), pref) {
+				t.Errorf("lab interface %s uses production host prefix %s", iface.Name, pref)
+			}
+		}
+	}
 }

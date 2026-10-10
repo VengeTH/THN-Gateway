@@ -863,8 +863,32 @@ func runActivationPreflight(env *Env, args []string) ExitCode {
 }
 
 func runActivationStatus(env *Env, args []string) ExitCode {
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn activation status: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
+
+	state := activation.StateDevelopment
 	driver := execution.NewProductionDriver()
-	m := activation.NewMachineWithApplier(activation.StateDevelopment, driver)
+	m := activation.NewMachineWithApplier(state, driver)
+
+	cfg, cfgErr := loadConfig(env, path)
+	if cfgErr == nil {
+		ev := gatherActivationEvidence(cfg, path)
+		gates := activation.EvaluateProduction(productionGateInput(ev, false))
+		m.SetGates(gates)
+		if gates.AllSatisfied && ev.Plan != nil && ev.Plan.Ready {
+			_ = m.Transition(activation.StatePrepared, "plan validated and all safety gates satisfied")
+		}
+	}
+
 	report := m.Report()
 
 	if env.IsJSON {
@@ -882,11 +906,31 @@ func runActivationStatus(env *Env, args []string) ExitCode {
 	env.printf("  Implemented Stages:  %s\n", stageList(report.ImplementedStages))
 	env.printf("  Unsupported Stages:  %s\n", stageList(report.UnsupportedStages))
 	env.printf("  Presence Confirmed:  %t\n", report.PresenceConfirmed)
+	if len(report.Gates.Gates) > 0 {
+		sat := 0
+		for _, g := range report.Gates.Gates {
+			if g.Satisfied {
+				sat++
+			}
+		}
+		env.printf("  Gate Status:         %d of %d satisfied (%d blocking)\n",
+			sat, len(report.Gates.Gates), len(report.Gates.Blocking))
+	}
 	return ExitOK
 }
 
 func runActivationVerify(env *Env, args []string) ExitCode {
-	path := env.resolveConfigPath("")
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn activation verify: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
 	cfg, cfgErr := loadConfig(env, path)
 
 	if cfgErr != nil {

@@ -391,12 +391,18 @@ func FromConfig(cfg config.Config, res host.Resolution) Intent {
 	// The document wins where both speak, which is the same precedence
 	// mergeBindings applies when building the assignments Ã¢â‚¬â€ this function
 	// reads the same decision rather than re-deriving it.
-	declared := map[host.Role]string{
-		host.RoleWAN: cfg.Network.WAN,
-		host.RoleLAN: cfg.Network.LAN,
+	mgmtSel := cfg.Network.Management
+	if mgmtSel == "" {
+		mgmtSel = cfg.Network.Mgmt
 	}
 
-	for _, role := range gatewayRoles() {
+	declared := map[host.Role]string{
+		host.RoleWAN:  cfg.Network.WAN,
+		host.RoleLAN:  cfg.Network.LAN,
+		host.RoleMGMT: mgmtSel,
+	}
+
+	for _, role := range allGatewayRoles() {
 		sel := strings.TrimSpace(declared[role])
 		if sel == "" {
 			// Not declared in the document: report what the operator
@@ -455,6 +461,11 @@ func FromConfig(cfg config.Config, res host.Resolution) Intent {
 // operator never intended.
 func gatewayRoles() []host.Role {
 	return []host.Role{host.RoleWAN, host.RoleLAN}
+}
+
+// allGatewayRoles includes required and supported logical gateway roles.
+func allGatewayRoles() []host.Role {
+	return []host.Role{host.RoleWAN, host.RoleLAN, host.RoleMGMT}
 }
 
 // Validate checks an intent against what was observed.
@@ -591,28 +602,93 @@ func checkRoles(in Intent, res host.Resolution, obs Observed) []Finding {
 // stable ID in one place and by kernel name in another Ã¢â‚¬â€ and the operator has
 // still described one link as two roles.
 func checkRoleSeparation(in Intent) []Finding {
-	wan, lan := in.Roles[host.RoleWAN], in.Roles[host.RoleLAN]
-	if !wan.Resolved || !lan.Resolved {
-		return nil
+	wan, lan, mgmt := in.Roles[host.RoleWAN], in.Roles[host.RoleLAN], in.Roles[host.RoleMGMT]
+	var out []Finding
+
+	// Check selector-level conflicts (document static check)
+	if wan.Selector != "" && lan.Selector != "" && wan.Selector == lan.Selector {
+		out = append(out, Finding{
+			Code:     CodeRoleConflict,
+			Severity: SeverityBlocking,
+			Field:    "network.lan",
+			Role:     host.RoleLAN,
+			Selector: lan.Selector,
+			Message:  fmt.Sprintf("WAN (%s) and LAN (%s) describe the same interface; a gateway needs a distinct uplink and downstream", wan.Selector, lan.Selector),
+			Hint:     "assign a different interface to one of the two roles",
+		})
 	}
-	if !sameInterface(wan, lan) {
-		return nil
+	if mgmt.Selector != "" && wan.Selector != "" && mgmt.Selector == wan.Selector {
+		out = append(out, Finding{
+			Code:     CodeRoleConflict,
+			Severity: SeverityBlocking,
+			Field:    "network.management",
+			Role:     host.RoleMGMT,
+			Selector: mgmt.Selector,
+			Message:  fmt.Sprintf("Management (%s) and WAN (%s) describe the same interface; management access must be separate from WAN", mgmt.Selector, wan.Selector),
+			Hint:     "assign a dedicated interface to the management role",
+		})
+	}
+	if mgmt.Selector != "" && lan.Selector != "" && mgmt.Selector == lan.Selector {
+		out = append(out, Finding{
+			Code:     CodeRoleConflict,
+			Severity: SeverityBlocking,
+			Field:    "network.management",
+			Role:     host.RoleMGMT,
+			Selector: mgmt.Selector,
+			Message:  fmt.Sprintf("Management (%s) and LAN (%s) describe the same interface; management access must be separate from LAN", mgmt.Selector, lan.Selector),
+			Hint:     "assign a dedicated interface to the management role",
+		})
 	}
 
-	return []Finding{{
-		Code:      CodeRoleConflict,
-		Severity:  SeverityBlocking,
-		Field:     "network.lan",
-		Role:      host.RoleLAN,
-		Selector:  lan.Selector,
-		Interface: lan.Interface,
-		StableID:  lan.StableID,
-		Message: fmt.Sprintf(
-			"WAN (%s) and LAN (%s) resolve to the same interface %s; "+
-				"a gateway needs a distinct uplink and downstream",
-			wan.Selector, lan.Selector, lan.Interface),
-		Hint: "assign a different interface to one of the two roles",
-	}}
+	// Check resolved interface conflicts (host observation check)
+	if wan.Resolved && lan.Resolved && sameInterface(wan, lan) && (wan.Selector == "" || wan.Selector != lan.Selector) {
+		out = append(out, Finding{
+			Code:      CodeRoleConflict,
+			Severity:  SeverityBlocking,
+			Field:     "network.lan",
+			Role:      host.RoleLAN,
+			Selector:  lan.Selector,
+			Interface: lan.Interface,
+			StableID:  lan.StableID,
+			Message: fmt.Sprintf(
+				"WAN (%s) and LAN (%s) resolve to the same interface %s; "+
+					"a gateway needs a distinct uplink and downstream",
+				wan.Selector, lan.Selector, lan.Interface),
+			Hint: "assign a different interface to one of the two roles",
+		})
+	}
+	if mgmt.Resolved && wan.Resolved && sameInterface(mgmt, wan) && (mgmt.Selector == "" || mgmt.Selector != wan.Selector) {
+		out = append(out, Finding{
+			Code:      CodeRoleConflict,
+			Severity:  SeverityBlocking,
+			Field:     "network.management",
+			Role:      host.RoleMGMT,
+			Selector:  mgmt.Selector,
+			Interface: mgmt.Interface,
+			StableID:  mgmt.StableID,
+			Message: fmt.Sprintf(
+				"Management (%s) and WAN (%s) resolve to the same interface %s",
+				mgmt.Selector, wan.Selector, mgmt.Interface),
+			Hint: "assign a different interface to one of the two roles",
+		})
+	}
+	if mgmt.Resolved && lan.Resolved && sameInterface(mgmt, lan) && (mgmt.Selector == "" || mgmt.Selector != lan.Selector) {
+		out = append(out, Finding{
+			Code:      CodeRoleConflict,
+			Severity:  SeverityBlocking,
+			Field:     "network.management",
+			Role:      host.RoleMGMT,
+			Selector:  mgmt.Selector,
+			Interface: mgmt.Interface,
+			StableID:  mgmt.StableID,
+			Message: fmt.Sprintf(
+				"Management (%s) and LAN (%s) resolve to the same interface %s",
+				mgmt.Selector, lan.Selector, mgmt.Interface),
+			Hint: "assign a different interface to one of the two roles",
+		})
+	}
+
+	return out
 }
 
 // sameInterface reports whether two roles name the same observed interface.

@@ -184,8 +184,20 @@ type NetworkConfig struct {
 	// pick one for you: an unassigned LAN stays unassigned.
 	LAN string `yaml:"lan"`
 
+	// Management is the dedicated administrative interface.
+	Management string `yaml:"management,omitempty" json:"management,omitempty"`
+
+	// Mgmt is an alias for Management.
+	Mgmt string `yaml:"mgmt,omitempty" json:"mgmt,omitempty"`
+
 	// LANPrefix is the address to place on the LAN interface.
 	LANPrefix string `yaml:"lan_prefix"`
+
+	// ManagementPrefix is the address to place on the management interface.
+	ManagementPrefix string `yaml:"management_prefix,omitempty" json:"management_prefix,omitempty"`
+
+	// MgmtPrefix is an alias for ManagementPrefix.
+	MgmtPrefix string `yaml:"mgmt_prefix,omitempty" json:"mgmt_prefix,omitempty"`
 
 	// DNS lists resolvers to configure.
 	DNS []string `yaml:"dns"`
@@ -724,14 +736,10 @@ func Defaults() Config {
 			},
 		},
 		DHCP: DHCPConfig{
-			// DHCP is on by default: a gateway that does not serve
-			// addresses on its own LAN is not usable out of the box.
-			//
-			// Authoritative is deliberately true. Without it a client that
-			// cannot reach this server falls back to the upstream, so a
-			// device could obtain an address from the ISP network and
-			// bypass this gateway entirely — including its firewall.
-			Enabled:       true,
+			// DHCP is disabled by default: THN implements no runtime DHCP
+			// server in this build. Leaving it disabled separates core gateway
+			// functionality (routing, NAT, firewall) from optional service intent.
+			Enabled:       false,
 			Authoritative: true,
 			// 12 hours is long enough that a sleeping laptop keeps its
 			// address, and short enough that an abandoned address is
@@ -751,19 +759,9 @@ func Defaults() Config {
 			Reservations: []DHCPReservationConfig{},
 		},
 		DNS: DNSConfig{
-			Enabled: true,
-			// Upstream is deliberately EMPTY by default.
-			//
-			// dns.upstream is the authoritative list for the DNS service, but
-			// populating it here would make every document that set
-			// network.dns — which is most of them, and is the older field —
-			// disagree with itself. Setting both by default made the two
-			// fields conflict for reasons no operator had done anything to
-			// cause.
-			//
-			// An empty list falls back to network.dns, which is populated
-			// below. A document that wants the DNS service to forward
-			// somewhere other than the host's own resolvers sets this.
+			// DNS is disabled by default: THN implements no runtime DNS
+			// server in this build. Clients use upstream resolvers directly.
+			Enabled:      false,
 			Upstream:     []string{},
 			LocalDomain:  "lan",
 			LocalRecords: []LocalRecordConfig{},
@@ -963,7 +961,15 @@ func (c *Config) Normalize() error {
 	c.QoS.Algorithm = strings.ToLower(strings.TrimSpace(c.QoS.Algorithm))
 	c.Network.WAN = strings.TrimSpace(c.Network.WAN)
 	c.Network.LAN = strings.TrimSpace(c.Network.LAN)
+	if c.Network.Management == "" && c.Network.Mgmt != "" {
+		c.Network.Management = c.Network.Mgmt
+	}
+	if c.Network.ManagementPrefix == "" && c.Network.MgmtPrefix != "" {
+		c.Network.ManagementPrefix = c.Network.MgmtPrefix
+	}
+	c.Network.Management = strings.TrimSpace(c.Network.Management)
 	c.Network.LANPrefix = strings.TrimSpace(c.Network.LANPrefix)
+	c.Network.ManagementPrefix = strings.TrimSpace(c.Network.ManagementPrefix)
 
 	if c.Paths.StateDir != "" && c.Paths.StateDB == "" {
 		c.Paths.StateDB = filepath.Join(c.Paths.StateDir, "state.db")
@@ -1063,9 +1069,18 @@ func (c Config) Validate() ValidationResult {
 
 	if c.Network.LAN != "" && c.Network.LAN == c.Network.WAN {
 		v.Add("network.lan", SeverityError,
-			"LAN and WAN must be different interfaces")
+			fmt.Sprintf("LAN and WAN must be different interfaces (both are %q)", c.Network.LAN))
+	}
+	if c.Network.Management != "" && c.Network.Management == c.Network.WAN {
+		v.Add("network.management", SeverityError,
+			fmt.Sprintf("Management and WAN must be different interfaces (both are %q)", c.Network.Management))
+	}
+	if c.Network.Management != "" && c.Network.Management == c.Network.LAN {
+		v.Add("network.management", SeverityError,
+			fmt.Sprintf("Management and LAN must be different interfaces (both are %q)", c.Network.Management))
 	}
 
+	var lanPrefixParsed netip.Prefix
 	if c.Network.LANPrefix != "" {
 		prefix, err := netip.ParsePrefix(c.Network.LANPrefix)
 		switch {
@@ -1078,6 +1093,8 @@ func (c Config) Validate() ValidationResult {
 		case prefix.Addr().IsMulticast():
 			v.Add("network.lan_prefix", SeverityError,
 				"LAN prefix must not be a multicast address")
+		default:
+			lanPrefixParsed = prefix
 		}
 
 		if prefix.IsValid() && prefix.Addr().Is4() && prefix.Bits() > 29 {
@@ -1098,6 +1115,32 @@ func (c Config) Validate() ValidationResult {
 			"no LAN address is configured. Everything downstream of the LAN address "+
 				"(DHCP scope, DNS zone, NAT interface, anti-spoofing) stays pending until "+
 				"this is set, e.g. 10.77.0.1/24")
+	}
+
+	var mgmtPrefixParsed netip.Prefix
+	if c.Network.ManagementPrefix != "" {
+		prefix, err := netip.ParsePrefix(c.Network.ManagementPrefix)
+		switch {
+		case err != nil:
+			v.Add("network.management_prefix", SeverityError,
+				fmt.Sprintf("%q is not a valid CIDR prefix", c.Network.ManagementPrefix))
+		case prefix.Addr().IsLoopback() || prefix.Addr().IsUnspecified():
+			v.Add("network.management_prefix", SeverityError,
+				"Management prefix must be a routable address, not loopback or unspecified")
+		case prefix.Addr().IsMulticast():
+			v.Add("network.management_prefix", SeverityError,
+				"Management prefix must not be a multicast address")
+		default:
+			mgmtPrefixParsed = prefix
+		}
+	}
+
+	if lanPrefixParsed.IsValid() && mgmtPrefixParsed.IsValid() {
+		if lanPrefixParsed.Overlaps(mgmtPrefixParsed) {
+			v.Add("network.management_prefix", SeverityError,
+				fmt.Sprintf("Management prefix %s conflicts with LAN prefix %s (overlapping subnets)",
+					mgmtPrefixParsed, lanPrefixParsed))
+		}
 	}
 
 	for i, s := range c.Network.DNS {
@@ -1123,19 +1166,18 @@ func (c Config) Validate() ValidationResult {
 		if err != nil {
 			v.Add("network.upstream_gateway", SeverityError,
 				fmt.Sprintf("%q is not a valid IP address", c.Network.UpstreamGateway))
-		} else if c.Network.LANPrefix != "" {
-			// A default route pointing back into the downstream segment is a
-			// routing loop, and it was only caught by internal/validation —
-			// so `thn config validate` passed a document `thn validate`
-			// rejected. The two layers must not answer differently about one
-			// file, which is the same dual-modelling trap the gate catches in
-			// forwarding and NAT.
-			if prefix, perr := netip.ParsePrefix(c.Network.LANPrefix); perr == nil &&
-				prefix.Contains(upstream) {
+		} else {
+			if lanPrefixParsed.IsValid() && lanPrefixParsed.Contains(upstream) {
 				v.Add("network.upstream_gateway", SeverityError,
 					fmt.Sprintf("the upstream gateway %s is inside the LAN prefix %s; "+
 						"the default route must leave through the WAN, not back into the LAN",
-						upstream, prefix))
+						upstream, lanPrefixParsed))
+			}
+			if mgmtPrefixParsed.IsValid() && mgmtPrefixParsed.Contains(upstream) {
+				v.Add("network.upstream_gateway", SeverityError,
+					fmt.Sprintf("the upstream gateway %s is inside the Management prefix %s; "+
+						"the default route must leave through the WAN, not back into the management network",
+						upstream, mgmtPrefixParsed))
 			}
 		}
 	}
@@ -1185,6 +1227,10 @@ func (c Config) Validate() ValidationResult {
 		case c.Network.LAN != "" && out == c.Network.LAN:
 			v.Add("nat.masquerade.outbound", SeverityError,
 				fmt.Sprintf("masqueraded traffic must leave through the WAN, not the LAN (%s); "+
+					`set nat.masquerade.outbound to the "wan" role`, out))
+		case c.Network.Management != "" && (out == c.Network.Management || out == "mgmt"):
+			v.Add("nat.masquerade.outbound", SeverityError,
+				fmt.Sprintf("masqueraded traffic must leave through the WAN, not the Management interface (%s); "+
 					`set nat.masquerade.outbound to the "wan" role`, out))
 		}
 	}

@@ -9,6 +9,8 @@ import (
 	"github.com/VengeTH/THN-Gateway/internal/activation"
 	"github.com/VengeTH/THN-Gateway/internal/config"
 	"github.com/VengeTH/THN-Gateway/internal/execution"
+	"github.com/VengeTH/THN-Gateway/internal/gateway"
+	"github.com/VengeTH/THN-Gateway/internal/host"
 )
 
 // Regression coverage ensuring activation status consistency, truthfulness,
@@ -263,5 +265,150 @@ func TestProductionActivationNotReachableMerelyBecauseCanApplyIsTrue(t *testing.
 	}
 	if !strings.Contains(errOut.String(), "Current network remains untouched") {
 		t.Errorf("expected network remains untouched message, got:\n%s", errOut.String())
+	}
+}
+
+// 8. Prove no-role-conflicts gate passes when roles do not collide, even if interfaces are uninspected.
+func TestNoRoleConflictsGatePassesWithoutCollision(t *testing.T) {
+	in := satisfiedGateInput()
+	in.NoRoleConflicts = true
+	res := activation.EvaluateProduction(in)
+	for _, g := range res.Gates {
+		if g.Name == "no-role-conflicts" && !g.Satisfied {
+			t.Errorf("no-role-conflicts gate should be satisfied when there is no collision, got: %s", g.Reason)
+		}
+	}
+}
+
+// 9. Prove no-role-conflicts gate blocks when WAN and LAN roles collide.
+func TestNoRoleConflictsGateBlocksOnWANLANCollision(t *testing.T) {
+	var cfg config.Config
+	cfg.Gateway.Enabled = true
+	cfg.Network.WAN = "eth0"
+	cfg.Network.LAN = "eth0"
+	ev := &activationEvidence{Cfg: cfg}
+	in := productionGateInput(ev, false)
+	if in.NoRoleConflicts {
+		t.Fatal("expected productionGateInput to detect WAN and LAN collision")
+	}
+	res := activation.EvaluateProduction(in)
+	if !containsString(res.Blocking, "no-role-conflicts") {
+		t.Errorf("expected no-role-conflicts to block, got: %v", res.Blocking)
+	}
+}
+
+// 10. Prove no-role-conflicts gate blocks when Management role collides with WAN or LAN.
+func TestNoRoleConflictsGateBlocksOnManagementCollision(t *testing.T) {
+	var cfg config.Config
+	cfg.Gateway.Enabled = true
+	cfg.Network.WAN = "eth0"
+	cfg.Network.LAN = "eth1"
+	cfg.Network.Management = "eth0"
+	ev := &activationEvidence{Cfg: cfg}
+	in := productionGateInput(ev, false)
+	if in.NoRoleConflicts {
+		t.Fatal("expected productionGateInput to detect Management and WAN collision")
+	}
+	res := activation.EvaluateProduction(in)
+	if !containsString(res.Blocking, "no-role-conflicts") {
+		t.Errorf("expected no-role-conflicts to block, got: %v", res.Blocking)
+	}
+}
+
+// 11. Prove isolated lab configuration validates and passes subsystems-executable gate.
+func TestIsolatedLabConfigurationPassesSubsystemsGate(t *testing.T) {
+	cfg, err := config.Load("../../configs/isolated_lab.yaml")
+	if err != nil {
+		t.Fatalf("loading isolated_lab.yaml: %v", err)
+	}
+	ev := gatherActivationEvidence(cfg, "../../configs/isolated_lab.yaml")
+	in := productionGateInput(ev, false)
+	res := activation.EvaluateProduction(in)
+	for _, g := range res.Gates {
+		if g.Name == "subsystems-executable" && !g.Satisfied {
+			t.Errorf("subsystems-executable should be satisfied for isolated_lab.yaml, got reason: %s", g.Reason)
+		}
+		if g.Name == "no-role-conflicts" && !g.Satisfied {
+			t.Errorf("no-role-conflicts should be satisfied for isolated_lab.yaml, got reason: %s", g.Reason)
+		}
+		if g.Name == "config-valid" && !g.Satisfied {
+			t.Errorf("config-valid should be satisfied for isolated_lab.yaml, got reason: %s", g.Reason)
+		}
+	}
+}
+
+// 12. Prove config validation rejects missing roles, duplicate assignments, invalid CIDRs, conflicting subnets, and management conflicts.
+func TestConfigValidationMatrixRules(t *testing.T) {
+	// Missing WAN role when gateway enabled
+	c1 := config.Defaults()
+	c1.Gateway.Enabled = true
+	c1.Network.WAN = ""
+	c1.Network.LAN = "eth1"
+	if !c1.Validate().HasErrors() {
+		t.Error("expected error for missing WAN role")
+	}
+
+	// Missing LAN role when gateway enabled
+	c2 := config.Defaults()
+	c2.Gateway.Enabled = true
+	c2.Network.WAN = "eth0"
+	c2.Network.LAN = ""
+	// With gateway intent, gateway.Validate and activation gates reject missing LAN role
+	gwReport := gateway.Validate(gateway.FromConfig(c2, host.Resolution{}), gateway.Observed{})
+	if gwReport.Verdict != gateway.VerdictBlocked {
+		t.Errorf("expected gateway.Validate to report BLOCKED for missing LAN role, got %s", gwReport.Verdict)
+	}
+
+	// Duplicate assignments
+	c3 := config.Defaults()
+	c3.Network.WAN = "eth0"
+	c3.Network.LAN = "eth0"
+	if !c3.Validate().HasErrors() {
+		t.Error("expected error for duplicate WAN and LAN interfaces")
+	}
+
+	c4 := config.Defaults()
+	c4.Network.WAN = "eth0"
+	c4.Network.LAN = "eth1"
+	c4.Network.Management = "eth0"
+	if !c4.Validate().HasErrors() {
+		t.Error("expected error for duplicate WAN and Management interfaces")
+	}
+
+	// Invalid CIDR
+	c5 := config.Defaults()
+	c5.Network.LANPrefix = "999.999.999.999/24"
+	if !c5.Validate().HasErrors() {
+		t.Error("expected error for invalid CIDR")
+	}
+
+	// Overlapping subnets between LAN and Management
+	c6 := config.Defaults()
+	c6.Network.LAN = "eth1"
+	c6.Network.LANPrefix = "10.77.0.1/24"
+	c6.Network.Management = "eth2"
+	c6.Network.ManagementPrefix = "10.77.0.128/25"
+	if !c6.Validate().HasErrors() {
+		t.Error("expected error for overlapping LAN and Management subnets")
+	}
+
+	// Management path conflict: upstream gateway inside management subnet
+	c7 := config.Defaults()
+	c7.Network.LANPrefix = "10.77.0.1/24"
+	c7.Network.ManagementPrefix = "10.99.0.1/24"
+	c7.Network.UpstreamGateway = "10.99.0.5"
+	if !c7.Validate().HasErrors() {
+		t.Error("expected error for upstream gateway inside management subnet")
+	}
+
+	// Masquerade outbound pointing to management interface
+	c8 := config.Defaults()
+	c8.Network.LAN = "eth1"
+	c8.Network.Management = "eth2"
+	c8.NAT.Enabled = true
+	c8.NAT.Masquerade.Enabled = true
+	c8.NAT.Masquerade.Outbound = "eth2"
+	if !c8.Validate().HasErrors() {
+		t.Error("expected error for masquerade outbound pointing to management interface")
 	}
 }

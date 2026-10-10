@@ -75,7 +75,9 @@ var fields = []Field{
 
 	{Key: "network.wan", Type: TypeInterface, Description: "Uplink: a stable interface ID or a kernel interface name (see `thn discover`)", Required: true, Mutating: true},
 	{Key: "network.lan", Type: TypeInterface, Description: "Downstream: a stable interface ID or a kernel interface name (see `thn discover`)", Mutating: true},
+	{Key: "network.management", Type: TypeInterface, Description: "Administrative interface (dedicated management port)", Mutating: true},
 	{Key: "network.lan_prefix", Type: TypeCIDR, Description: "Address to place on the LAN interface", Default: "10.77.0.1/24", Mutating: true},
+	{Key: "network.management_prefix", Type: TypeCIDR, Description: "Address to place on the management interface", Mutating: true},
 	{Key: "network.dns", Type: TypeList, Description: "Resolvers to configure", Default: "1.1.1.1,9.9.9.9"},
 	{Key: "network.mtu", Type: TypeInt, Description: "MTU for gateway interfaces", Default: "1500", Mutating: true},
 	{Key: "network.upstream_gateway", Type: TypeIP, Description: "Next hop for the default route", Mutating: true},

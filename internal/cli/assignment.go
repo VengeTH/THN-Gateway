@@ -128,13 +128,15 @@ func mergeBindings(cfg config.Config, stored []state.InterfaceAssignment) (
 		storedByRole[s.Role] = s
 	}
 
-	// Only the roles the configuration model actually has a key for can be
-	// declared. mgmt, guest and dmz have no key yet, so an assignment is
-	// the ONLY way to bind them — which is the honest state of the document,
-	// not an omission to paper over.
+	mgmtSel := cfg.Network.Management
+	if mgmtSel == "" {
+		mgmtSel = cfg.Network.Mgmt
+	}
+
 	declared := map[host.Role]string{
-		host.RoleWAN: cfg.Network.WAN,
-		host.RoleLAN: cfg.Network.LAN,
+		host.RoleWAN:  cfg.Network.WAN,
+		host.RoleLAN:  cfg.Network.LAN,
+		host.RoleMGMT: mgmtSel,
 	}
 
 	for _, r := range host.KnownRoles() {
@@ -177,9 +179,14 @@ func mergeBindings(cfg config.Config, stored []state.InterfaceAssignment) (
 // It exists so the gate reason and subsystems quote the SELECTOR the operator
 // used — a stable identity, a logical role, or a kernel name.
 func bindingSelector(cfg config.Config, stored []state.InterfaceAssignment, r host.Role) string {
+	mgmtSel := cfg.Network.Management
+	if mgmtSel == "" {
+		mgmtSel = cfg.Network.Mgmt
+	}
 	declared := map[host.Role]string{
-		host.RoleWAN: cfg.Network.WAN,
-		host.RoleLAN: cfg.Network.LAN,
+		host.RoleWAN:  cfg.Network.WAN,
+		host.RoleLAN:  cfg.Network.LAN,
+		host.RoleMGMT: mgmtSel,
 	}
 	if d := strings.TrimSpace(declared[r]); d != "" {
 		if d == string(r) {

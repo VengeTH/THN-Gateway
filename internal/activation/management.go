@@ -36,6 +36,8 @@ type ManagementSafetyInput struct {
 	ActiveSSHIP string
 	// ActiveSSHInterface is the interface carrying ActiveSSHIP.
 	ActiveSSHInterface string
+	// ManagementInterface is the explicitly configured management interface.
+	ManagementInterface string
 	// HasDefaultRoute indicates the host currently has a default gateway.
 	HasDefaultRoute bool
 	// PlannedDefaultRoute indicates whether the plan retains/configures a default route.
@@ -145,7 +147,29 @@ func EvaluateManagementSafety(in ManagementSafetyInput) ManagementSafetyReport {
 		}
 	}
 
-	// 4. Default route preservation
+	// 4. Configured management interface safety boundary
+	if in.ManagementInterface != "" {
+		for _, iface := range in.InterfaceDownActions {
+			if iface == in.ManagementInterface {
+				rep.Safe = false
+				msg := fmt.Sprintf("plan sets down the configured management interface %s", in.ManagementInterface)
+				rep.Findings = append(rep.Findings, msg)
+				if rep.Reason == "" {
+					rep.Reason = msg
+				}
+			}
+		}
+		if len(in.RemovedAddresses[in.ManagementInterface]) > 0 {
+			rep.Safe = false
+			msg := fmt.Sprintf("plan deletes addresses on the configured management interface %s", in.ManagementInterface)
+			rep.Findings = append(rep.Findings, msg)
+			if rep.Reason == "" {
+				rep.Reason = msg
+			}
+		}
+	}
+
+	// 5. Default route preservation
 	if in.HasDefaultRoute && !in.PlannedDefaultRoute {
 		rep.DefaultRoutePreserved = false
 		rep.Safe = false

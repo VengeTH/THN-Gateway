@@ -88,7 +88,11 @@ var allowedInConfigFields = []string{
 	// Network roles and addressing
 	"WAN",
 	"LAN",
+	"Management",
+	"Mgmt",
 	"LANPrefix",
+	"ManagementPrefix",
+	"MgmtPrefix",
 	"DNS",
 	"UpstreamGateway",
 	"MTU",

@@ -1268,7 +1268,11 @@ func runStatusLocal(env *Env) ExitCode {
 	env.printf("NAT:           %s\n", enabledLabel(cfg.NAT.Enabled, d.NAT.Resolved))
 	env.printf("QoS:           %s\n", enabledLabel(cfg.QoS.Enabled, d.QoS.Resolved))
 	env.printf("\n")
-	env.printf("Network apply: DISABLED (no apply path in this build)\n")
+	if activation.CanApply() {
+		env.printf("Network apply: FAIL-CLOSED (requires operator confirmation and all safety gates)\n")
+	} else {
+		env.printf("Network apply: DISABLED (no apply path in this build)\n")
+	}
 
 	if len(pending) > 0 {
 		env.printf("\nPending\n")
@@ -1401,7 +1405,11 @@ func runDiagnosticsLocal(env *Env) ExitCode {
 	env.printf("  Findings:          %d error, %d warning\n", stat.ErrorCount, stat.WarningCount)
 	env.printf("\n")
 	env.printf("Safety\n")
-	env.printf("  Network apply:     DISABLED\n")
+	if activation.CanApply() {
+		env.printf("  Network apply:     FAIL-CLOSED (requires operator confirmation and all safety gates)\n")
+	} else {
+		env.printf("  Network apply:     DISABLED\n")
+	}
 	env.printf("  Implementable:     %v\n", activation.ImplementedStages())
 	env.printf("  Not implementable: %v\n", activation.UnsupportedStages())
 

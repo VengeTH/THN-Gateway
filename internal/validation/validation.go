@@ -236,6 +236,16 @@ func validateAddressing(r *Result, cfg config.Config) {
 		}
 	}
 
+	// Management interface name.
+	if cfg.Network.Management != "" {
+		if msg := checkInterfaceName(cfg.Network.Management); msg != "" {
+			r.errorf(LayerStatic, "network.management", msg,
+				"interface names cannot contain spaces and are limited to 15 characters")
+		}
+	}
+
+	var lanPrefixParsed netip.Prefix
+
 	// LAN prefix.
 	if cfg.Network.LANPrefix != "" {
 		prefix, err := netip.ParsePrefix(cfg.Network.LANPrefix)
@@ -272,7 +282,45 @@ func validateAddressing(r *Result, cfg config.Config) {
 			r.warnf(LayerStatic, "network.lan_prefix",
 				fmt.Sprintf("%s leaves only %d usable host addresses", prefix, usableHosts(prefix.Bits())),
 				"a /29 or smaller is rarely enough for a household LAN")
+		default:
+			lanPrefixParsed = prefix
 		}
+	}
+
+	var mgmtPrefixParsed netip.Prefix
+
+	// Management prefix.
+	if cfg.Network.ManagementPrefix != "" {
+		prefix, err := netip.ParsePrefix(cfg.Network.ManagementPrefix)
+
+		switch {
+		case err != nil:
+			r.errorf(LayerStatic, "network.management_prefix",
+				fmt.Sprintf("%q is not a valid CIDR prefix", cfg.Network.ManagementPrefix),
+				"write it as an address and prefix length, for example 10.99.0.1/24")
+
+		case prefix.Addr().IsLoopback():
+			r.errorf(LayerStatic, "network.management_prefix",
+				"the Management prefix must not be a loopback address",
+				"use a private range such as 10.99.0.1/24")
+
+		case prefix.Addr().IsUnspecified():
+			r.errorf(LayerStatic, "network.management_prefix",
+				"the Management prefix must not be the unspecified address",
+				"use a private range such as 10.99.0.1/24")
+
+		case prefix.Addr().IsMulticast():
+			r.errorf(LayerStatic, "network.management_prefix",
+				"the Management prefix must not be a multicast address", "")
+		default:
+			mgmtPrefixParsed = prefix
+		}
+	}
+
+	if lanPrefixParsed.IsValid() && mgmtPrefixParsed.IsValid() && lanPrefixParsed.Overlaps(mgmtPrefixParsed) {
+		r.errorf(LayerStatic, "network.management_prefix",
+			fmt.Sprintf("management prefix %s conflicts with LAN prefix %s (overlapping subnets)", mgmtPrefixParsed, lanPrefixParsed),
+			"use distinct non-overlapping subnets for LAN and Management")
 	}
 
 	// MTU.
@@ -287,16 +335,20 @@ func validateAddressing(r *Result, cfg config.Config) {
 			"9000 is the largest value typically supported by Ethernet")
 	}
 
-	// Upstream gateway must not lie inside the LAN prefix, which would make
-	// the default route point at the downstream segment.
-	if cfg.Network.UpstreamGateway != "" && cfg.Network.LANPrefix != "" {
+	// Upstream gateway must not lie inside the LAN prefix or Management prefix
+	if cfg.Network.UpstreamGateway != "" {
 		gw, gwErr := netip.ParseAddr(cfg.Network.UpstreamGateway)
-		prefix, pErr := netip.ParsePrefix(cfg.Network.LANPrefix)
-
-		if gwErr == nil && pErr == nil && prefix.Contains(gw) {
-			r.errorf(LayerStatic, "network.upstream_gateway",
-				fmt.Sprintf("the upstream gateway %s is inside the LAN prefix %s", gw, prefix),
-				"the default route must leave through the WAN, not back into the LAN")
+		if gwErr == nil {
+			if lanPrefixParsed.IsValid() && lanPrefixParsed.Contains(gw) {
+				r.errorf(LayerStatic, "network.upstream_gateway",
+					fmt.Sprintf("the upstream gateway %s is inside the LAN prefix %s", gw, lanPrefixParsed),
+					"the default route must leave through the WAN, not back into the LAN")
+			}
+			if mgmtPrefixParsed.IsValid() && mgmtPrefixParsed.Contains(gw) {
+				r.errorf(LayerStatic, "network.upstream_gateway",
+					fmt.Sprintf("the upstream gateway %s is inside the Management prefix %s", gw, mgmtPrefixParsed),
+					"the default route must leave through the WAN, not into the management network")
+			}
 		}
 	}
 }
@@ -454,6 +506,30 @@ func validateCoherence(r *Result, cfg config.Config) {
 			"masquerading is enabled with no outbound interface, so source addresses "+
 				"would be rewritten on every interface including the LAN",
 			fmt.Sprintf("set nat.masquerade.outbound to the %q role or to the uplink interface name", "wan"))
+	}
+
+	// Masquerade outbound cannot be the management interface
+	if cfg.NAT.Enabled && cfg.NAT.Masquerade.Enabled && cfg.Network.Management != "" {
+		out := strings.TrimSpace(cfg.NAT.Masquerade.Outbound)
+		if out == cfg.Network.Management || out == "mgmt" {
+			r.errorf(LayerStatic, "nat.masquerade.outbound",
+				fmt.Sprintf("masquerade outbound interface cannot be the management interface (%s)", out),
+				"set nat.masquerade.outbound to the wan role or uplink interface")
+		}
+	}
+
+	// Management interface cannot collide with WAN or LAN
+	if cfg.Network.Management != "" {
+		if cfg.Network.Management == cfg.Network.WAN {
+			r.errorf(LayerStatic, "network.management",
+				fmt.Sprintf("Management and WAN cannot use the same interface (%s)", cfg.Network.Management),
+				"assign a dedicated interface to the management role")
+		}
+		if cfg.Network.Management == cfg.Network.LAN {
+			r.errorf(LayerStatic, "network.management",
+				fmt.Sprintf("Management and LAN cannot use the same interface (%s)", cfg.Network.Management),
+				"assign a dedicated interface to the management role")
+		}
 	}
 
 	// Everything requested, nothing identifiable to request it on.

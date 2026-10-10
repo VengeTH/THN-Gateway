@@ -1,0 +1,65 @@
+# THN Gateway — Isolated Lab Configuration
+#
+# Disposable lab configuration using virtual interfaces (veth pairs) and
+# documentation/isolated lab addresses.
+#
+# Non-negotiable safety properties:
+#   - Does not touch or bind to any real host interfaces.
+#   - Does not depend on the host default route.
+#   - Explicitly defines WAN, LAN, and Management interface roles.
+#   - Separates required core capabilities (forwarding, routing, NAT, firewall)
+#     from optional/unsupported services (DHCP and DNS are disabled).
+
+schema_version: 1
+
+gateway:
+  name: thn-isolated-lab
+  generation: 1
+  enabled: true
+
+routing:
+  ipv4_forwarding: true
+  ipv6_forwarding: false
+
+network:
+  # Explicit virtual interface roles for disposable lab
+  wan: veth-wan
+  lan: veth-lan
+  management: veth-mgmt
+
+  # Isolated documentation/lab addressing (RFC 1918 / RFC 5737 isolated blocks)
+  lan_prefix: 10.77.0.1/24
+  management_prefix: 10.99.0.1/24
+
+  mtu: 1500
+  upstream_gateway: 10.77.250.2
+
+  dns:
+    - 1.1.1.1
+    - 9.9.9.9
+
+nat:
+  enabled: true
+  interfaces:
+    - veth-lan
+  masquerade:
+    enabled: true
+    outbound: wan
+
+firewall:
+  enabled: true
+  backend: nftables
+  default_inbound_policy: drop
+  admin_sources:
+    - 10.99.0.0/24
+    - 10.77.0.0/24
+
+qos:
+  enabled: false
+
+# DHCP and DNS runtime servers are not implemented in this build and remain explicitly disabled.
+dhcp:
+  enabled: false
+
+dns:
+  enabled: false

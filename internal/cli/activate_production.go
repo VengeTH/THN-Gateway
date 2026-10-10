@@ -128,7 +128,7 @@ func gatherActivationEvidence(cfg config.Config, path string) *activationEvidenc
 		Device:      device,
 	})
 
-	ev.Management = evaluatePlannedManagementSafety(obs, device, ev.Plan)
+	ev.Management = evaluatePlannedManagementSafety(obs, device, ev.Plan, ev.Assignments)
 	return ev
 }
 
@@ -273,7 +273,7 @@ func executableSubsystems(cfg config.Config) (bool, string) {
 // The conservative default matters as much as the checks. If the operations
 // cannot be derived, the question cannot be answered, and the report says so
 // instead of reporting "safe" because nothing was found to complain about.
-func evaluatePlannedManagementSafety(obs diff.Observed, device *host.Device, plan *planner.Plan) activation.ManagementSafetyReport {
+func evaluatePlannedManagementSafety(obs diff.Observed, device *host.Device, plan *planner.Plan, optionalAssignments ...[]host.Assignment) activation.ManagementSafetyReport {
 	ops, err := operationsFor(plan, obs)
 	if err != nil {
 		return activation.ManagementSafetyReport{
@@ -334,6 +334,15 @@ func evaluatePlannedManagementSafety(obs diff.Observed, device *host.Device, pla
 		ActiveSSHIP:          activeSSHAddress(),
 	}
 	in.ActiveSSHInterface = interfaceCarryingAddress(device, in.ActiveSSHIP)
+
+	if len(optionalAssignments) > 0 {
+		for _, a := range optionalAssignments[0] {
+			if a.Role == host.RoleMGMT && a.Selector != "" {
+				in.ManagementInterface = a.Selector
+				break
+			}
+		}
+	}
 
 	// The overlay tunnel is identified by what the host reports, not by a
 	// hard-coded name. A host without one must not be judged as though it had
@@ -453,21 +462,46 @@ func productionGateInput(ev *activationEvidence, presence bool) activation.GateI
 	in.LAN = roleGate(ev.Device, res, host.RoleLAN, bindingSelector(cfg, stored, host.RoleLAN))
 
 	// Role conflicts: the document and the store disagree; the resolution
-	// found a collision; or both roles landed on one interface.
-	switch {
-	case len(ev.Conflicts) > 0:
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = fmt.Sprintf("role %s is declared as %s but stored as %s",
-			ev.Conflicts[0].Role, ev.Conflicts[0].Declared, ev.Conflicts[0].Stored)
-	case len(res.Problems) > 0:
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = res.Problems[0].Message
-	case in.WAN.Satisfied && in.LAN.Satisfied && in.WAN.Interface != "" && in.WAN.Interface == in.LAN.Interface:
-		in.NoRoleConflicts = false
-		in.RoleConflictProblem = fmt.Sprintf("LAN and WAN roles are both assigned to %s", in.WAN.Interface)
-	default:
-		in.NoRoleConflicts = true
+	// found a collision; or roles landed on one interface.
+	var conflictProblem string
+	hasRoleConflict := false
+
+	wanSel := strings.TrimSpace(cfg.Network.WAN)
+	lanSel := strings.TrimSpace(cfg.Network.LAN)
+	mgmtSel := strings.TrimSpace(cfg.Network.Management)
+	if mgmtSel == "" {
+		mgmtSel = strings.TrimSpace(cfg.Network.Mgmt)
 	}
+
+	if wanSel != "" && lanSel != "" && wanSel == lanSel {
+		hasRoleConflict = true
+		conflictProblem = fmt.Sprintf("WAN and LAN roles are both assigned to %s", wanSel)
+	} else if mgmtSel != "" && wanSel != "" && mgmtSel == wanSel {
+		hasRoleConflict = true
+		conflictProblem = fmt.Sprintf("Management and WAN roles are both assigned to %s", mgmtSel)
+	} else if mgmtSel != "" && lanSel != "" && mgmtSel == lanSel {
+		hasRoleConflict = true
+		conflictProblem = fmt.Sprintf("Management and LAN roles are both assigned to %s", mgmtSel)
+	} else if len(ev.Conflicts) > 0 {
+		hasRoleConflict = true
+		conflictProblem = fmt.Sprintf("role %s is declared as %s but stored as %s",
+			ev.Conflicts[0].Role, ev.Conflicts[0].Declared, ev.Conflicts[0].Stored)
+	} else {
+		for _, p := range res.Problems {
+			if p.Code == "duplicate-interface" || p.Code == "duplicate-role" {
+				hasRoleConflict = true
+				conflictProblem = p.Message
+				break
+			}
+		}
+		if !hasRoleConflict && in.WAN.Satisfied && in.LAN.Satisfied && in.WAN.Interface != "" && in.WAN.Interface == in.LAN.Interface {
+			hasRoleConflict = true
+			conflictProblem = fmt.Sprintf("LAN and WAN roles are both assigned to %s", in.WAN.Interface)
+		}
+	}
+
+	in.NoRoleConflicts = !hasRoleConflict
+	in.RoleConflictProblem = conflictProblem
 
 	// Host readiness.
 	if ready := host.EvaluateReadiness(ev.Device, host.ReadinessRequest{RequiredInterfaces: 2}); ready.Blocked {

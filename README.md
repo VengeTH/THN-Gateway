@@ -1699,6 +1699,76 @@ M8 introduces the data model for multi-zone networking:
 - **M8 does NOT expose management to WAN.**
 - **M8 does NOT replace or weaken the existing activation safety system.**
 
+## Isolated Gateway Lab & Workflow
+
+The isolated gateway workflow ensures complete configuration-to-plan validation without touching host interfaces or routes.
+
+### 1. Configuration Validation
+
+Validate configuration document syntax, explicit interface roles (WAN, LAN, Management), address ranges, and separation:
+
+```bash
+# Validate sample isolated lab configuration
+thn validate configs/isolated_lab.yaml
+
+# Validate JSON format for automated tooling
+thn validate --json configs/isolated_lab.yaml
+```
+
+### 2. Plan Generation
+
+Inspect the deterministic, human-readable plan showing intended changes without mutating host state:
+
+```bash
+# Generate plan from isolated lab configuration
+thn plan --config configs/isolated_lab.yaml
+
+# Generate plan with command-by-command explanation
+thn plan --config configs/isolated_lab.yaml --explain
+
+# Emit machine-readable plan JSON
+thn plan --config configs/isolated_lab.yaml --json
+```
+
+### 3. Activation Gate Verification & Status
+
+Verify that production activation remains fail-closed and check which safety gates hold:
+
+```bash
+# Check lifecycle state and applier binding
+thn activation status --config configs/isolated_lab.yaml
+
+# Verify production activation gates against isolated lab config
+THN_CONFIG=configs/isolated_lab.yaml thn activation verify
+```
+
+### 4. Isolated Lab End-to-End Testing
+
+Run end-to-end dataplane forwarding, NAT masquerade, and firewall isolation tests in disposable network namespaces (`thn-m62-wan` → `thn-m62-gateway` → `thn-m62-client`):
+
+```bash
+# Run isolated lab suite (requires Linux, root, iproute2, and nftables)
+sudo THN_M62_LAB=1 go test -count=1 -v -timeout 15m ./internal/lab/
+
+# Run non-privileged unit test suite across all packages (any platform)
+go test ./...
+```
+
+### 5. Lab Teardown and Cleanup Verification
+
+The test harness automatically cleans up all namespaces and veth links upon test completion. To manually verify or purge leftover namespaces:
+
+```bash
+# Verify no leftover lab namespaces exist
+ip netns list | grep thn-m62
+
+# Purge any leaked test namespaces
+sudo ip netns del thn-m62-gateway 2>/dev/null || true
+sudo ip netns del thn-m62-client 2>/dev/null || true
+sudo ip netns del thn-m62-client-b 2>/dev/null || true
+sudo ip netns del thn-m62-wan 2>/dev/null || true
+```
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.

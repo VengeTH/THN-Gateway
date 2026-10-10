@@ -472,6 +472,59 @@ func TestEndToEndProductionActivationBlocked(t *testing.T) {
 	}
 }
 
+// TestEndToEndConfigurationFailure proves that an invalid configuration or
+// unsatisfied precondition fails closed before mutating any lab state.
+func TestEndToEndConfigurationFailure(t *testing.T) {
+	h := newHarness(t)
+	baseline := h.captureState(t)
+
+	// Construct an unready plan with blocked change
+	badPlan := h.mustPlan(t)
+	badPlan.Blocked = append(badPlan.Blocked, planner.Step{
+		ID:     "blocked-invalid-role",
+		Field:  "network.lan",
+		Reason: "conflicting role assignment in plan",
+	})
+	badPlan.Ready = false
+
+	res, err := h.executor().ExecutePlan(context.Background(), badPlan,
+		h.transactionDriver(t), h.transactionOptions())
+	if err == nil {
+		t.Fatalf("expected plan with blocked changes to be rejected; got final state %s", res.FinalState)
+	}
+
+	// Verify the kernel state remains completely identical to baseline
+	matched, diffs := baseline.MatchesBaseline(h.captureState(t))
+	if !matched {
+		t.Fatalf("configuration failure altered lab kernel state:\n  %s", strings.Join(diffs, "\n  "))
+	}
+	t.Logf("configuration failure correctly rejected; lab baseline preserved untouched")
+}
+
+// TestEndToEndLabCleanup proves that harness teardown removes all test-created
+// namespaces and virtual interfaces, leaving no leftover resources.
+func TestEndToEndLabCleanup(t *testing.T) {
+	// Create an isolated sub-test to observe post-cleanup state
+	var createdNamespaces []string
+	t.Run("execute-lab", func(subT *testing.SubT) {
+		h := newHarness(subT)
+		createdNamespaces = h.top.Namespaces()
+		for _, nsName := range createdNamespaces {
+			if !netns.Exists(nsName) {
+				subT.Fatalf("namespace %s was not created during harness init", nsName)
+			}
+		}
+	})
+
+	// After sub-test completes, t.Cleanup has executed. Verify all namespaces are gone.
+	for _, nsName := range createdNamespaces {
+		if netns.Exists(nsName) {
+			t.Errorf("leftover lab namespace %s detected after harness teardown", nsName)
+		}
+	}
+	t.Logf("lab cleanup verified: all %d namespaces were completely removed", len(createdNamespaces))
+}
+
 // ------------------------------------------------------------- transactions
 
 // applyGatewayPlan runs the canonical gateway transaction and requires it to
