@@ -75,6 +75,9 @@ func TestWANAccessStrictlyRefused(t *testing.T) {
 // without modifying host routes, addresses, firewall or qdiscs.
 func TestSoftwareOnlyNoHostModifications(t *testing.T) {
 	cfg := config.Defaults()
+	cfg.QoS.Clients = []config.QoSClientConfig{
+		{ID: "client-test", IP: "10.77.0.100", Priority: "normal"},
+	}
 	col := NewCollector(cfg, nil)
 
 	// Run all gather operations

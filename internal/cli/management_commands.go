@@ -15,7 +15,17 @@ import (
 
 // runClients lists connected devices, IP/MAC mappings, and traffic/policy details.
 func runClients(env *Env, args []string) ExitCode {
-	path := env.resolveConfigPath("")
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn clients: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
 	cfg, err := loadConfig(env, path)
 	if err != nil {
 		return env.fatalf("thn clients: %v\n", err)
@@ -134,7 +144,17 @@ func runNetworks(env *Env, args []string) ExitCode {
 
 // runMonitoring provides consolidated gateway health, CPU, memory, and WAN statistics.
 func runMonitoring(env *Env, args []string) ExitCode {
-	path := env.resolveConfigPath("")
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn monitoring: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
 	cfg, err := loadConfig(env, path)
 	if err != nil {
 		return env.fatalf("thn monitoring: %v\n", err)
@@ -180,7 +200,17 @@ func runMonitoring(env *Env, args []string) ExitCode {
 
 // runEvents lists active alerts, notifications and security audit logs.
 func runEvents(env *Env, args []string) ExitCode {
-	path := env.resolveConfigPath("")
+	fs := newFlagSet()
+	configPath := fs.String("config", "")
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return env.fatalf("thn events: %v\n", err)
+	}
+
+	path := env.resolveConfigPath(*configPath)
+	if len(rest) > 0 {
+		path = rest[0]
+	}
 	cfg, err := loadConfig(env, path)
 	if err != nil {
 		return env.fatalf("thn events: %v\n", err)

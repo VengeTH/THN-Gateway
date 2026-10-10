@@ -43,10 +43,14 @@ func (c *Collector) GatherStatus() GatewayStatus {
 		wanStatus = "configured"
 	}
 
-	activeClients := len(c.cfg.QoS.Clients)
-	if activeClients == 0 {
-		activeClients = 2 // minimal placeholder from observed network
+	clients := c.GatherClients(context.Background())
+	activeClients := 0
+	for _, cl := range clients {
+		if cl.Online && !cl.Blocked {
+			activeClients++
+		}
 	}
+	totalClients := len(clients)
 
 	qosStatus := "disabled"
 	if c.cfg.QoS.Enabled {
@@ -82,7 +86,7 @@ func (c *Collector) GatherStatus() GatewayStatus {
 		InternetStatus:  "online",
 		WANStatus:       wanStatus,
 		ActiveClients:   activeClients,
-		TotalClients:    activeClients + 2,
+		TotalClients:    totalClients,
 		QoSStatus:       qosStatus,
 		FirewallStatus:  fwStatus,
 		NATStatus:       natStatus,
@@ -93,76 +97,130 @@ func (c *Collector) GatherStatus() GatewayStatus {
 
 // GatherSystem derives current host CPU, RAM, and storage vitals safely.
 func (c *Collector) GatherSystem() SystemMetrics {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	memAlloc := m.Alloc
-	memTotal := m.Sys
-	memAvailable := memTotal - memAlloc
-
-	return SystemMetrics{
-		CPUUsagePercent:       14.2, // safely estimated load
-		CPULoadAverage:        [3]float64{0.35, 0.28, 0.20},
-		MemoryUsedBytes:       memAlloc,
-		MemoryAvailableBytes:  memAvailable,
-		MemoryTotalBytes:      memTotal,
-		StorageUsedBytes:      12 * 1024 * 1024 * 1024,
-		StorageAvailableBytes: 52 * 1024 * 1024 * 1024,
-		StorageTotalBytes:     64 * 1024 * 1024 * 1024,
-		TemperatureCelsius:    42.5,
-		Status:                "healthy",
+	sys := SystemMetrics{
+		Status: "healthy",
 	}
+
+	// 1. Real Linux memory from /proc/meminfo
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		var memTotalKb, memAvailKb uint64
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				switch fields[0] {
+				case "MemTotal:":
+					fmt.Sscanf(fields[1], "%d", &memTotalKb)
+				case "MemAvailable:":
+					fmt.Sscanf(fields[1], "%d", &memAvailKb)
+				}
+			}
+		}
+		if memTotalKb > 0 {
+			sys.MemoryTotalBytes = memTotalKb * 1024
+			sys.MemoryAvailableBytes = memAvailKb * 1024
+			if memTotalKb > memAvailKb {
+				sys.MemoryUsedBytes = (memTotalKb - memAvailKb) * 1024
+			}
+		}
+	}
+
+	// Fallback memory on non-Linux
+	if sys.MemoryTotalBytes == 0 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		sys.MemoryUsedBytes = m.Alloc
+		sys.MemoryTotalBytes = m.Sys
+		if sys.MemoryTotalBytes < sys.MemoryUsedBytes {
+			sys.MemoryTotalBytes = sys.MemoryUsedBytes * 2
+		}
+		sys.MemoryAvailableBytes = sys.MemoryTotalBytes - sys.MemoryUsedBytes
+	}
+
+	// 2. Real Linux CPU load from /proc/loadavg
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 3 {
+			var l1, l5, l15 float64
+			fmt.Sscanf(fields[0], "%f", &l1)
+			fmt.Sscanf(fields[1], "%f", &l5)
+			fmt.Sscanf(fields[2], "%f", &l15)
+			sys.CPULoadAverage = [3]float64{l1, l5, l15}
+			numCPU := float64(runtime.NumCPU())
+			if numCPU > 0 {
+				sys.CPUUsagePercent = (l1 / numCPU) * 100
+				if sys.CPUUsagePercent > 100.0 {
+					sys.CPUUsagePercent = 100.0
+				}
+			}
+		}
+	} else {
+		sys.CPULoadAverage = [3]float64{0.10, 0.10, 0.10}
+		sys.CPUUsagePercent = 2.0
+	}
+
+	// 3. Real storage metrics from root filesystem
+	readStorageStats(&sys)
+
+	// 4. Real temperature from Linux thermal zone
+	if data, err := os.ReadFile("/sys/class/thermal/thermal_zone0/temp"); err == nil {
+		var millidegrees int64
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &millidegrees); err == nil && millidegrees > 0 {
+			sys.TemperatureCelsius = float64(millidegrees) / 1000.0
+		}
+	}
+
+	return sys
 }
 
 // GatherInterfaces builds interface telemetry preserving stable identities.
 func (c *Collector) GatherInterfaces() []InterfaceMonitoring {
 	var list []InterfaceMonitoring
 
-	// Primary WAN candidate: Intel I219-LM
-	wanName := c.cfg.Network.WAN
-	if wanName == "" {
+	wanID := c.cfg.Network.WAN
+	if wanID == "" {
+		wanID = "hw:7c6170fd7f34317a"
+	}
+	wanName := wanID
+	if strings.HasPrefix(wanName, "hw:") {
 		wanName = "enp0s31f6"
 	}
+
+	lanID := c.cfg.Network.LAN
+	if lanID == "" {
+		lanID = "hw:2c886f45ad0cb12f"
+	}
+	lanName := lanID
+	if strings.HasPrefix(lanName, "hw:") {
+		lanName = "enx00e099001812"
+	}
+
 	list = append(list, InterfaceMonitoring{
 		Name:      wanName,
-		StableID:  "hw:ba41136cb1291dff",
+		StableID:  wanID,
 		Role:      "WAN",
 		State:     "up",
 		Physical:  true,
 		SpeedMbps: 1000,
 		Duplex:    "full",
 		IPv4:      []string{"192.168.1.150/24"},
-		IPv6:      []string{"fe80::ba41:13ff:fe6c:b129/64"},
-		RxBytes:   428519200,
-		TxBytes:   85194020,
-		RxErrors:  0,
-		TxErrors:  0,
+		IPv6:      []string{},
 		Driver:    "e1000e",
 	})
 
-	// Temporary LAN candidate: USB Ethernet
-	lanName := c.cfg.Network.LAN
-	if lanName == "" {
-		lanName = "enx00e099001812"
-	}
 	list = append(list, InterfaceMonitoring{
 		Name:      lanName,
-		StableID:  "hw:9d216fa27c73ed97",
+		StableID:  lanID,
 		Role:      "LAN",
 		State:     "up",
 		Physical:  true,
-		SpeedMbps: 100, // Temporary Fast Ethernet USB NIC
+		SpeedMbps: 100,
 		Duplex:    "full",
 		IPv4:      []string{"10.77.0.1/24"},
 		IPv6:      []string{},
-		RxBytes:   75294010,
-		TxBytes:   398102940,
-		RxErrors:  0,
-		TxErrors:  0,
 		Driver:    "r8152",
 	})
 
-	// Wi-Fi Management Interface
 	list = append(list, InterfaceMonitoring{
 		Name:      "wlp2s0",
 		StableID:  "hw:e82a44bb01223344",
@@ -173,10 +231,6 @@ func (c *Collector) GatherInterfaces() []InterfaceMonitoring {
 		Duplex:    "full",
 		IPv4:      []string{"192.168.1.200/24"},
 		IPv6:      []string{},
-		RxBytes:   1294810,
-		TxBytes:   984102,
-		RxErrors:  0,
-		TxErrors:  0,
 		Driver:    "iwlwifi",
 	})
 
@@ -185,8 +239,12 @@ func (c *Collector) GatherInterfaces() []InterfaceMonitoring {
 
 // GatherWAN derives WAN uplink health and connectivity.
 func (c *Collector) GatherWAN() WANHealth {
-	wanName := c.cfg.Network.WAN
-	if wanName == "" {
+	wanID := c.cfg.Network.WAN
+	if wanID == "" {
+		wanID = "hw:7c6170fd7f34317a"
+	}
+	wanName := wanID
+	if strings.HasPrefix(wanName, "hw:") {
 		wanName = "enp0s31f6"
 	}
 
@@ -195,28 +253,136 @@ func (c *Collector) GatherWAN() WANHealth {
 		dnsList = []string{"1.1.1.1", "9.9.9.9"}
 	}
 
+	gwIP := findDefaultGatewayIP()
+
 	return WANHealth{
 		LinkUp:            true,
 		InterfaceName:     wanName,
-		StableID:          "hw:ba41136cb1291dff",
-		GatewayIP:         "192.168.1.1",
+		StableID:          wanID,
+		GatewayIP:         gwIP,
 		GatewayReachable:  true,
 		InternetReachable: true,
 		DNSServers:        dnsList,
 		DNSReachable:      true,
-		LatencyMs:         14.8,
-		PacketLossPct:     0.0,
-		RxThroughputBps:   28401920,
-		TxThroughputBps:   4190280,
 		Status:            "online",
 	}
+}
+
+// parseDnsmasqLeases reads real DHCP leases assigned by dnsmasq.
+func parseDnsmasqLeases() []ClientDevice {
+	leasePaths := []string{
+		"/var/lib/misc/dnsmasq.leases",
+		"/var/run/dnsmasq/dnsmasq.leases",
+		"/var/lib/dnsmasq/dnsmasq.leases",
+		"/tmp/dnsmasq.leases",
+	}
+
+	for _, p := range leasePaths {
+		data, err := os.ReadFile(p)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		var list []ClientDevice
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) >= 3 {
+				mac := fields[1]
+				ip := fields[2]
+				hostname := ip
+				if len(fields) >= 4 && fields[3] != "*" && fields[3] != "" {
+					hostname = fields[3]
+				}
+				list = append(list, ClientDevice{
+					ID:              "client-" + strings.ReplaceAll(mac, ":", ""),
+					MAC:             mac,
+					IPv4:            ip,
+					Hostname:        hostname,
+					Interface:       "enx00e099001812",
+					NetworkID:       "lan",
+					LogicalGroup:    "dhcp",
+					Online:          true,
+					LastSeen:        time.Now().UTC(),
+					QoSPolicy:       "default",
+					IsolationStatus: "standard",
+					Blocked:         false,
+				})
+			}
+		}
+		if len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
+// parseArpTable reads live ARP entries from /proc/net/arp.
+func parseArpTable() []ClientDevice {
+	data, err := os.ReadFile("/proc/net/arp")
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	var list []ClientDevice
+	for i, line := range strings.Split(string(data), "\n") {
+		if i == 0 {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 6 {
+			ip := fields[0]
+			flags := fields[2]
+			mac := fields[3]
+			dev := fields[5]
+
+			if flags != "0x2" || mac == "00:00:00:00:00:00" {
+				continue
+			}
+			if strings.HasPrefix(ip, "10.77.0.") && !strings.HasSuffix(ip, ".1") {
+				list = append(list, ClientDevice{
+					ID:              "client-" + strings.ReplaceAll(mac, ":", ""),
+					MAC:             mac,
+					IPv4:            ip,
+					Hostname:        ip,
+					Interface:       dev,
+					NetworkID:       "lan",
+					LogicalGroup:    "lan",
+					Online:          true,
+					LastSeen:        time.Now().UTC(),
+					QoSPolicy:       "default",
+					IsolationStatus: "standard",
+					Blocked:         false,
+				})
+			}
+		}
+	}
+	return list
+}
+
+// findDefaultGatewayIP extracts the default gateway from Linux /proc/net/route.
+func findDefaultGatewayIP() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return "192.168.1.1"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == "00000000" {
+			gwHex := fields[2]
+			var b0, b1, b2, b3 uint32
+			if _, err := fmt.Sscanf(gwHex, "%02X%02X%02X%02X", &b3, &b2, &b1, &b0); err == nil {
+				return fmt.Sprintf("%d.%d.%d.%d", b0, b1, b2, b3)
+			}
+		}
+	}
+	return "192.168.1.1"
 }
 
 // GatherClients retrieves connected devices and policy states.
 func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 	var clients []ClientDevice
+	seenIP := make(map[string]bool)
 
-	// If persistent records exist in the store, load them
+	// 1. If persistent records exist in the store, load them
 	if c.store != nil {
 		stored, err := c.store.ListClientRecords(ctx)
 		if err == nil && len(stored) > 0 {
@@ -231,84 +397,58 @@ func (c *Collector) GatherClients(ctx context.Context) []ClientDevice {
 					LogicalGroup:    classifyGroup(rec.NetworkID),
 					Online:          true,
 					LastSeen:        rec.UpdatedAt,
-					RxBytes:         15920384,
-					TxBytes:         3849102,
-					CurrentRxBps:    1284000,
-					CurrentTxBps:    294000,
 					QoSPolicy:       rec.QoSPolicy,
 					IsolationStatus: "isolated",
 					Blocked:         rec.Blocked,
 					Notes:           rec.Notes,
 				})
+				seenIP[rec.IP] = true
 			}
-			return clients
 		}
 	}
 
-	// Fallback/bootstrap client model from configured QoS clients
+	// 2. Configured QoS clients from document
 	if len(c.cfg.QoS.Clients) > 0 {
 		for _, qClient := range c.cfg.QoS.Clients {
-			clients = append(clients, ClientDevice{
-				ID:              qClient.ID,
-				MAC:             qClient.MAC,
-				IPv4:            qClient.IP,
-				Hostname:        qClient.ID,
-				Interface:       "enx00e099001812",
-				NetworkID:       "lan",
-				LogicalGroup:    classifyGroup(qClient.Group),
-				Online:          !qClient.Disabled,
-				LastSeen:        time.Now().UTC(),
-				RxBytes:         24910200,
-				TxBytes:         5920100,
-				CurrentRxBps:    2450000,
-				CurrentTxBps:    480000,
-				QoSPolicy:       fmt.Sprintf("%s (%d kbps)", qClient.Priority, qClient.DownloadKbps),
-				IsolationStatus: "standard",
-				Blocked:         qClient.Disabled,
-			})
+			if !seenIP[qClient.IP] {
+				clients = append(clients, ClientDevice{
+					ID:              qClient.ID,
+					MAC:             qClient.MAC,
+					IPv4:            qClient.IP,
+					Hostname:        qClient.ID,
+					Interface:       "enx00e099001812",
+					NetworkID:       "lan",
+					LogicalGroup:    classifyGroup(qClient.Group),
+					Online:          !qClient.Disabled,
+					LastSeen:        time.Now().UTC(),
+					QoSPolicy:       fmt.Sprintf("%s (%d kbps)", qClient.Priority, qClient.DownloadKbps),
+					IsolationStatus: "standard",
+					Blocked:         qClient.Disabled,
+				})
+				seenIP[qClient.IP] = true
+			}
 		}
-	} else {
-		// Default observed devices
-		clients = append(clients,
-			ClientDevice{
-				ID:              "client-family-phone",
-				MAC:             "a4:83:e7:2b:11:01",
-				IPv4:            "10.77.0.50",
-				Hostname:        "Mom-iPhone",
-				Interface:       "enx00e099001812",
-				NetworkID:       "lan",
-				LogicalGroup:    "family",
-				Online:          true,
-				LastSeen:        time.Now().UTC(),
-				RxBytes:         14294000,
-				TxBytes:         3910000,
-				CurrentRxBps:    3200000,
-				CurrentTxBps:    410000,
-				QoSPolicy:       "high",
-				IsolationStatus: "standard",
-				Blocked:         false,
-			},
-			ClientDevice{
-				ID:              "client-neighbor-laptop",
-				MAC:             "3c:22:fb:99:32:44",
-				IPv4:            "10.10.20.101",
-				Hostname:        "Neighbor-PC",
-				Interface:       "enx00e099001812",
-				NetworkID:       "neighbors",
-				LogicalGroup:    "neighbor",
-				Online:          true,
-				LastSeen:        time.Now().UTC(),
-				RxBytes:         9810200,
-				TxBytes:         1200000,
-				CurrentRxBps:    1500000,
-				CurrentTxBps:    190000,
-				QoSPolicy:       "normal",
-				IsolationStatus: "isolated",
-				Blocked:         false,
-			},
-		)
 	}
 
+	// 3. Live DHCP leases from host dnsmasq
+	for _, l := range parseDnsmasqLeases() {
+		if !seenIP[l.IPv4] {
+			clients = append(clients, l)
+			seenIP[l.IPv4] = true
+		}
+	}
+
+	// 4. Live ARP entries from kernel
+	for _, a := range parseArpTable() {
+		if !seenIP[a.IPv4] {
+			clients = append(clients, a)
+			seenIP[a.IPv4] = true
+		}
+	}
+
+	if clients == nil {
+		return []ClientDevice{}
+	}
 	return clients
 }
 
