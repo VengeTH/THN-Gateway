@@ -122,6 +122,13 @@ func writeInputChain(b *strings.Builder, p policy.Policy) {
 		fmt.Sprintf("iifname %q accept", lo),
 		"local traffic never traverses an external interface")
 
+	writeRule(b, p, "\t\t",
+		"iifname \"tailscale0\" accept",
+		"preserve Tailscale remote management path")
+	writeRule(b, p, "\t\t",
+		"udp dport 41641 accept",
+		"preserve Tailscale WireGuard peering")
+
 	if p.ICMP.AllowLAN && p.Interfaces.LAN != "" {
 		writeRule(b, p, "\t\t",
 			fmt.Sprintf("iifname %q icmp accept", p.Interfaces.LAN),
