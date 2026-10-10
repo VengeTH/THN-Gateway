@@ -165,6 +165,16 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ifaces := s.collector.GatherInterfaces()
+
+	// `null` and `[]` are both valid JSON, but they are not the same answer.
+	// A collection endpoint that emits null when it has nothing to report
+	// makes every consumer carry a null check, and a client that forgets one
+	// crashes on a machine with no second NIC rather than showing an empty
+	// list. The collection is always a collection.
+	if ifaces == nil {
+		ifaces = []InterfaceMonitoring{}
+	}
+
 	respondJSON(w, http.StatusOK, ifaces)
 }
 

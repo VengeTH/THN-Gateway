@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -92,13 +93,26 @@ func TestSoftwareOnlyNoHostModifications(t *testing.T) {
 	}
 
 	ifaces := col.GatherInterfaces()
-	if len(ifaces) == 0 {
-		t.Errorf("expected non-empty interfaces")
+	// The collector reports what the host has. On a platform it cannot
+	// inspect it reports nothing, and an empty result is the CORRECT answer —
+	// it is what a non-empty result used to be faking. Asserting a fixed
+	// length here is asserting that the fabrication still works.
+	//
+	// What matters for the safety property this test guards is that the
+	// collector ran without touching the host, which the surrounding
+	// assertions and the absence of any write call already establish.
+	if runtime.GOOS != "linux" && len(ifaces) != 0 {
+		t.Errorf("expected no interfaces on an uninspectable platform, got %d", len(ifaces))
 	}
 
 	wan := col.GatherWAN()
-	if !wan.LinkUp {
-		t.Errorf("expected WAN link up in test model")
+	// Likewise: reachability is measured now, so there is nothing to assert
+	// about its value on a host that cannot be probed. What must hold is
+	// that status is one of the states the renderer knows how to display.
+	switch wan.Status {
+	case "online", "degraded", "offline", "unknown":
+	default:
+		t.Errorf("WAN status %q is not a state the console can render", wan.Status)
 	}
 
 	clients := col.GatherClients(context.Background())

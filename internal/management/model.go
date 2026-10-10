@@ -87,6 +87,7 @@ type ClientDevice struct {
 	LogicalGroup    string    `json:"logical_group"` // family, neighbor, guest, management, unknown
 	Online          bool      `json:"online"`
 	LastSeen        time.Time `json:"last_seen"`
+	LeaseExpires    time.Time `json:"lease_expires,omitempty"`
 	RxBytes         uint64    `json:"rx_bytes"`
 	TxBytes         uint64    `json:"tx_bytes"`
 	CurrentRxBps    uint64    `json:"current_rx_bps"`

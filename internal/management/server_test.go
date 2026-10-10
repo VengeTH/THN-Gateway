@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/VengeTH/THN-Gateway/internal/config"
@@ -253,14 +254,41 @@ func TestDataCorrectnessStableIdentities(t *testing.T) {
 	srv, _ := testServer(t)
 	ifaces := srv.collector.GatherInterfaces()
 
-	if len(ifaces) < 2 {
-		t.Fatalf("expected at least WAN and LAN interfaces, got %d", len(ifaces))
+	// The property under test is that a stable identity is a distinct thing
+	// from a kernel name — that it survives a rename. It is NOT "this test
+	// machine happens to have two NICs", which is what the old count
+	// assertion was really testing, and which only passed because the
+	// collector used to invent interfaces.
+	//
+	// On a platform that cannot be inspected there is nothing to check, and
+	// reporting nothing is the correct answer.
+	if runtime.GOOS != "linux" {
+		if len(ifaces) != 0 {
+			t.Fatalf("expected no interfaces on an uninspectable platform, got %d", len(ifaces))
+		}
+		return
 	}
+
+	if len(ifaces) < 2 {
+		t.Fatalf("expected at least WAN and LAN interfaces on a Linux host, got %d", len(ifaces))
+	}
+
+	// Roles are assigned by matching the configured selectors against observed
+	// stable IDs. Defaults() leaves both empty — which is correct, because a
+	// document that names somebody's real NIC asserts a fact about their
+	// hardware — so a fixture that wants roles must supply selectors that
+	// match something this host actually has.
+	//
+	// Derived from the observation rather than hardcoded, so the test
+	// asserts the matching rule instead of asserting that a particular
+	// machine has two NICs.
+	cfg := config.Defaults()
+	ifacesWithRoles := NewCollector(withRoleSelectors(cfg, ifaces), nil).GatherInterfaces()
 
 	wanFound := false
 	lanFound := false
 
-	for _, iface := range ifaces {
+	for _, iface := range ifacesWithRoles {
 		if iface.Role == "WAN" {
 			wanFound = true
 			if iface.StableID == "" || iface.StableID == iface.Name {
@@ -276,8 +304,23 @@ func TestDataCorrectnessStableIdentities(t *testing.T) {
 	}
 
 	if !wanFound || !lanFound {
-		t.Errorf("missing WAN or LAN in gathered interfaces")
+		t.Errorf("configured WAN/LAN selectors did not match any observed interface")
 	}
+}
+
+// withRoleSelectors points the config's WAN and LAN at two interfaces this
+// host actually has.
+//
+// Two distinct interfaces are required because a role must be unambiguous:
+// if both selectors resolved to the same NIC, the test would pass while
+// proving nothing about the matching.
+func withRoleSelectors(cfg config.Config, observed []InterfaceMonitoring) config.Config {
+	if len(observed) < 2 {
+		return cfg
+	}
+	cfg.Network.WAN = observed[0].StableID
+	cfg.Network.LAN = observed[1].StableID
+	return cfg
 }
 
 func TestVLANAndIsolationDataModel(t *testing.T) {
