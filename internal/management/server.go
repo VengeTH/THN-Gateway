@@ -39,6 +39,16 @@ func NewServer(cfg config.Config, store *state.Store) (*Server, error) {
 	am := NewAuthManager(cfg.Management.SessionTTL)
 	col := NewCollector(cfg, store)
 
+	// Install the operator credential from configuration, if one was given.
+	//
+	// An error here is returned rather than swallowed: a password that was
+	// supplied but could not be hashed means the operator believes the
+	// console is protected and it is not, which is the one condition this
+	// package exists to prevent.
+	if err := am.BootstrapOperator(cfg.Management.OperatorUsername, cfg.Management.OperatorPassword); err != nil {
+		return nil, fmt.Errorf("management: installing operator credential: %w", err)
+	}
+
 	s := &Server{
 		cfg:        cfg,
 		store:      store,
@@ -280,6 +290,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// No credential configured is a distinct condition from a wrong password,
+	// and it is reported as such.
+	//
+	// Returning "Invalid credentials" here would send an operator to reset a
+	// password that does not exist, when what actually needs doing is adding
+	// one. An earlier build hid this by seeding default accounts, so the
+	// condition was unreachable by construction.
+	if !s.auth.HasUsers() {
+		s.recordAudit(r, req.Username, RoleViewer, "login_unconfigured", "auth",
+			"No operator credential is configured on this gateway", false)
+		respondJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":   "management is not configured",
+			"detail": "no operator credential exists. set management.operator_username and " +
+				"management.operator_password in the gateway configuration, then restart the management service.",
+		})
 		return
 	}
 

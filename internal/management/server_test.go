@@ -23,6 +23,12 @@ func testServer(t *testing.T) (*Server, *state.Store) {
 	cfg.Management.AllowedNetworks = []string{"10.10.99.0/24", "10.77.0.0/24", "127.0.0.0/8"}
 	cfg.Management.WANAccess = false
 
+	// Credentials come from configuration. The build no longer seeds any
+	// account, so a server under test that needs to authenticate must be
+	// given one — which is exactly the shape production is in.
+	cfg.Management.OperatorUsername = "operator"
+	cfg.Management.OperatorPassword = "test-operator-password"
+
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test_state.db")
 	st, err := state.Open(dbPath)
@@ -123,8 +129,27 @@ func TestAuthenticationAndRoleSeparation(t *testing.T) {
 		t.Fatalf("expected 401 Unauthorized for unauthenticated operator action, got %d", wBlock.Code)
 	}
 
-	// 2. Authenticate as Viewer
-	loginViewer := []byte(`{"username": "viewer", "password": "thn-viewer-password"}`)
+	// 2. Authenticate as the configured operator
+	loginOp := []byte(`{"username": "operator", "password": "test-operator-password"}`)
+	reqLoginOp := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginOp))
+	reqLoginOp.RemoteAddr = "127.0.0.1:12345"
+	wLoginOp := httptest.NewRecorder()
+
+	handler.ServeHTTP(wLoginOp, reqLoginOp)
+	if wLoginOp.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for valid operator login, got %d: %s", wLoginOp.Code, wLoginOp.Body.String())
+	}
+
+	var opSess Session
+	if err := json.Unmarshal(wLoginOp.Body.Bytes(), &opSess); err != nil {
+		t.Fatalf("decoding session: %v", err)
+	}
+
+	// 3. A viewer session is no longer seeded by the build, so a lesser-privileged
+	// session is minted directly. Role separation is a property of the AUTH
+	// SYSTEM and is tested here regardless of how accounts are provisioned.
+	srv.auth.AddUser("viewer", "test-viewer-password", RoleViewer)
+	loginViewer := []byte(`{"username": "viewer", "password": "test-viewer-password"}`)
 	reqLoginViewer := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginViewer))
 	reqLoginViewer.RemoteAddr = "127.0.0.1:12345"
 	wLoginViewer := httptest.NewRecorder()
@@ -139,7 +164,7 @@ func TestAuthenticationAndRoleSeparation(t *testing.T) {
 		t.Fatalf("decoding session: %v", err)
 	}
 
-	// 3. Viewer attempts operator block action -> Denied
+	// 4. Viewer attempts operator block action -> Denied
 	reqViewerBlock := httptest.NewRequest(http.MethodPost, "/api/v1/clients/client-test/block", bytes.NewReader(blockPayload))
 	reqViewerBlock.RemoteAddr = "127.0.0.1:12345"
 	reqViewerBlock.Header.Set("Authorization", "Bearer "+viewerSess.Token)
@@ -148,22 +173,6 @@ func TestAuthenticationAndRoleSeparation(t *testing.T) {
 	handler.ServeHTTP(wViewerBlock, reqViewerBlock)
 	if wViewerBlock.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401/403 for viewer attempting operator block, got %d", wViewerBlock.Code)
-	}
-
-	// 4. Authenticate as Operator
-	loginOp := []byte(`{"username": "operator", "password": "thn-operator-password"}`)
-	reqLoginOp := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginOp))
-	reqLoginOp.RemoteAddr = "127.0.0.1:12345"
-	wLoginOp := httptest.NewRecorder()
-
-	handler.ServeHTTP(wLoginOp, reqLoginOp)
-	if wLoginOp.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for valid operator login, got %d", wLoginOp.Code)
-	}
-
-	var opSess Session
-	if err := json.Unmarshal(wLoginOp.Body.Bytes(), &opSess); err != nil {
-		t.Fatalf("decoding session: %v", err)
 	}
 
 	// 5. Operator executes block action -> Permitted

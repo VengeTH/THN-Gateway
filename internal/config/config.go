@@ -629,6 +629,27 @@ type ManagementConfig struct {
 
 	// SessionTTL defines duration before an authenticated operator session expires.
 	SessionTTL time.Duration `yaml:"session_ttl"`
+
+	// OperatorUsername is the single administrator account permitted to log in
+	// to the management plane.
+	//
+	// There is no default. An earlier build seeded three accounts with fixed
+	// passwords, which meant every deployment shipped known working
+	// credentials in its source tree; see NewAuthManager. An operator who
+	// supplies a username here gets an admin account with that password.
+	//
+	// Empty means NO account exists and the management plane is effectively
+	// unauthenticated. That is reported, not hidden, so it reads as a
+	// configuration to complete rather than a login to retry.
+	OperatorUsername string `yaml:"operator_username"`
+
+	// OperatorPassword is the password for OperatorUsername.
+	//
+	// Hashed with PBKDF2-HMAC-SHA256 on load and never persisted in clear, but
+	// note that a value in this file is still a value in a file that can be
+	// read by anyone who can read the configuration. It should be a real
+	// password, and the file should not be world-readable.
+	OperatorPassword string `yaml:"operator_password"`
 }
 
 // NetworkDefinition establishes the model for future VLANs and client-isolation zones.

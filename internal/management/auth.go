@@ -53,6 +53,25 @@ type AuthManager struct {
 }
 
 // NewAuthManager creates an AuthManager with a default session TTL.
+//
+// # Why there are no built-in accounts
+//
+// This previously seeded three users with fixed passwords —
+// admin/thn-admin-password and two lesser roles — on every construction, so
+// any host running this build had three working logins whose credentials are
+// published in the source. Salted or not, a credential that ships in the
+// repository is a credential that is public.
+//
+// It also cannot be defended as a development convenience, because the thing
+// this build talks to is a gateway on a house LAN holding DHCP and NAT for
+// that house. The console is reachable by anything on the subnet, so a
+// default password is not a nuisance; it is an unauthenticated write path
+// into someone's network.
+//
+// So no account is created implicitly. Credentials come from the
+// configuration, and an empty configuration means an unauthenticated
+// management plane that says so — which is the state an operator can see and
+// act on, rather than one they have to discover from a failed login.
 func NewAuthManager(ttl time.Duration) *AuthManager {
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
@@ -62,11 +81,48 @@ func NewAuthManager(ttl time.Duration) *AuthManager {
 		sessions: make(map[string]*Session),
 		ttl:      ttl,
 	}
-	// Bootstrap default system roles with cryptographically randomized salts
-	am.AddUser("admin", "thn-admin-password", RoleAdmin)
-	am.AddUser("operator", "thn-operator-password", RoleOperator)
-	am.AddUser("viewer", "thn-viewer-password", RoleViewer)
 	return am
+}
+
+// BootstrapOperator installs a single admin account from configuration.
+//
+// This is the supported way in: the operator supplies a username and
+// password at activation time rather than inheriting one written into the
+// binary. It is idempotent, so a restart does not reset the password and an
+// accidental second call cannot silently overwrite an existing operator.
+//
+// Called with empty values it does nothing, which is deliberate — a config
+// that names a user but no password must not fall back to a default.
+func (am *AuthManager) BootstrapOperator(username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || password == "" {
+		return nil
+	}
+
+	am.mu.Lock()
+	defer am.mu.Unlock()
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("hashing operator password: %w", err)
+	}
+	am.users[username] = User{
+		Username:     username,
+		PasswordHash: hash,
+		Role:         RoleAdmin,
+	}
+	return nil
+}
+
+// HasUsers reports whether any credential has been installed.
+//
+// The management plane consults this to decide whether to require
+// authentication. An empty store is a real state that must be reported as
+// unconfigured, not quietly treated as authenticated.
+func (am *AuthManager) HasUsers() bool {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	return len(am.users) > 0
 }
 
 // HashPassword hashes a password using PBKDF2-HMAC-SHA256 with 100,000 iterations.
