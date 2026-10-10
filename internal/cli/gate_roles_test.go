@@ -265,7 +265,7 @@ func TestAMissingInterfaceIsReportedRatherThanSubstituted(t *testing.T) {
 	if res.OK() {
 		t.Fatal("the resolution reported success for a nonexistent interface")
 	}
-	lan := roleGate(d, res, host.RoleLAN, cfg.Network.LAN)
+	lan := roleGate(d, res, host.RoleLAN, cfg.Network.LAN, productionLANPolicy())
 
 	// What the operator needs in order to act.
 	for _, want := range []string{
@@ -309,9 +309,9 @@ func TestAnUnassignedRoleIsDistinguishedFromAMissingOne(t *testing.T) {
 	}
 	d := host.FromSnapshot(snap)
 
-	unassigned := roleGate(d, host.Resolve(d, []host.Assignment{}), host.RoleLAN, "")
+	unassigned := roleGate(d, host.Resolve(d, []host.Assignment{}), host.RoleLAN, "", productionLANPolicy())
 	missing := roleGate(d, host.Resolve(d, []host.Assignment{{Role: host.RoleLAN, Selector: "nope0"}}),
-		host.RoleLAN, "nope0")
+		host.RoleLAN, "nope0", productionLANPolicy())
 
 	if unassigned.Satisfied || missing.Satisfied {
 		t.Fatal("an unresolved role reported satisfied")
@@ -392,7 +392,7 @@ func TestEveryUnresolvedRoleReasonIsActionable(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			g := roleGate(d, host.Resolve(d, c.assign), c.role, c.asked)
+			g := roleGate(d, host.Resolve(d, c.assign), c.role, c.asked, productionLANPolicy())
 
 			if g.Satisfied {
 				t.Fatalf("role %s reported satisfied", c.role)
@@ -425,8 +425,8 @@ func TestAnUninspectableHostBlocksBothRolesRatherThanPassingThem(t *testing.T) {
 	d := host.FromSnapshot(&network.Snapshot{Supported: false, Platform: "windows"})
 	res := host.Resolve(d, nil)
 
-	wan := roleGate(d, res, host.RoleWAN, "")
-	lan := roleGate(d, res, host.RoleLAN, "")
+	wan := roleGate(d, res, host.RoleWAN, "", productionLANPolicy())
+	lan := roleGate(d, res, host.RoleLAN, "", productionLANPolicy())
 
 	if wan.Satisfied || lan.Satisfied {
 		t.Fatal("an uninspected host satisfied a role gate")

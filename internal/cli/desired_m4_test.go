@@ -142,7 +142,7 @@ func TestM4MissingWANLeavesRoleUnresolvedAndRefusesSubstitution(t *testing.T) {
 	}
 
 	// Readiness evaluation must report wan-present gate as unsatisfied
-	gate := roleGate(dev, res, host.RoleWAN, "")
+	gate := roleGate(dev, res, host.RoleWAN, "", productionLANPolicy())
 	if gate.Satisfied {
 		t.Error("wan-present gate must not be satisfied when WAN is unassigned")
 	}
@@ -186,7 +186,7 @@ func TestM4MissingLANLeavesRoleUnresolvedAndNATPending(t *testing.T) {
 	}
 
 	// Readiness gate
-	gate := roleGate(dev, res, host.RoleLAN, "")
+	gate := roleGate(dev, res, host.RoleLAN, "", productionLANPolicy())
 	if gate.Satisfied {
 		t.Error("lan-identified gate must not be satisfied when LAN is unassigned")
 	}

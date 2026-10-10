@@ -148,21 +148,39 @@ func storedAssignments(cfg config.Config) (string, []state.InterfaceAssignment) 
 // The structured form of those facts already exists as host.Problem. This
 // function only flattens one into a sentence — it does not decide anything, so
 // there is exactly one place where the decision lives.
-func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string) activation.RoleGate {
+func roleGate(d *host.Device, res host.Resolution, r host.Role, asked string, pol lanPolicy) activation.RoleGate {
 	g := activation.RoleGate{Role: string(r), Selector: asked}
 
 	if iface, ok := res.Assigned[r]; ok {
-		// Production Gigabit LAN prerequisite (Phase 2.3 & 2.4):
-		// Fast Ethernet (100 Mbps) or the rejected 100M USB adapter (enx00e099001812) cannot satisfy production LAN.
+		// Production Gigabit LAN prerequisite, with a named, explicit
+		// development exception.
+		//
+		// The speed rule below is unchanged and unconditional in effect: a
+		// sub-Gigabit wired LAN adapter does not satisfy the production LAN
+		// role. What is new is that the operator may approve ONE adapter by
+		// name, in configuration, for development use.
+		//
+		// The exception is keyed on the interface's stable identity, never
+		// on its name alone and never on its speed alone, so enabling it for
+		// one adapter does not admit every other Fast Ethernet adapter that
+		// happens to be plugged in later.
 		if r == host.RoleLAN {
-			if iface.SystemName == "enx00e099001812" || strings.HasPrefix(iface.ID, "hw:9d216fa27c73ed97") {
-				g.Satisfied = false
-				g.Interface = iface.SystemName
-				g.Reason = fmt.Sprintf("interface %s (%s) is a 100 Mbps Fast Ethernet adapter and is explicitly rejected for production LAN use; install the dedicated Gigabit USB adapter",
-					iface.SystemName, iface.ID)
-				return g
-			}
 			if iface.Physical && iface.Kind == host.KindEthernet && iface.SpeedMbps > 0 && iface.SpeedMbps < 1000 {
+				if pol.permitsFastEthernetLAN(iface) {
+					g.Satisfied = true
+					g.Interface = iface.SystemName
+					g.Capability = string(host.CapRouting)
+					g.Reason = fmt.Sprintf(
+						"role %s is filled by %s (identity %s) under an EXPLICIT DEVELOPMENT OVERRIDE: "+
+							"this %d Mbps Fast Ethernet adapter is approved by name for development and "+
+							"home-lab use only. LAN throughput is limited to 100 Mbps, and this "+
+							"configuration is NOT approved for production deployment. "+
+							"To restore production policy set "+
+							"activation.development.allow_fast_ethernet_lan: false",
+						r, iface.SystemName, iface.ID, iface.SpeedMbps)
+					g.DevelopmentOverride = true
+					return g
+				}
 				g.Satisfied = false
 				g.Interface = iface.SystemName
 				g.Reason = fmt.Sprintf("interface %s operates at %d Mbps; production LAN requires a Gigabit Ethernet interface (>= 1000 Mbps); install the dedicated Gigabit USB adapter",
@@ -340,6 +358,24 @@ func printReadiness(env *Env, path string, gates activation.GateResult, deploy d
 		env.printf("  %-6s %-22s %s\n", mark, g.Name, detail)
 	}
 
+	// A development override is printed as a banner, above the gate table
+	// rather than inside it, so it cannot be read past. A gate marked "ok"
+	// that was satisfied by an exception is the single most misreadable state
+	// this report can be in.
+	if overridden := overriddenGates(gates); len(overridden) > 0 {
+		env.printf("\n")
+		env.printf("!! DEVELOPMENT OVERRIDE ACTIVE\n")
+		for _, name := range overridden {
+			env.printf("   gate %q passed only because an operator-approved\n", name)
+			env.printf("   development exception applied to this host.\n")
+		}
+		env.printf("\n")
+		env.printf("   LAN throughput is limited to Fast Ethernet (100 Mbps).\n")
+		env.printf("   This configuration is NOT approved for production\n")
+		env.printf("   deployment. Restore production policy with:\n")
+		env.printf("     activation.development.allow_fast_ethernet_lan: false\n")
+	}
+
 	if len(gates.Blocking) > 0 {
 		env.printf("\nBlocking\n")
 		for _, b := range gates.Blocking {
@@ -364,6 +400,15 @@ func printReadiness(env *Env, path string, gates activation.GateResult, deploy d
 	env.printf("  not implemented: %s\n", stageList(activation.UnsupportedStages()))
 
 	env.printf("\nCurrent network remains untouched.\n")
+}
+
+// overriddenGates names the gates that passed on a development exception.
+//
+// It reads the override marker rather than the gate reason, so it stays
+// correct if the wording of that reason changes and cannot be fooled by a
+// production gate whose reason happens to mention development.
+func overriddenGates(gates activation.GateResult) []string {
+	return gates.OverriddenGates()
 }
 
 // blockingAdvice says which of the blocking gates this host, this document or

@@ -3,14 +3,50 @@ gateway:
   name: thn-gateway
   generation: 1
 network:
-  # Stable hardware identity for physical onboard Intel Gigabit Ethernet (enp0s31f6)
-  wan: hw:ba41136cb1291dff
-  # Stable hardware identity for existing USB Ethernet adapter (enx00e099001812)
-  # NOTE: Physical lab preflight identifies this adapter as Fast Ethernet (100M only).
-  # The dedicated Gigabit USB adapter must be attached before physical activation.
-  lan: hw:9d216fa27c73ed97
+  # Onboard Intel I219-LM (enp0s31f6), MAC 7c:61:70:fd:7f:34.
+  # VERIFY ON THE HOST with `thn discover` before activating: a selector that
+  # matches nothing blocks activation rather than silently doing the wrong
+  # thing, but it will still cost you a run.
+  wan: hw:7c6170fd7f34317a
+  # USB Ethernet adapter enx00e099001812, MAC 00:e0:99:00:18:12, USB 0fe6:9900.
+  # This link is 10/100 Mbps only. See the activation.development block below.
+  lan: hw:2c886f45ad0cb12f
   lan_prefix: 10.77.0.1/24
   mtu: 1500
+activation:
+  # Must remain true. THN is developed remotely against an unattended device,
+  # so holding root over SSH must not by itself be enough to activate. Setting
+  # this to false is a validation error, not a warning.
+  require_physical_presence: true
+
+  # ---------------------------------------------------------------------------
+  # DEVELOPMENT ONLY — NOT PRODUCTION APPROVED
+  # ---------------------------------------------------------------------------
+  # The LAN above is a 100 Mbps Fast Ethernet adapter. THN's production policy
+  # requires a Gigabit wired LAN, and that policy is unchanged by this block:
+  # remove it and the adapter is rejected again.
+  #
+  # What this does is let ONE adapter, named by stable identity, satisfy the
+  # LAN role on this host so the rest of the system can be exercised on the
+  # hardware actually present. It relaxes nothing else — not the firewall, not
+  # NAT, not the management-path check, not rollback readiness, not physical
+  # presence.
+  #
+  # CONSEQUENCES YOU ARE ACCEPTING:
+  #   * LAN throughput is capped at ~94 Mbps of real payload (100 Mbps line rate
+  #     minus Ethernet framing overhead). Clients behind this adapter cannot
+  #     exceed that, no matter what the WAN link can do.
+  #   * A CAKE qdisc configured at 100000 kbps download is being shaped onto a
+  #     LAN that can never carry it. That is not harmful, but it is meaningless.
+  #   * This host must not be sold, deployed or left running unattended as a
+  #     customer-facing gateway.
+  #
+  # TO REVERT: set allow_fast_ethernet_lan to false (and delete the list), then
+  # install a Gigabit USB adapter and point network.lan at it.
+  development:
+    allow_fast_ethernet_lan: true
+    approved_fast_ethernet_lan:
+      - hw:2c886f45ad0cb12f
 nat:
   enabled: true
   masquerade:
@@ -19,12 +55,23 @@ nat:
 firewall:
   enabled: true
 qos:
-  enabled: true
+  # THN's own shaping stays OFF here.
+  #
+  # This is an independent blocker from the adapter: with qos.enabled=true the
+  # `subsystems-executable` gate refuses activation until twelve separate
+  # physical-enforcement gates have been signed off on real hardware, and
+  # activation is blocked whether or not the LAN adapter is approved.
+  #
+  # CAKE on this host is managed outside THN (it already runs independently),
+  # so asking THN to also own the qdisc would put two things in charge of one
+  # interface. Leave this false until THN's QoS sign-off is actually done.
+  enabled: false
   algorithm: cake
   interface: wan
   download_kbps: 100000
   upload_kbps: 20000
   overhead_percent: 10
+  # Retained for reference only; inert while enabled is false.
   clients:
     - id: client-a
       ip: 10.77.0.100

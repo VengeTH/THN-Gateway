@@ -556,6 +556,54 @@ type ActivationConfig struct {
 	// before any activation is permitted. This exists so that being logged in
 	// as root on a remote host is not by itself sufficient to activate.
 	RequirePhysicalPresence bool `yaml:"require_physical_presence"`
+
+	// Development carries relaxations an operator may opt into when bringing
+	// THN up on development or controlled home-lab hardware.
+	//
+	// # Why this block exists and what it is not
+	//
+	// Every default in this document is production policy. Relaxing one of
+	// them belongs in a block an operator has to write deliberately, name
+	// after what it relaxes, and cannot reach by setting a single flag.
+	//
+	// It is NOT a way to weaken production. Nothing here changes what the
+	// firewall, NAT, routing or rollback gates require; it changes exactly
+	// one hardware question — whether a slower-than-Gigabit LAN adapter may
+	// fill the LAN role — and only for adapters the operator named by stable
+	// identity.
+	//
+	// The default is the zero value, which permits nothing.
+	Development DevelopmentConfig `yaml:"development"`
+}
+
+// DevelopmentConfig holds the opt-in relaxations available for development and
+// controlled home-lab use.
+//
+// # Both fields are required together, deliberately
+//
+// AllowFastEthernetLAN without ApprovedFastEthernetLAN would be a blanket
+// bypass: every 100 Mbps adapter on the host would become acceptable because
+// a flag was set. Naming the adapters is what makes this an approval rather
+// than a category exemption, and the configuration validator refuses the
+// flag-without-a-list combination rather than letting it sit inert and
+// surprising.
+//
+// Requiring both also means an operator cannot relax the check by accident.
+// There is no single keystroke that does it, and the list is a thing they had
+// to read off `thn discover`.
+type DevelopmentConfig struct {
+	// AllowFastEthernetLAN permits a Fast Ethernet (sub-1000 Mbps) wired
+	// adapter to fill the LAN role.
+	//
+	// It only ever applies to the identities in ApprovedFastEthernetLAN.
+	// Unnamed adapters remain rejected exactly as they are in production.
+	AllowFastEthernetLAN bool `yaml:"allow_fast_ethernet_lan"`
+
+	// ApprovedFastEthernetLAN names the specific adapters the exception
+	// applies to, by stable identity (`hw:...`) or kernel name.
+	//
+	// It must not be empty when AllowFastEthernetLAN is true.
+	ApprovedFastEthernetLAN []string `yaml:"approved_fast_ethernet_lan"`
 }
 
 // ManagementConfig governs the management service, binding policy and roles.
@@ -1445,6 +1493,47 @@ func (c Config) Validate() ValidationResult {
 	if !c.Activation.RequirePhysicalPresence {
 		v.Add("activation.require_physical_presence", SeverityError,
 			"must remain true: THN is developed remotely against an unattended device, so root access alone must not be sufficient to activate")
+	}
+
+	// --- Activation development overrides ---
+
+	dev := c.Activation.Development
+
+	// A blanket relaxation is refused rather than accepted-and-ignored.
+	//
+	// If this were only a warning, the document would load, the flag would
+	// read as "development mode is on" in every report, and the adapters it
+	// would have covered would still be rejected by the gate. That is the
+	// worst of both outcomes: the operator believes a limit was lifted and
+	// the gate disagrees, with nothing to explain the disagreement.
+	if dev.AllowFastEthernetLAN && len(dev.ApprovedFastEthernetLAN) == 0 {
+		v.Add("activation.development.approved_fast_ethernet_lan", SeverityError,
+			"must name at least one interface when allow_fast_ethernet_lan is true; "+
+				"an unnamed list would permit every Fast Ethernet adapter on the host, "+
+				"which is the blanket bypass this setting exists to avoid. "+
+				"Run `thn discover` and list the exact interface identity")
+	}
+
+	// A list with no flag is a contradiction, not a harmless leftover. It
+	// reads as "these adapters were approved" and approves nothing.
+	for _, id := range dev.ApprovedFastEthernetLAN {
+		if !dev.AllowFastEthernetLAN {
+			v.Add("activation.development.approved_fast_ethernet_lan", SeverityError,
+				fmt.Sprintf("names %q but allow_fast_ethernet_lan is false; the list approves nothing. "+
+					"Set allow_fast_ethernet_lan to true, or remove the entry", id))
+		}
+		if strings.TrimSpace(id) == "" {
+			v.Add("activation.development.approved_fast_ethernet_lan", SeverityError,
+				"must not contain an empty entry")
+		}
+	}
+
+	if dev.AllowFastEthernetLAN && len(dev.ApprovedFastEthernetLAN) > 0 {
+		v.Add("activation.development", SeverityWarning,
+			"DEVELOPMENT MODE: a Fast Ethernet LAN adapter has been approved by name. "+
+				"LAN throughput is capped at 100 Mbps and this configuration is NOT approved "+
+				"for production deployment. Set allow_fast_ethernet_lan to false to restore "+
+				"production policy")
 	}
 
 	// --- Management ---

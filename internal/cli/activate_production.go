@@ -456,10 +456,15 @@ func productionGateInput(ev *activationEvidence, presence bool) activation.GateI
 	}
 
 	// Role gates, from the same resolution `thn discover` shows.
+	//
+	// The LAN policy is read from the same document as everything else, so
+	// an operator who approves one adapter for development does it in one
+	// place and it is visible in every command that reports a verdict.
+	pol := lanPolicyFromConfig(cfg)
 	_, stored := storedAssignments(cfg)
 	res := host.Resolve(ev.Device, ev.Assignments)
-	in.WAN = roleGate(ev.Device, res, host.RoleWAN, bindingSelector(cfg, stored, host.RoleWAN))
-	in.LAN = roleGate(ev.Device, res, host.RoleLAN, bindingSelector(cfg, stored, host.RoleLAN))
+	in.WAN = roleGate(ev.Device, res, host.RoleWAN, bindingSelector(cfg, stored, host.RoleWAN), pol)
+	in.LAN = roleGate(ev.Device, res, host.RoleLAN, bindingSelector(cfg, stored, host.RoleLAN), pol)
 
 	// Role conflicts: the document and the store disagree; the resolution
 	// found a collision; or roles landed on one interface.

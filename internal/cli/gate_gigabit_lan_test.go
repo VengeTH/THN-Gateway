@@ -79,6 +79,30 @@ func hostWith100MbpsUSBNIC() *host.Device {
 	return host.FromSnapshot(snap)
 }
 
+// hostWithTwoFastEthernetNICs returns a device carrying two DIFFERENT 100 Mbps
+// adapters.
+//
+// The development-override scoping test needs this: with only one Fast
+// Ethernet adapter present, "the other adapter was rejected" proves nothing,
+// because an unresolved selector is rejected by any policy at all. The claim
+// under test is that naming adapter A does not admit adapter B, so both have
+// to genuinely exist and both have to be assignable.
+func hostWithTwoFastEthernetNICs() *host.Device {
+	snap := &network.Snapshot{
+		CapturedAt: time.Now(),
+		Platform:   "linux",
+		Supported:  true,
+		Interfaces: []network.Interface{
+			simIfaceWithSpeed("enp0s31f6", 2, "7c:61:70:fd:7f:34", "ether", true, 1000),
+			simIfaceWithSpeed("enx00e099001812", 3, "2c:88:6f:45:ad:0c", "ether", true, 100), // approved by name
+			simIfaceWithSpeed("enx00e099001813", 4, "2c:88:6f:45:ad:0d", "ether", true, 100), // NOT approved
+			simIfaceWithSpeed("lo", 1, "", "loopback", true, 0),
+		},
+		Sysctl: []network.SysctlValue{{Key: "net.ipv4.ip_forward", Value: "1"}},
+	}
+	return host.FromSnapshot(snap)
+}
+
 // hostWithGigabitUSBNIC returns a device with the new Gigabit USB adapter attached.
 func hostWithGigabitUSBNIC() *host.Device {
 	snap := &network.Snapshot{
@@ -107,7 +131,7 @@ func TestGigabitLANGating_NoLANNIC_Blocked(t *testing.T) {
 		{Role: host.RoleWAN, Selector: wanID},
 	})
 
-	gate := roleGate(dev, res, host.RoleLAN, "")
+	gate := roleGate(dev, res, host.RoleLAN, "", productionLANPolicy())
 	if gate.Satisfied {
 		t.Errorf("expected lan-identified gate to be BLOCKED when no LAN NIC exists, got satisfied")
 	}
@@ -116,8 +140,13 @@ func TestGigabitLANGating_NoLANNIC_Blocked(t *testing.T) {
 	}
 }
 
-// TestGigabitLANGating_100MbpsLANNIC_Blocked verifies that the 100 Mbps USB adapter
-// (enx00e099001812) is explicitly rejected and blocks the lan-identified gate.
+// TestGigabitLANGating_100MbpsLANNIC_Blocked verifies that under PRODUCTION
+// policy the 100 Mbps Fast Ethernet adapter is rejected and blocks the
+// lan-identified gate.
+//
+// This is the default, and the default has to be tested on its own terms: it
+// is not "the override minus the override", it is the behaviour an operator
+// gets who has never heard of the override.
 func TestGigabitLANGating_100MbpsLANNIC_Blocked(t *testing.T) {
 	dev := hostWith100MbpsUSBNIC()
 	wanID := host.IDFor("7c:61:70:fd:7f:34")
@@ -128,12 +157,15 @@ func TestGigabitLANGating_100MbpsLANNIC_Blocked(t *testing.T) {
 		{Role: host.RoleLAN, Selector: usb100mID},
 	})
 
-	gate := roleGate(dev, res, host.RoleLAN, usb100mID)
+	gate := roleGate(dev, res, host.RoleLAN, usb100mID, productionLANPolicy())
 	if gate.Satisfied {
-		t.Errorf("CRITICAL SECURITY DEFECT: 100 Mbps USB adapter (enx00e099001812) satisfied the production LAN gate")
+		t.Errorf("CRITICAL SAFETY DEFECT: a 100 Mbps adapter satisfied the production LAN gate")
 	}
-	if !strings.Contains(gate.Reason, "Gigabit") || !strings.Contains(gate.Reason, "rejected") {
-		t.Errorf("expected explicit Gigabit rejection reason, got %q", gate.Reason)
+	if gate.DevelopmentOverride {
+		t.Errorf("production policy reported a development override")
+	}
+	if !strings.Contains(gate.Reason, "Gigabit") {
+		t.Errorf("expected the reason to name the Gigabit requirement, got %q", gate.Reason)
 	}
 }
 
@@ -164,7 +196,7 @@ func TestGigabitLANGating_GigabitNICDiscovered_HardwarePrerequisiteSatisfied(t *
 		t.Errorf("AUTOMATIC ADOPTION DEFECT: unassigned gateway automatically adopted an interface as LAN")
 	}
 
-	unassignedGate := roleGate(dev, unassignedRes, host.RoleLAN, "")
+	unassignedGate := roleGate(dev, unassignedRes, host.RoleLAN, "", productionLANPolicy())
 	if unassignedGate.Satisfied {
 		t.Errorf("lan-identified must not be satisfied without an explicit assignment")
 	}
@@ -182,7 +214,7 @@ func TestGigabitLANGating_GigabitNICAssignedLAN_LanIdentifiedSatisfied(t *testin
 		{Role: host.RoleLAN, Selector: gigabitLANID},
 	})
 
-	gate := roleGate(dev, res, host.RoleLAN, gigabitLANID)
+	gate := roleGate(dev, res, host.RoleLAN, gigabitLANID, productionLANPolicy())
 	if !gate.Satisfied {
 		t.Errorf("expected lan-identified gate to be SATISFIED with Gigabit adapter assigned, got: %s", gate.Reason)
 	}
@@ -207,8 +239,8 @@ func TestGigabitLANGating_BothWANAndLANAssigned_RolePrerequisitesSatisfied(t *te
 		{Role: host.RoleLAN, Selector: gigabitLANID},
 	})
 
-	wanGate := roleGate(dev, res, host.RoleWAN, wanID)
-	lanGate := roleGate(dev, res, host.RoleLAN, gigabitLANID)
+	wanGate := roleGate(dev, res, host.RoleWAN, wanID, productionLANPolicy())
+	lanGate := roleGate(dev, res, host.RoleLAN, gigabitLANID, productionLANPolicy())
 
 	if !wanGate.Satisfied {
 		t.Errorf("WAN gate failed: %s", wanGate.Reason)

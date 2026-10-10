@@ -165,6 +165,59 @@ func performActivation(env *Env, ev *activationEvidence, gates activation.GateRe
 // operator who simply did not pass the flag deserves to be told that, not to
 // be told a gate is unmet.
 func reportActivationRefusal(env *Env, gates activation.GateResult, confirmed, presence, dryRun bool, path string, ev *activationEvidence) ExitCode {
+	if dryRun && gates.AllSatisfied && confirmed && presence {
+		if env.IsJSON {
+			out := map[string]any{
+				"activated":         false,
+				"network_untouched": true,
+				"statement":         "Current network remains untouched.",
+				"reason":            "dry run: authorization succeeded but nothing was applied",
+				"can_apply":         activation.CanApply(),
+				"gates":             gates,
+				"dry_run":           true,
+			}
+			if path != "" {
+				out["config"] = path
+			}
+			if ev != nil {
+				out["plan_id"] = ev.Plan.ID
+				out["management"] = ev.Management
+			}
+			if err := env.printJSON(out); err != nil {
+				env.errorf("thn activate: %v\n", err)
+				return ExitProblems
+			}
+			return ExitOK
+		}
+
+		env.printf("thn activate: dry run completed: all gates satisfied.\n\n")
+		env.printf("All activation safety gates satisfied.\n")
+		env.printf("Authorization and physical presence confirmed.\n")
+		env.printf("Nothing was changed (dry run).\n\n")
+
+		if overridden := gates.OverriddenGates(); len(overridden) > 0 {
+			env.printf("!! DEVELOPMENT OVERRIDE ACTIVE\n")
+			for _, name := range overridden {
+				env.printf("   gate %q passed only because an operator-approved\n", name)
+				env.printf("   development exception applied to this host.\n")
+			}
+			env.printf("\n")
+			env.printf("   LAN throughput is limited to Fast Ethernet (100 Mbps).\n")
+			env.printf("   This configuration is NOT approved for production\n")
+			env.printf("   deployment. Restore production policy with:\n")
+			env.printf("     activation.development.allow_fast_ethernet_lan: false\n\n")
+		}
+
+		env.printf("Ready for live activation:\n")
+		if path != "" {
+			env.printf("  thn activate --config %s --confirm --confirm-present\n\n", path)
+		} else {
+			env.printf("  thn activate --confirm --confirm-present\n\n")
+		}
+		env.printf("Current network remains untouched.\n")
+		return ExitOK
+	}
+
 	if env.IsJSON {
 		reason := "activation refused"
 		switch {
@@ -203,6 +256,19 @@ func reportActivationRefusal(env *Env, gates activation.GateResult, confirmed, p
 
 	env.errorf("thn activate: activation refused.\n\n")
 	env.errorf("Nothing was changed.\n\n")
+
+	if overridden := gates.OverriddenGates(); len(overridden) > 0 {
+		env.errorf("!! DEVELOPMENT OVERRIDE ACTIVE\n")
+		for _, name := range overridden {
+			env.errorf("   gate %q passed only because an operator-approved\n", name)
+			env.errorf("   development exception applied to this host.\n")
+		}
+		env.errorf("\n")
+		env.errorf("   LAN throughput is limited to Fast Ethernet (100 Mbps).\n")
+		env.errorf("   This configuration is NOT approved for production\n")
+		env.errorf("   deployment. Restore production policy with:\n")
+		env.errorf("     activation.development.allow_fast_ethernet_lan: false\n\n")
+	}
 
 	if !gates.AllSatisfied {
 		env.errorf("Blocking gates (%d):\n\n", len(gates.Blocking))
@@ -342,6 +408,13 @@ func printActivationOutcome(env *Env, ev *activationEvidence, res *execution.Exe
 		}
 		env.printf("\nThe gateway is serving as planned. Post-activation verification is\n")
 		env.printf("in docs/deployment-runbook.md; it does not depend on THN.\n")
+
+		if ev != nil && ev.Cfg.Activation.Development.AllowFastEthernetLAN {
+			env.printf("\n!! WARNING: Activated under DEVELOPMENT OVERRIDE (Fast Ethernet LAN, 100 Mbps max)\n")
+			env.printf("   This host is NOT approved for production deployment.\n")
+			env.printf("   Restore production policy by installing a Gigabit USB adapter and setting:\n")
+			env.printf("     activation.development.allow_fast_ethernet_lan: false\n")
+		}
 
 	case execution.StateRolledBack:
 		env.printf("Result: ROLLED BACK\n")
@@ -729,30 +802,44 @@ func runActivationPreflight(env *Env, args []string) ExitCode {
 	}
 
 	// 4. Gigabit LAN
-	hasGigabitLAN := false
+	//
+	// This reads the same policy as the lan-identified gate rather than
+	// re-deciding the question, because two places answering "is this
+	// adapter good enough?" is how a preflight report and an activation
+	// gate come to disagree in front of an operator.
+	lanVerdict := "BLOCKED"
 	lanDetail := "dedicated Gigabit USB adapter not yet installed or assigned"
 	if ev.Device != nil {
+		pol := lanPolicyFromConfig(cfg)
 		for _, iface := range ev.Device.Interfaces {
-			if iface.Role == host.RoleLAN && iface.Physical && iface.SpeedMbps >= 1000 {
-				hasGigabitLAN = true
+			if iface.Role != host.RoleLAN {
+				continue
+			}
+			if iface.Physical && iface.SpeedMbps >= 1000 {
+				lanVerdict = "PASS"
 				lanDetail = fmt.Sprintf("Gigabit interface %s (%d Mbps, %s) assigned to LAN", iface.SystemName, iface.SpeedMbps, iface.ID)
+				break
+			}
+			// A named development exception counts as satisfied here, but it
+			// is reported as its own verdict. "PASS" next to a 100 Mbps
+			// link would read as a production-ready gateway, which is the
+			// exact misreading this verdict exists to prevent.
+			if pol.permitsFastEthernetLAN(iface) {
+				lanVerdict = "DEV-ONLY"
+				lanDetail = fmt.Sprintf(
+					"DEVELOPMENT OVERRIDE: interface %s (%d Mbps, %s) is approved by name for "+
+						"development use. LAN throughput is capped at 100 Mbps and this host is NOT "+
+						"approved for production deployment.",
+					iface.SystemName, iface.SpeedMbps, iface.ID)
 				break
 			}
 		}
 	}
-	if hasGigabitLAN {
-		pGates = append(pGates, PreflightGate{
-			Name:    "Gigabit LAN",
-			Verdict: "PASS",
-			Detail:  lanDetail,
-		})
-	} else {
-		pGates = append(pGates, PreflightGate{
-			Name:    "Gigabit LAN",
-			Verdict: "BLOCKED",
-			Detail:  lanDetail,
-		})
-	}
+	pGates = append(pGates, PreflightGate{
+		Name:    "Gigabit LAN",
+		Verdict: lanVerdict,
+		Detail:  lanDetail,
+	})
 
 	// 5. QoS executable
 	if !cfg.QoS.Enabled {
@@ -820,9 +907,15 @@ func runActivationPreflight(env *Env, args []string) ExitCode {
 		})
 	}
 
+	// DEV-ONLY is a satisfied gate that was satisfied through a deliberate
+	// development exception. It does not block — the lan-identified gate
+	// above already passed on the same policy, and a preflight that blocked
+	// here while activation proceeded would be reporting two different
+	// answers to one question. It is still surfaced in the output so nobody
+	// reads the report without seeing it.
 	allPass := true
 	for _, g := range pGates {
-		if g.Verdict != "PASS" {
+		if g.Verdict != "PASS" && g.Verdict != "DEV-ONLY" {
 			allPass = false
 		}
 	}

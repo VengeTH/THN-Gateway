@@ -179,6 +179,15 @@ type Gate struct {
 	Satisfied bool
 	// Reason explains why it is not satisfied, when it is not.
 	Reason string
+
+	// DevelopmentOverride reports that this gate holds only because an
+	// operator-approved development exception applied to it.
+	//
+	// It is carried onto the gate so that a report can distinguish "this
+	// requirement is genuinely met" from "this requirement was deliberately
+	// relaxed for this host" without parsing prose. An operator who cannot
+	// tell those apart will read a development build as production-ready.
+	DevelopmentOverride bool `json:"development_override,omitempty"`
 }
 
 // GateResult reports the outcome of evaluating all gates.
@@ -191,8 +200,36 @@ type GateResult struct {
 	Blocking []string `json:"blocking,omitempty"`
 }
 
-// Evaluate runs the standard gate set for an activation request.
+// GatesBlockedOn reports whether a named gate is currently blocking.
 //
+// A caller that needs to assert one specific gate is refusing — rather than
+// asserting on the whole result — should ask this, because the gate set grows
+// and a test written against AllSatisfied keeps passing for the wrong reason.
+func (r GateResult) GatesBlockedOn(name string) bool {
+	for _, b := range r.Blocking {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
+// OverriddenGates names the gates holding only because a development
+// exception applied to them.
+//
+// It is the query every reporting surface needs, so it lives here rather than
+// being re-derived from prose in each one.
+func (r GateResult) OverriddenGates() []string {
+	var out []string
+	for _, g := range r.Gates {
+		if g.Satisfied && g.DevelopmentOverride {
+			out = append(out, g.Name)
+		}
+	}
+	return out
+}
+
+// Evaluate runs the standard gate set for an activation request.
 // Even though this build cannot activate, the gates are evaluated for real so
 // that `thn status` can show an operator exactly how far they are from a
 // deployable gateway. That visibility is the point: the operator should learn
@@ -298,7 +335,12 @@ func EvaluateProduction(in GateInput) GateResult {
 		Name:        "lan-identified",
 		Description: "an interface satisfying the desired LAN role must be identified and attached",
 		Satisfied:   in.LAN.Satisfied,
-		Reason:      reasonUnless(in.LAN.Satisfied, in.LAN.Reason),
+		// Carried from the role gate so a report can state that this gate
+		// holds only because an operator approved a slower adapter for
+		// development use, rather than because the production hardware
+		// requirement was met.
+		DevelopmentOverride: in.LAN.DevelopmentOverride,
+		Reason:              reasonUnless(in.LAN.Satisfied, in.LAN.Reason),
 	})
 
 	gates = append(gates, Gate{
@@ -413,6 +455,16 @@ type RoleGate struct {
 	// Reason explains the verdict. It is required when unsatisfied, and
 	// optional but valuable when satisfied.
 	Reason string `json:"reason,omitempty"`
+
+	// DevelopmentOverride reports that this gate was satisfied ONLY because
+	// an operator-approved development exception applied.
+	//
+	// It exists because a satisfied gate and a normally-satisfied gate are
+	// different facts, and an operator reading a readiness report has no
+	// other way to tell them apart. A true here means the production
+	// requirement was deliberately relaxed for this host, and the reason
+	// above says so in words.
+	DevelopmentOverride bool `json:"development_override,omitempty"`
 }
 
 // GateInput carries the observed facts the gates evaluate.
