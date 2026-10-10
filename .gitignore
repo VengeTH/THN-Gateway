@@ -1,5 +1,13 @@
 # Build output
 bin/
+# `go build ./cmd/thn` drops a bare `thn` in the cwd. The ignores below only
+# covered the explicitly-named release artefacts, so a 20 MB binary sat
+# untracked at the repo root waiting for a `git add -A`. Match any build
+# output of the gateway binary, whatever it is named or which OS it is for.
+/thn
+/thn.exe
+thn-linux-amd64
+thn-darwin-arm64
 
 # Go workspace / vendored deps
 vendor/
@@ -13,8 +21,6 @@ vendor/
 .DS_Store
 Thumbs.db
 *.swp
-thn-linux-amd64
-thn.exe
 
 # Next.js console (ui/). The Go module ignores it: no .go files in that tree.
 # node_modules and .next must never be committed - both are large and the lockfile
@@ -23,3 +29,15 @@ ui/node_modules/
 ui/.next/
 ui/out/
 ui/*.tsbuildinfo
+
+# NOTE on ui/package-lock.json
+#
+# Do not run `npm install` on the gateway box to "fix" dependencies. `npm ci`
+# installs exactly what the lockfile pins and never rewrites it.
+#
+# `npm install` rewrites this file, and two npm versions disagree about its
+# contents: the lockfile carries `libc` fields for Linux-only optional
+# dependencies that npm 10.9 writes and npm 10.8 does not. A developer on
+# 10.9 and the box on 10.8 will each strip the other's fields, which leaves
+# each with a dirty lockfile and makes the next `git pull` refuse to merge.
+# Regenerate it deliberately, on one machine, and commit the result.
