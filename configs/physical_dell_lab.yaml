@@ -53,15 +53,12 @@ qos:
   download_kbps: 100000
   upload_kbps: 20000
   overhead_percent: 10
-  # Retained for reference only; inert while enabled is false.
-  clients:
-    - id: client-a
-      ip: 10.77.0.100
-      download_kbps: 20000
-      upload_kbps: 5000
-      priority: high
-    - id: client-b
-      ip: 10.77.0.101
-      download_kbps: 30000
-      upload_kbps: 10000
-      priority: normal
+  # Client policies can be configured here once neighbors are onboarded.
+  # Example:
+  # clients:
+  #   - id: neighbor-1
+  #     ip: 10.77.0.100
+  #     download_kbps: 20000
+  #     upload_kbps: 5000
+  #     priority: high
+  clients: []
