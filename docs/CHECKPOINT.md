@@ -80,6 +80,15 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
   - `add rule inet thn input udp dport 41641 accept`
   - `add rule inet thn input tcp dport 22 accept`
 
+### Phase 8: Real Telemetry & Dynamic Client Discovery (Removal of Mock Placeholders)
+- **Problem**: `thn clients` and `thn monitoring` displayed hardcoded placeholder devices (`Mom-iPhone`, `Neighbor-PC`), fake RAM (`0 MB / 7 MB`), fake storage (`12 GB / 64 GB`), fake CPU load (`14.2%`), and fake WAN stable IDs. Running without `--config` also threw `permission denied` if `/etc/thn/config.yaml` was root-only.
+- **Fix**:
+  - Completely removed hardcoded placeholder clients in [internal/management/gather.go](internal/management/gather.go).
+  - Implemented live DHCP lease discovery from `/var/lib/misc/dnsmasq.leases` and live kernel ARP parsing from `/proc/net/arp`.
+  - Implemented real system telemetry: real RAM from `/proc/meminfo`, real CPU load from `/proc/loadavg`, real root storage from `syscall.Statfs`, and real CPU temperature from `/sys/class/thermal/thermal_zone0/temp`.
+  - Added flag parsing (`--config <path>`) to `thn monitoring`, `thn clients`, and `thn events` in [internal/cli/management_commands.go](internal/cli/management_commands.go).
+  - Commented out placeholder QoS clients in [configs/physical_dell_lab.yaml](configs/physical_dell_lab.yaml) so only real connected devices appear.
+
 ---
 
 ## 3. Git Commit History Reference
@@ -93,6 +102,8 @@ Authored 12 exhaustive, code-verified technical documentation files under [docs/
 | `44159d3` | `fix(firewall): permit Tailscale tunnel and WireGuard port in input chain` |
 | `dbd251b` | `docs: add master checkpoint document and update documentation index` |
 | `834d3fb` | `fix(execution): add management input rules for Tailscale and SSH in applyTHNTable` |
+| `523bc9c` | `fix(management): remove hardcoded mock clients and telemetry, read live dnsmasq leases and system stats` |
+| `03ad8c9` | `chore(config): empty placeholder clients list in physical lab configuration` |
 
 ---
 
